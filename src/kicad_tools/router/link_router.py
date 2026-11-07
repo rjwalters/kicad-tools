@@ -795,6 +795,7 @@ def explain_link_failure(
     line = LineString([a.point, b.point]) if a.point != b.point else Point(a.point)
     half_w = rules.trace_width / 2
     best: tuple[float, dict[str, Any]] | None = None
+    near: list[tuple[float, str, int, Any, float]] = []  # corridor candidates
     for it in model.items:
         if it.net == net_number:
             continue
@@ -803,6 +804,7 @@ def explain_link_failure(
             if allowed_layers is not None and layer not in allowed_layers:
                 continue
             d = line.distance(geom)
+            near.append((d, layer, it.net, geom, rules.clearance_for(it.net)))
             slack = d - need
             if best is None or slack < best[0]:
                 name = getattr(pcb.nets.get(it.net), "name", "") or f"net {it.net}"
@@ -819,7 +821,78 @@ def explain_link_failure(
     out: dict[str, Any] = {"reason": "no clearance-legal route inside the search window"}
     if best is not None:
         out["blocker"] = best[1]
+    bound = _corridor_bound(pcb, rules, near, line)
+    if bound is not None:
+        out["corridor"] = bound
+        out["reason"] = (
+            f"corridor too narrow: {bound['net_a']} and {bound['net_b']} ({bound['layer']}) "
+            f"are {bound['gap_mm']:.3f} mm apart but the link needs "
+            f">= {bound['required_mm']:.3f} mm "
+            f"({bound['clearance_a_mm']:.3f} + {bound['clearance_b_mm']:.3f} clearance "
+            f"+ {rules.trace_width:.3f} width)"
+        )
     return out
+
+
+def _crosses_line(across: Any, link_line: Any) -> bool:
+    """True when ``across`` is more perpendicular than parallel to ``link_line``."""
+    (ax, ay), (bx, by) = across.coords[0], across.coords[-1]
+    (lx1, ly1), (lx2, ly2) = link_line.coords[0], link_line.coords[-1]
+    ux, uy = bx - ax, by - ay
+    vx, vy = lx2 - lx1, ly2 - ly1
+    nu, nv = math.hypot(ux, uy), math.hypot(vx, vy)
+    if nu == 0 or nv == 0:
+        return False
+    return bool(abs(ux * vx + uy * vy) / (nu * nv) < 0.5)
+
+
+def _corridor_bound(
+    pcb: PCB,
+    rules: LinkRouteRules,
+    near: list[tuple[float, str, int, Any, float]],
+    link_line: Any,
+) -> dict[str, Any] | None:
+    """The geometric bound when two foreign items flank the link too tightly (#8546).
+
+    Two foreign conductors on one layer, both near the straight a-b line and on
+    opposite sides of it, leave a corridor of ``gap``.  The track fits only if
+    ``gap >= clearance_a + clearance_b + width``; when it does not, no router
+    could succeed on that layer and the bound is a better answer than "no route".
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import nearest_points
+
+    best: tuple[float, dict[str, Any]] | None = None
+    cand = sorted(near, key=lambda t: t[0])[:16]
+    for i, (da, la, na, ga, ca) in enumerate(cand):
+        for db, lb, nb, gb, cb in cand[i + 1 :]:
+            if la != lb or na == nb:
+                continue
+            # Flanking means the connecting segment runs across the link, not along it.
+            p1, p2 = nearest_points(ga, gb)
+            across = LineString([p1, p2]) if p1 != p2 else None
+            if across is None or not _crosses_line(across, link_line):
+                continue
+            required = ca + cb + rules.trace_width
+            gap = ga.distance(gb)
+            if gap >= required - 1e-9 or da > required or db > required:
+                continue
+            slack = gap - required
+            if best is None or slack < best[0]:
+                name = lambda n: getattr(pcb.nets.get(n), "name", "") or f"net {n}"  # noqa: E731
+                best = (
+                    slack,
+                    {
+                        "layer": la,
+                        "net_a": name(na),
+                        "net_b": name(nb),
+                        "gap_mm": round(gap, 3),
+                        "required_mm": round(required, 3),
+                        "clearance_a_mm": round(ca, 3),
+                        "clearance_b_mm": round(cb, 3),
+                    },
+                )
+    return best[1] if best else None
 
 
 def _octilinear(p: tuple[float, float], q: tuple[float, float]) -> bool:

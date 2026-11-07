@@ -175,6 +175,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb lock-footprints": ["{pcb}", "--dry-run"],
     "pcb unlock-footprints": ["{pcb}", "--dry-run"],
     "pcb add-zone": ["{pcb}", "--net", "GND", "--layer", "B.Cu", "--dry-run"],
+    "pcb add-board-info": ["{pcb}", "--text", "REV A", "--auto", "--dry-run"],
     "pcb snap-rotation": ["{pcb}", "--dry-run"],
     "pcb edit-outline": ["{pcb}", "--list"],
     "pcb net-audit": ["{pcb}"],
