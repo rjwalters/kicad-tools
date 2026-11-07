@@ -5303,6 +5303,7 @@ def load_pcb_for_routing(
     placement_disposition: RoutingPlacementDisposition | None = None,
     project_path: str | Path | None = None,
     router_class_floors: bool = True,
+    record_decisions: bool = False,
 ) -> tuple[Autorouter, dict[str, int]]:
     """
     Load a KiCad PCB file and create an Autorouter with all components.
@@ -5989,6 +5990,9 @@ def load_pcb_for_routing(
         max_search_iterations=max_search_iterations,
         # Issue #3881: thread the tuned per-net iteration cap through too.
         per_net_iterations=per_net_iterations,
+        # Issue #8564: record routing decisions so ``kct decisions explain-route``
+        # can answer after a ``kct route`` run.
+        record_decisions=record_decisions,
         # Issue #4268: mesh-router strategy selector (default "grid").
         strategy=strategy,
         # Issue #6741: honour the pitch validated above; the #972 adaptive

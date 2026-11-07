@@ -88,3 +88,40 @@ def test_two_layer_board_says_nothing(caplog):
     assert ar.net_class_map["DAC_CLK"].trace_width == 0.2
     assert "impedance" not in _rationale(ar, 1)
     assert not [r for r in caplog.records if "impedance sizing" in r.getMessage()]
+
+
+_CLI_PCB = """(kicad_pcb (version 20240108) (generator "test") (generator_version "8.0")
+  (general (thickness 1.6) (legacy_teardrops no))
+  (paper "A4")
+  (layers
+    (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)
+    (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  (net 0 "") (net 1 "DAC_CLK")
+  (footprint "R" (layer "F.Cu") (at 105 105)
+    (property "Reference" "R1" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at -1 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "DAC_CLK")))
+  (footprint "R" (layer "F.Cu") (at 115 105)
+    (property "Reference" "R2" (at 0 0) (layer "F.SilkS"))
+    (pad "1" smd rect (at 1 0) (size 0.8 0.8) (layers "F.Cu" "F.Paste" "F.Mask") (net 1 "DAC_CLK")))
+  (gr_rect (start 100 100) (end 120 110) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+)
+"""
+
+
+def test_kct_route_persists_width_reason_for_explain_route(tmp_path, capsys):
+    """AC2 through the CLI: route, then ``explain-route`` states the reason."""
+    from kicad_tools.cli.route_cmd import main as route_main
+    from kicad_tools.explain.rationale import explain_route
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = tmp_path / "in.kicad_pcb"
+    pcb.write_text(_CLI_PCB)
+    out = tmp_path / "out.kicad_pcb"
+    rc = route_main(
+        [str(pcb), "-o", str(out), "--layers", "4", "--manufacturer", "jlcpcb", "--skip-drc"]
+    )
+    assert rc == 0, capsys.readouterr()
+    assert out.with_suffix(".decisions.json").exists()
+    text = explain_route("DAC_CLK", PCB.load(str(out))).rationale
+    assert "set by impedance sizing" in text, text

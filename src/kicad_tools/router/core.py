@@ -7119,10 +7119,7 @@ class Autorouter:
 
         # Calculate total route metrics
         total_length = sum(
-            sum(
-                ((s.end_x - s.start_x) ** 2 + (s.end_y - s.start_y) ** 2) ** 0.5
-                for s in route.segments
-            )
+            sum(((s.x2 - s.x1) ** 2 + (s.y2 - s.y1) ** 2) ** 0.5 for s in route.segments)
             for route in routes
         )
         total_vias = sum(len(route.vias) for route in routes)
@@ -7177,6 +7174,31 @@ class Autorouter:
             DecisionStore if record_decisions was enabled, None otherwise.
         """
         return self._decision_store
+
+    def record_missing_route_decisions(self) -> int:
+        """Record a decision for every routed net that has none yet.
+
+        Issue #8564: the negotiated-congestion flow commits routes without
+        going through the per-net hook, so ``kct route`` runs ended with an
+        empty store.  Call this just before :meth:`save_decisions`.
+
+        Returns:
+            Number of nets for which a decision was added.
+        """
+        if self._decision_store is None:
+            return 0
+        recorded = {n for d in self._decision_store._decisions for n in d.nets}
+        by_net: dict[int, list[Route]] = {}
+        for route in self.routes:
+            if route.net and (route.segments or route.vias):
+                by_net.setdefault(route.net, []).append(route)
+        added = 0
+        for net, routes in by_net.items():
+            if self.net_names.get(net, f"Net_{net}") in recorded:
+                continue
+            self._record_routing_decision(net, routes)
+            added += 1
+        return added
 
     def save_decisions(self, path: Path) -> bool:
         """Save routing decisions to a file.
@@ -8606,6 +8628,8 @@ class Autorouter:
             old_nc = before.get(net_name)
             if old_nc is None or new_nc is old_nc or net_name in self._width_provenance:
                 continue
+            if new_nc.trace_width == old_nc.trace_width:
+                continue  # target solved to the class width: nothing was overridden
             if new_nc.target_single_impedance is not None:
                 target = f"{new_nc.target_single_impedance:g}\u03a9 single-ended"
             elif new_nc.target_diff_impedance is not None:

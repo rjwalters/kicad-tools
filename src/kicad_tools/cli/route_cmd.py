@@ -5188,6 +5188,29 @@ def _lattice_search_failures(router: object | None) -> dict[str, str]:
     return out
 
 
+def _write_route_decisions(output_path: Path, router: object | None) -> Path | None:
+    """Persist recorded routing decisions next to the routed board (#8564).
+
+    ``kct decisions explain-route`` reads ``<board>.decisions.json``; without
+    this ``kct route`` never wrote one and every net answered "No decision
+    recorded".  Best-effort: a failed write never fails a route.
+    """
+    save = getattr(router, "save_decisions", None)
+    if not callable(save):
+        return None
+    try:
+        fill = getattr(router, "record_missing_route_decisions", None)
+        if callable(fill):
+            fill()
+        from kicad_tools.explain.decisions import get_decisions_path
+
+        path = get_decisions_path(Path(output_path))
+        return path if save(path) else None
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not save route decisions: %s", exc)
+        return None
+
+
 def _write_search_failures_sidecar(output_path: Path, router: object | None) -> Path | None:
     """Persist each net's last router search-failure reason (#6369, #7879).
 
@@ -5290,6 +5313,8 @@ def _write_access_witness_sidecar(
     from kicad_tools.router.pad_access_invariant import format_veto_report
 
     _write_search_failures_sidecar(output_path, router)
+
+    _write_route_decisions(output_path, router)
 
     journal = getattr(router, "commit_journal", None)
     if journal is None or not len(journal):
@@ -12664,6 +12689,8 @@ def route_with_layer_escalation(
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
                     project_path=Path(display_input_path).with_suffix(".kicad_pro"),
+                    # Issue #8564: record route decisions for `kct decisions explain-route`.
+                    record_decisions=True,
                     placement_disposition=for_attempt(args, attempt_skip_nets),
                     skip_nets=attempt_skip_nets,
                     rules=rules,
@@ -13357,6 +13384,7 @@ def route_with_layer_escalation(
     # ``--skip-drc`` run or one that routed no net left none (or a stale
     # one) and ``net-status --why`` fell back to geometry alone.
     _write_search_failures_sidecar(output_path, final_result.router)
+    _write_route_decisions(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -13885,6 +13913,8 @@ def route_with_rule_relaxation(
                 router, net_map = load_pcb_for_routing(
                     str(pcb_path),
                     project_path=Path(display_input_path).with_suffix(".kicad_pro"),
+                    # Issue #8564: record route decisions for `kct decisions explain-route`.
+                    record_decisions=True,
                     placement_disposition=for_attempt(args, skip_nets),
                     skip_nets=skip_nets,
                     rules=rules,
@@ -14335,6 +14365,7 @@ def route_with_rule_relaxation(
     # ``--skip-drc`` run or one that routed no net left none (or a stale
     # one) and ``net-status --why`` fell back to geometry alone.
     _write_search_failures_sidecar(output_path, final_result.router)
+    _write_route_decisions(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -16381,6 +16412,8 @@ def route_with_combined_escalation(
                     router, net_map = load_pcb_for_routing(
                         str(pcb_path),
                         project_path=Path(display_input_path).with_suffix(".kicad_pro"),
+                        # Issue #8564: record route decisions for `kct decisions explain-route`.
+                        record_decisions=True,
                         placement_disposition=for_attempt(args, skip_nets),
                         skip_nets=skip_nets,
                         rules=rules,
@@ -16871,6 +16904,7 @@ def route_with_combined_escalation(
     # ``--skip-drc`` run or one that routed no net left none (or a stale
     # one) and ``net-status --why`` fell back to geometry alone.
     _write_search_failures_sidecar(output_path, final_result.router)
+    _write_route_decisions(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -23218,6 +23252,8 @@ def _run_main_impl(args, parser, argv) -> int:
             router, net_map = load_pcb_for_routing(
                 str(pcb_path),
                 project_path=Path(display_input_path).with_suffix(".kicad_pro"),
+                # Issue #8564: record route decisions for `kct decisions explain-route`.
+                record_decisions=True,
                 placement_disposition=for_attempt(args, skip_nets),
                 skip_nets=skip_nets,
                 rules=rules,
@@ -24759,6 +24795,7 @@ def _run_main_impl(args, parser, argv) -> int:
         # ``--skip-drc`` run or one that routed no net left none (or a stale
         # one) and ``net-status --why`` fell back to geometry alone.
         _write_search_failures_sidecar(output_path, router)
+        _write_route_decisions(output_path, router)
 
     _rss.mark("post-save")
 
