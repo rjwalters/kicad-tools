@@ -424,7 +424,12 @@ class CreepageRepairer(ClearanceRepairer):
         witness: dict[str, Any],
         result: CreepageRepairResult,
     ) -> tuple[CreepageReport, int | None] | str:
-        """Apply, verify, and keep or roll back one translation."""
+        """Apply, verify, and keep or roll back one translation.
+
+        The DRC gate is **count-only**: a move is rejected when the error count
+        rises, so a move that fixes one violation while creating a different one
+        (same count) still passes.  Re-run ``kct check`` on the saved board.
+        """
         self._journal = []
         try:
             self._apply_nudge(cand.node, cand.kind, dx, dy, result=None, drag_connected=True)
@@ -454,12 +459,28 @@ class CreepageRepairer(ClearanceRepairer):
         old_pairs, new_pairs = _index_pairs(current), _index_pairs(new)
         key = _pair_key(pair.net_a, pair.net_b, pair.kind)
         target = new_pairs.get(key)
-        if target is not None and not (target.passed or target.waived):
+        if target is None:
+            # A pair that vanished from the census cannot be shown to have
+            # cleared (e.g. the move changed which nets are HV-adjacent), so it
+            # is "not verified", never "cleared with margin 0".
             self._rollback(journal)
+            return (
+                f"not verified: {pair.net_a} vs {pair.net_b} is absent from the "
+                "post-move census, so the move could not be shown to clear it"
+            )
+        if not (target.passed or target.waived):
+            self._rollback(journal)
+            island = ""
+            via = getattr(target, "via_floating", None) or getattr(pair, "via_floating", None)
+            if via:
+                island = (
+                    f"; the binding path runs through floating island {via} "
+                    "(the witness marks the direct gap, not the island path)"
+                )
             return (
                 f"not cleared: {pair.net_a} vs {pair.net_b} still "
                 f"{target.creepage_mm:.4f} mm creepage / {target.clearance_mm:.4f} mm clearance "
-                f"(margin {_headroom(target):+.4f} mm)"
+                f"(margin {_headroom(target):+.4f} mm){island}"
             )
         for okey, before in old_pairs.items():
             after = new_pairs.get(okey)
@@ -508,9 +529,9 @@ class CreepageRepairer(ClearanceRepairer):
                 dy_mm=dy,
                 witness=witness,
                 old_creepage_mm=pair.creepage_mm,
-                new_creepage_mm=target.creepage_mm if target else pair.creepage_mm,
+                new_creepage_mm=target.creepage_mm,
                 old_margin_mm=pair.margin_mm,
-                new_margin_mm=target.margin_mm if target else 0.0,
+                new_margin_mm=target.margin_mm,
                 dragged=max(dragged, 0),
             )
         )

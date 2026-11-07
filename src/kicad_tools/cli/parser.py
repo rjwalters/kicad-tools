@@ -5128,6 +5128,13 @@ def _add_repair_creepage_parser(subparsers) -> None:
     parser = subparsers.add_parser(
         "repair-creepage",
         help="Repair HV creepage shortfalls by translating wide traces/vias (keeps width)",
+        description=(
+            "Repair HV creepage shortfalls by translating wide traces/vias. The DRC "
+            "regression gate compares error COUNTS only: a move that fixes one "
+            "violation and creates another is not caught, so re-run `kct check` on the "
+            "result. Without -o the input board is overwritten, even on a partial repair "
+            "(exit 1)."
+        ),
     )
     add_repair_creepage_args(parser)
 

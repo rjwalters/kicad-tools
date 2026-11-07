@@ -254,3 +254,67 @@ def test_drc_failing_mid_run_rolls_back(tmp_path, capsys):
     assert rc == 1
     assert any("DRC could not be run" in r["reason"] for r in out["rejected"])
     assert pcb.read_text() == source
+
+
+def test_vanished_target_pair_is_not_verified(tmp_path, capsys):
+    source = _board()
+    pcb, argv = _setup(tmp_path, source)
+    base = build_census_fn(create_parser().parse_args(argv))
+    calls = []
+
+    def vanishing(p):
+        report = base(p)
+        calls.append(1)
+        if len(calls) > 1:
+            report.pairs = []  # target pair absent from the post-move census
+        return report
+
+    result = CreepageRepairer(pcb).repair(vanishing)
+    assert result.moves == []
+    assert any("not verified" in r.reason for r in result.rejected)
+    assert len(result.unrepaired) == 1 and "not verified" in result.unrepaired[0].reason
+    assert not result.success
+
+
+def _island_census(base, *, stays_failing: bool):
+    calls = []
+
+    def census(p):
+        report = base(p)
+        calls.append(1)
+        for pair in report.pairs:
+            pair.via_floating = "pad:FID1"
+            if stays_failing and len(calls) > 1:
+                pair.creepage_mm = pair.governing_creepage_mm - 0.05
+        return report
+
+    return census
+
+
+def test_via_floating_row_not_cleared_names_island(tmp_path):
+    pcb, argv = _setup(tmp_path, _board())
+    base = build_census_fn(create_parser().parse_args(argv))
+    result = CreepageRepairer(pcb).repair(_island_census(base, stays_failing=True))
+    assert result.moves == []
+    reason = result.unrepaired[0].reason
+    assert "floating island pad:FID1" in reason and "not cleared" in reason
+
+
+def test_via_floating_row_cleared_through_census_recheck(tmp_path):
+    pcb, argv = _setup(tmp_path, _board())
+    base = build_census_fn(create_parser().parse_args(argv))
+    result = CreepageRepairer(pcb).repair(_island_census(base, stays_failing=False))
+    assert result.success and len(result.moves) == 1
+
+
+def test_partial_repair_text_says_partially_repaired(tmp_path, capsys):
+    from kicad_tools.cli import repair_creepage_cmd as cmd
+    from kicad_tools.creepage.repair import CreepageMove, CreepageRepairResult, UnrepairedCreepage
+
+    move = CreepageMove(
+        "A", "B", "conductor", "F.Cu", "segment", "A", "u", 0, 0.1, {}, 1, 1.1, -0.1, 0.0
+    )
+    res = CreepageRepairResult(moves=[move], failing_before=2, failing_after=1)
+    res.unrepaired.append(UnrepairedCreepage("C", "D", "conductor", "F.Cu", -0.1, "x", None))
+    cmd._print_text(res)
+    assert "PARTIALLY REPAIRED" in capsys.readouterr().out

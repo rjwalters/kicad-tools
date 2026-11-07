@@ -296,6 +296,11 @@ def _print_text(result) -> None:
         print(f"  UNREPAIRED: {u}")
     for n in result.notes:
         print(f"  Note: {n}")
+    if not result.success and result.moves and not result.dry_run:
+        print(
+            f"PARTIALLY REPAIRED: {len(result.moves)} move(s) were kept and written, but "
+            f"{len(result.unrepaired)} pair(s) could not be repaired."
+        )
     if result.success:
         print("OK" if result.moves or not result.failing_before else "OK (nothing to repair)")
     else:
