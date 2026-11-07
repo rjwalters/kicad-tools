@@ -80,6 +80,21 @@ def _crtyd_lines(
     return graphics
 
 
+def _crtyd_circle(
+    *,
+    radius: float,
+    center: tuple[float, float] = (0.0, 0.0),
+    layer: str = "F.CrtYd",
+) -> FootprintGraphic:
+    return FootprintGraphic(
+        graphic_type="circle",
+        layer=layer,
+        stroke_width=0.05,
+        center=center,
+        radius=radius,
+    )
+
+
 def _crtyd_poly(
     points: list[tuple[float, float]],
     *,
@@ -253,6 +268,56 @@ class TestCourtyardOverlap:
         )
         results = _run(_pcb_with(a, b))
         assert len(results.filter_by_rule(COURTYARD_RULE_ID)) == 1
+
+    def test_circle_courtyard_overlap_resolved(self):
+        """fp_circle courtyards resolve, so overlap is checked (#8540)."""
+        fid = _make_footprint(
+            reference="FID1", position=(0.0, 0.0), graphics=[_crtyd_circle(radius=1.0)]
+        )
+        other = _make_footprint(
+            reference="J1",
+            position=(1.5, 0.0),
+            graphics=[_crtyd_rect(start=(-1.0, -1.0), end=(1.0, 1.0))],
+        )
+        results = _run(_pcb_with(fid, other))
+        assert len(results.filter_by_rule(COURTYARD_RULE_ID)) == 1
+        assert results.filter_by_rule(COURTYARD_UNRESOLVED_RULE_ID) == []
+
+    def test_circle_courtyard_no_overlap_clean(self):
+        fid = _make_footprint(
+            reference="FID1", position=(0.0, 0.0), graphics=[_crtyd_circle(radius=1.0)]
+        )
+        other = _make_footprint(
+            reference="J1",
+            position=(5.0, 0.0),
+            graphics=[_crtyd_rect(start=(-1.0, -1.0), end=(1.0, 1.0))],
+        )
+        results = _run(_pcb_with(fid, other))
+        assert results.filter_by_rule(COURTYARD_RULE_ID) == []
+        assert results.filter_by_rule(COURTYARD_UNRESOLVED_RULE_ID) == []
+
+    def test_circle_courtyard_back_side_only_conflicts_with_back(self):
+        fid = _make_footprint(
+            reference="FID1",
+            graphics=[_crtyd_circle(radius=1.0, layer="B.CrtYd")],
+        )
+        front = _make_footprint(
+            reference="J1",
+            position=(0.5, 0.0),
+            graphics=[_crtyd_rect(start=(-1.0, -1.0), end=(1.0, 1.0))],
+        )
+        back = _make_footprint(
+            reference="J2",
+            position=(0.5, 0.0),
+            graphics=[_crtyd_rect(start=(-1.0, -1.0), end=(1.0, 1.0), layer="B.CrtYd")],
+        )
+        assert _run(_pcb_with(fid, front)).filter_by_rule(COURTYARD_RULE_ID) == []
+        assert len(_run(_pcb_with(fid, back)).filter_by_rule(COURTYARD_RULE_ID)) == 1
+
+    def test_zero_radius_circle_stays_unresolved(self):
+        fid = _make_footprint(reference="FID1", graphics=[_crtyd_circle(radius=0.0)])
+        results = _run(_pcb_with(fid))
+        assert len(results.filter_by_rule(COURTYARD_UNRESOLVED_RULE_ID)) == 1
 
     def test_unresolved_fp_arc_courtyard_info(self):
         """A courtyard with only unsupported geometry -> info finding."""
@@ -671,3 +736,61 @@ class TestCheckerIntegration:
         # Degrades to zero waivers -> the overlap is a blocking error.
         assert data["summary"]["errors"] == 1
         assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# Parsed fp_circle courtyards (#8540): go through PCB.load, not a hand-built
+# FootprintGraphic, so the parser's radius derivation is exercised.
+# ---------------------------------------------------------------------------
+
+
+def _circle_board(tmp_path, *, rot, other_xy):
+    """Fiducial at (10,10) with a local circle centre (0.5,0), radius 1."""
+    content = f"""(kicad_pcb (version 20240108) (generator "test")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal))
+  (footprint "Fiducial:Fiducial_1mm_Mask2mm" (layer "F.Cu") (at 10 10 {rot})
+    (property "Reference" "FID1" (at 0 0) (layer "F.SilkS"))
+    (fp_circle (center 0.5 0) (end 1.5 0) (layer "F.CrtYd") (width 0.05))
+  )
+  (footprint "TestFP" (layer "F.Cu") (at {other_xy[0]} {other_xy[1]})
+    (property "Reference" "J1" (at 0 0) (layer "F.SilkS"))
+    (fp_rect (start -0.4 -0.4) (end 0.4 0.4) (stroke (width 0.05) (type solid)) (layer "F.CrtYd"))
+  )
+)
+"""
+    path = tmp_path / "circle.kicad_pcb"
+    path.write_text(content)
+    return PCB.load(path)
+
+
+class TestParsedCircleCourtyard:
+    def test_parser_derives_radius(self, tmp_path):
+        pcb = _circle_board(tmp_path, rot=0, other_xy=(50, 50))
+        graphic = next(iter(pcb.footprints)).graphics[0]
+        assert graphic.radius == pytest.approx(1.0)
+
+    def test_overlap_reported_not_unresolved(self, tmp_path):
+        pcb = _circle_board(tmp_path, rot=0, other_xy=(11.5, 10))
+        results = _run(pcb)
+        assert len(results.filter_by_rule(COURTYARD_RULE_ID)) == 1
+        assert results.filter_by_rule(COURTYARD_UNRESOLVED_RULE_ID) == []
+
+    # Local centre (0.5, 0) lands at (10, 9.5) at 90 deg and (10, 10.5) at 270
+    # (negated rotation convention, #3739).  The probe part sits on the
+    # expected position (overlap) and on the mirrored one (clear).
+    @pytest.mark.parametrize(
+        ("rot", "hit_xy", "miss_xy"),
+        [
+            (0, (11.4, 10.0), (8.6, 10.0)),
+            (90, (10.0, 8.6), (10.0, 11.4)),
+            (270, (10.0, 11.4), (10.0, 8.6)),
+        ],
+    )
+    def test_rotated_offset_centre(self, tmp_path, rot, hit_xy, miss_xy):
+        # hit: |dist| from circle centre ~1.0 < 1.0 + 0.4 -> overlap
+        # miss: the mirrored position is >1.4 from the circle -> no overlap
+        hit = _run(_circle_board(tmp_path, rot=rot, other_xy=hit_xy))
+        assert len(hit.filter_by_rule(COURTYARD_RULE_ID)) == 1, (rot, hit_xy)
+        miss = _run(_circle_board(tmp_path, rot=rot, other_xy=miss_xy))
+        assert miss.filter_by_rule(COURTYARD_RULE_ID) == [], (rot, miss_xy)
+        assert miss.filter_by_rule(COURTYARD_UNRESOLVED_RULE_ID) == []

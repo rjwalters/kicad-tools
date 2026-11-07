@@ -16,12 +16,14 @@ Having both checkers resolve courtyards through the same helpers is exactly
 what the reconciliation issue (#4182) asks for: ``kct placement check`` and
 ``kct check`` should agree on courtyard overlaps.
 
-Courtyard-outline extraction supports three representations:
+Courtyard-outline extraction supports four representations:
 
 * ``fp_rect`` — a single axis-aligned rectangle (fast path).
 * ``fp_poly`` — a closed polygon whose vertices are recorded in
   :attr:`FootprintGraphic.points`.
 * ``fp_line`` — a closed loop of line segments chained by endpoint matching.
+* ``fp_circle`` — a single circle (stock fiducial / mounting-hole
+  courtyards, #8540); ``fp_arc`` courtyards are not modeled.
 
 A courtyard that cannot be resolved from these (no CrtYd geometry, a
 non-closing ``fp_line`` chain, or fewer than three vertices) resolves to
@@ -135,6 +137,7 @@ def _courtyard_polygon(footprint: Footprint, side: str, Polygon: Any):
 
     rects: list[FootprintGraphic] = []
     polys: list[FootprintGraphic] = []
+    circles: list[FootprintGraphic] = []
     line_segments: list[tuple[tuple[float, float], tuple[float, float]]] = []
     for graphic in footprint.graphics:
         if graphic.layer != target_layer:
@@ -145,7 +148,9 @@ def _courtyard_polygon(footprint: Footprint, side: str, Polygon: Any):
             polys.append(graphic)
         elif graphic.graphic_type == "line":
             line_segments.append((graphic.start, graphic.end))
-        # circle / arc courtyards are not modeled (rare for courtyards).
+        elif graphic.graphic_type == "circle":
+            circles.append(graphic)
+        # arc courtyards are not modeled.
 
     ring: list[tuple[float, float]] | None = None
     if rects:
@@ -156,6 +161,18 @@ def _courtyard_polygon(footprint: Footprint, side: str, Polygon: Any):
         ring = list(polys[0].points)
     elif line_segments:
         ring = _chain_lines(line_segments)
+    elif circles:
+        # Stock fiducial / mounting-hole courtyards are a single fp_circle
+        # (#8540).  A circle is rotation-invariant, so only its centre is
+        # transformed; a zero/missing radius stays unresolved.
+        circle = circles[0]
+        if circle.center is not None and circle.radius and circle.radius > 0:
+            cx, cy = transform(circle.center)
+            from shapely.geometry import Point  # type: ignore[import-untyped]
+
+            polygon = Point(cx, cy).buffer(circle.radius)
+            return polygon if not polygon.is_empty and polygon.area > 0 else None
+        return None
 
     if ring is None or len(ring) < 3:
         return None
@@ -207,6 +224,31 @@ def courtyard_exempt(footprint: Footprint) -> bool:
     if not getattr(footprint, "pads", None):
         return True
     return (footprint.name or "").startswith(COURTYARD_EXEMPT_LIBRARIES)
+
+
+_FIDUCIAL_PAD_PROPERTIES: frozenset[str] = frozenset(
+    {"pad_prop_fiducial_glob", "pad_prop_fiducial_loc"}
+)
+
+
+def is_fiducial_footprint(footprint: Footprint) -> bool:
+    """True for a fiducial: a pad with a fiducial property, or board-only furniture.
+
+    Matches ``(property pad_prop_fiducial_glob|loc)`` on any pad's raw
+    S-expression node, or the ``board_only`` + ``exclude_from_pos_files``
+    attr-flag pair (Issue #8540).
+    """
+    flags: frozenset[str] = getattr(footprint, "attr_flags", frozenset())
+    if {"board_only", "exclude_from_pos_files"} <= flags:
+        return True
+    for pad in getattr(footprint, "pads", None) or []:
+        node = pad.__dict__.get("_sexp_node")
+        if node is None:
+            continue
+        for prop in node.find_all("property"):
+            if prop.get_first_atom() in _FIDUCIAL_PAD_PROPERTIES:
+                return True
+    return False
 
 
 def unevaluated_courtyards(footprints: Any, Polygon: Any) -> tuple[list[str], list[str], int]:
