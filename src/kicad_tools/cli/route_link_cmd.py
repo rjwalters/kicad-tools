@@ -42,6 +42,7 @@ __all__ = [
     "LinkAction",
     "ViaAtAction",
     "LinkLayersAction",
+    "NetClearanceAction",
     "add_route_link_arguments",
     "parse_link_spec",
     "run_route_link_command",
@@ -75,6 +76,8 @@ class LinkSpec:
     b: EndSpec
     via_at: tuple[float, float] | None = None
     layers: list[str] | None = None
+    #: ``--net-clearance NET=MM`` entries that follow this ``--link`` (Issue #8546).
+    net_clearance: list[str] = field(default_factory=list)
     text: str = field(default="", compare=False)
 
 
@@ -157,6 +160,30 @@ class LinkLayersAction(_ModifierAction):
         link.layers = layers
 
 
+class NetClearanceAction(argparse.Action):
+    """``--net-clearance NET=MM``: scoped to the preceding ``--link`` (Issue #8546).
+
+    Before any ``--link`` it stays run-global (applies to every link, as it did
+    before per-link scoping); after one it constrains only that link.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        name, eq, value = values.rpartition("=")
+        if not eq or not name:
+            parser.error(f"{option_string}: expected NET=MM, got {values!r}")
+        try:
+            float(value)
+        except ValueError:
+            parser.error(f"{option_string}: MM is not a number in {values!r}")
+        links = getattr(namespace, "links", None)
+        if links:
+            links[-1].net_clearance.append(values)
+        else:
+            glob = list(getattr(namespace, self.dest, None) or [])
+            glob.append(values)
+            setattr(namespace, self.dest, glob)
+
+
 def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
     """Attach the ``route-link`` arguments to ``parser``."""
     parser.add_argument("pcb", help="Path to .kicad_pcb file")
@@ -219,13 +246,49 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--via-drill", type=float, default=0.3, help="Via drill (mm)")
     parser.add_argument(
         "--net-clearance",
-        action="append",
+        action=NetClearanceAction,
+        dest="net_clearance",
         default=[],
         metavar="NET=MM",
         help=(
             "Clearance the new copper must keep from NET (mm), e.g. an HV net. "
-            "Repeatable; never below --clearance."
+            "Repeatable; never below --clearance. Scope: after a --link it "
+            "applies to that link only; before any --link it applies to every "
+            "link. Combined with --voltage-map the larger floor wins."
         ),
+    )
+    parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        metavar="JSON",
+        help=(
+            "Per-net voltage sidecar (as for 'route'/'creepage'). Derives each "
+            "link's per-neighbour clearance floor from the pairwise creepage "
+            "requirement and makes the per-link creepage gate use the same "
+            "requirements, waiving attach-zone pairs whose outside copper clears."
+        ),
+    )
+    parser.add_argument(
+        "--creepage-standard",
+        dest="creepage_standard",
+        default="iec60664",
+        help="Creepage standard for --voltage-map (default: iec60664)",
+    )
+    parser.add_argument(
+        "--pollution-degree",
+        dest="pollution_degree",
+        type=int,
+        default=2,
+        choices=[1, 2, 3],
+        help="IEC pollution degree for --voltage-map (default: 2)",
+    )
+    parser.add_argument(
+        "--material-group",
+        dest="material_group",
+        default="IIIa",
+        choices=["I", "II", "IIIa", "IIIb"],
+        help="Insulation material group for --voltage-map (default: IIIa)",
     )
     parser.add_argument(
         "--format",
@@ -235,7 +298,21 @@ def add_route_link_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _parse_net_clearances(items: list[str], names: dict[str, int]) -> dict[int, float]:
+    by_net: dict[int, float] = {}
+    for item in items:
+        name, eq, value = item.rpartition("=")
+        if not eq or name not in names:
+            raise LinkSpecError(f"--net-clearance {item!r}: expected KNOWN_NET=MM")
+        try:
+            by_net[names[name]] = float(value)
+        except ValueError as exc:
+            raise LinkSpecError(f"--net-clearance {item!r}: MM is not a number") from exc
+    return by_net
+
+
 def _rules_from_args(args: argparse.Namespace, pcb: Any) -> Any:
+    """Run-wide rules; ``--net-clearance`` given before any ``--link`` is folded in."""
     from kicad_tools.router.link_router import LinkRouteRules
 
     base = LinkRouteRules(
@@ -247,16 +324,63 @@ def _rules_from_args(args: argparse.Namespace, pcb: Any) -> Any:
     if not args.net_clearance:
         return base
     names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
-    by_net: dict[int, float] = {}
-    for item in args.net_clearance:
-        name, eq, value = item.rpartition("=")
-        if not eq or name not in names:
-            raise LinkSpecError(f"--net-clearance {item!r}: expected KNOWN_NET=MM")
-        try:
-            by_net[names[name]] = float(value)
-        except ValueError as exc:
-            raise LinkSpecError(f"--net-clearance {item!r}: MM is not a number") from exc
-    return replace(base, clearance_by_net=by_net)
+    return replace(base, clearance_by_net=_parse_net_clearances(args.net_clearance, names))
+
+
+def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpec) -> Any:
+    """``base`` plus this link's voltage-map-derived and ``--net-clearance`` floors.
+
+    Per neighbour net the larger of the run-global, voltage-map and link-scoped
+    floors wins.  Returns ``base`` itself when nothing applies (no-flag path
+    unchanged).
+    """
+    required = getattr(args, "_pairwise_required", None)
+    voltages = getattr(args, "_pairwise_voltages", None)
+    if voltages is None and not spec.net_clearance:
+        return base
+    names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
+    floors: dict[int, float] = dict(base.clearance_by_net or {})
+
+    def raise_floor(num: int, mm: float) -> None:
+        floors[num] = max(floors.get(num, 0.0), mm)
+
+    if voltages is not None:
+        from kicad_tools.creepage.standards import StandardLookupError
+        from kicad_tools.placement.hv_domains import build_required_by_domain_pair
+        from kicad_tools.router.pairwise_clearance import _norm_net_key
+
+        threshold = getattr(args, "hv_threshold", 30.0)
+        me = _norm_net_key(spec.net)
+        for name, num in names.items():
+            other = _norm_net_key(name)
+            if other == me:
+                continue
+            pair = (me, other) if me <= other else (other, me)
+            mm = (required or {}).get(pair)
+            if mm is None and (me not in voltages or other not in voltages):
+                # A net absent from the map is 0 V, as in the creepage census
+                # (compute_creepage_census); fail closed on the same pair the gate
+                # checks instead of silently falling back to --clearance (#8546).
+                dv = abs(voltages.get(me, 0.0) - voltages.get(other, 0.0))
+                if dv == 0.0 or dv < threshold:
+                    continue
+                try:
+                    mm = build_required_by_domain_pair(
+                        {me: voltages.get(me, 0.0), other: voltages.get(other, 0.0)},
+                        standard_id=getattr(args, "creepage_standard", "iec60664"),
+                        pollution_degree=getattr(args, "pollution_degree", 2),
+                        material_group=getattr(args, "material_group", "IIIa"),
+                        hv_threshold=threshold,
+                    ).get(pair)
+                except StandardLookupError as exc:
+                    raise LinkSpecError(
+                        f"--voltage-map creepage lookup failed for {spec.net!r} vs {name!r}: {exc}"
+                    ) from exc
+            if mm:
+                raise_floor(num, float(mm))
+    for num, mm in _parse_net_clearances(spec.net_clearance, names).items():
+        raise_floor(num, mm)
+    return replace(base, clearance_by_net=floors)
 
 
 def _resolve_end(
@@ -309,6 +433,7 @@ def _commit_to_model(model: Any, route: Any, net_number: int) -> None:
 
 
 def _route_one(
+    args: argparse.Namespace,
     pcb: Any,
     model: Any,
     rules: Any,
@@ -324,6 +449,7 @@ def _route_one(
         route_link_via,
     )
 
+    rules = _rules_for_link(args, pcb, rules, spec)
     entry: dict[str, Any] = {
         "link": f"{spec.net} {spec.a.describe()} {spec.b.describe()}",
         "net": spec.net,
@@ -418,6 +544,26 @@ def _drc_finding_counts(pcb_path: Path) -> Any:
     return counts
 
 
+def _map_inputs(args: argparse.Namespace) -> dict[str, Any] | None:
+    """``--voltage-map`` census inputs (voltage map, standard, pair bounds), or ``None``."""
+    vm = getattr(args, "voltage_map", None)
+    if not vm:
+        return None
+    import json
+
+    from kicad_tools.creepage.engine import pair_bounds_from_dict, voltage_map_from_dict
+    from kicad_tools.creepage.standards import get_standard
+
+    raw = json.loads(Path(vm).read_text())
+    voltage_map, edge_voltage = voltage_map_from_dict(raw)
+    return {
+        "voltage_map": voltage_map,
+        "edge_voltage": edge_voltage,
+        "pair_bounds": pair_bounds_from_dict(raw) or None,
+        "standard_obj": get_standard(getattr(args, "creepage_standard", "iec60664")),
+    }
+
+
 def _hv_nets_for(pcb: Any, pcb_path: Path, args: argparse.Namespace) -> Any:
     from kicad_tools.creepage.engine import resolve_hv_nets
 
@@ -428,12 +574,27 @@ def _hv_nets_for(pcb: Any, pcb_path: Path, args: argparse.Namespace) -> Any:
 
         net_class_map = net_class_map_from_path(Path(ncm), pcb_path=pcb_path)
     net_class = getattr(args, "net_class", "HV") or "HV"
-    return resolve_hv_nets(pcb, net_class, net_class_map)
+    mi = _map_inputs(args)
+    if mi is None:
+        return resolve_hv_nets(pcb, net_class, net_class_map)
+    # Same membership rule as ``kct creepage --voltage-map`` (#4401).
+    return resolve_hv_nets(
+        pcb,
+        net_class,
+        net_class_map,
+        voltage_map=mi["voltage_map"],
+        edge_voltage=mi["edge_voltage"],
+        census_threshold=getattr(args, "hv_threshold", 30.0),
+    )
+
+
+def _gate_enabled(args: argparse.Namespace) -> bool:
+    return getattr(args, "min", None) is not None or bool(getattr(args, "voltage_map", None))
 
 
 def _census_mode(pcb: Any, pcb_path: Path, args: argparse.Namespace) -> str:
-    """``skipped`` (no ``--min``), ``vacuous`` (no HV nets resolved) or ``checked``."""
-    if getattr(args, "min", None) is None:
+    """``skipped`` (no ``--min``/``--voltage-map``), ``vacuous`` (no HV nets) or ``checked``."""
+    if not _gate_enabled(args):
         return "skipped"
     return "checked" if _hv_nets_for(pcb, pcb_path, args) else "vacuous"
 
@@ -446,8 +607,12 @@ def _census_failures(
     ``relationship`` is part of the key so a new board-level failure is not hidden by
     an already-failing same-footprint pair; the value lets the gate catch a pair that
     got worse.  ``None`` if no census is configured.
+
+    With ``--voltage-map`` the requirement is derived per pair (as in
+    ``kct creepage --voltage-map``) and attach-zone pairs whose copper outside
+    the zone still clears are waived, so the gate agrees with the router (#8546).
     """
-    if getattr(args, "min", None) is None:
+    if not _gate_enabled(args):
         return None
     from kicad_tools.creepage.engine import compute_creepage_census
     from kicad_tools.schema.pcb import PCB
@@ -457,13 +622,36 @@ def _census_failures(
     hv_nets = _hv_nets_for(pcb, pcb_path, args)
     if not hv_nets:
         return {}
+    min_mm = getattr(args, "min", None)
+    mi = _map_inputs(args)
+    extra: dict[str, Any] = {}
+    if mi is not None:
+        from kicad_tools.router.pairwise_clearance import build_attach_zones
+
+        extra = {
+            "standard": getattr(args, "creepage_standard", "iec60664"),
+            "pollution_degree": getattr(args, "pollution_degree", 2),
+            "material_group": getattr(args, "material_group", "IIIa"),
+            "voltage_map": mi["voltage_map"],
+            "standard_obj": mi["standard_obj"],
+            "edge_voltage": mi["edge_voltage"],
+            "attach_zones": build_attach_zones(pcb.footprints),
+            "pair_bounds": mi["pair_bounds"],
+        }
     report = compute_creepage_census(
-        pcb, hv_nets, float(args.min), net_class=net_class, board=str(pcb_path)
+        pcb,
+        hv_nets,
+        float(min_mm) if min_mm is not None else None,
+        net_class=net_class,
+        board=str(pcb_path),
+        **extra,
     )
     failing: dict[tuple[str, str, str, str], float] = {}
     for p in report.pairs:
         if p.passed:
             continue
+        if p.relationship == "attach_zone" and getattr(p, "residual_passed", False):
+            continue  # waived: the copper outside the terminating footprint clears
         key = (p.net_a, p.net_b, p.kind, p.relationship)
         failing[key] = min(p.creepage_mm, failing.get(key, p.creepage_mm))
     return failing
@@ -522,7 +710,7 @@ def _commit_links(
 
     n_committed = 0
     for spec in links:
-        entry, route = _route_one(pcb, model, rules, spec, origin, net_ids)
+        entry, route = _route_one(args, pcb, model, rules, spec, origin, net_ids)
         entry["status"] = "unroutable"
         entry["failed_check"] = None
         entries.append(entry)
@@ -608,8 +796,14 @@ def run_route_link_command(args: argparse.Namespace) -> int:
 
         pcb = PCB.load(str(pcb_path))
         origin = pcb.board_origin
+        from .route_cmd import _preload_voltage_map
+
+        if _preload_voltage_map(args) != 0:
+            return 1
         try:
             rules = _rules_from_args(args, pcb)
+            for spec in links:  # validate link-scoped --net-clearance up front
+                _rules_for_link(args, pcb, rules, spec)
         except LinkSpecError as exc:
             return fail(str(exc))
         model = _build_model(pcb)
@@ -621,7 +815,7 @@ def run_route_link_command(args: argparse.Namespace) -> int:
         refused: str | None = None
         if args.probe:
             for spec in links:
-                entry, route = _route_one(pcb, model, rules, spec, origin, net_ids)
+                entry, route = _route_one(args, pcb, model, rules, spec, origin, net_ids)
                 entry["status"] = "probed"
                 entry["failed_check"] = None
                 entries.append(entry)

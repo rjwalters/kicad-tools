@@ -830,6 +830,10 @@ class ReadinessOptions:
     hv_working_voltage: float | None = None
     hv_pollution_degree: int | None = None
     hv_material_group: str = "IIIa"
+    # Voltage-map census mode (issue #8570): same engine/waivers as ``kct creepage``.
+    hv_voltage_map: Path | None = None
+    hv_waive_same_footprint: bool = False
+    hv_waive_attach_zone: bool = False
     fill_tolerance_mm2: float = DEFAULT_FILL_TOLERANCE_MM2
     check_args: tuple[str, ...] = ()
     recipe: str | None = None
@@ -972,6 +976,26 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
     if not (board_dir / "output").is_dir():
         evidence_dir = board_dir / _EVIDENCE_DIRNAME
 
+    vm_arg = getattr(args, "voltage_map", None)
+    voltage_map = Path(vm_arg).resolve() if vm_arg else None
+    if voltage_map is not None and not voltage_map.is_file():
+        return None, f"--voltage-map file not found: {voltage_map}"
+    if voltage_map is not None and not voltage_map.is_relative_to(boundary):
+        return None, _outside_root_message(
+            str(voltage_map), "voltage map", project_root is not None
+        )
+    if (
+        getattr(args, "hv_waive_same_footprint", False)
+        or getattr(args, "hv_waive_attach_zone", False)
+    ) and (voltage_map is None or args.hv_standard is None):
+        return None, (
+            "--waive-same-footprint / --waive-attach-zone require --voltage-map and --hv-standard"
+        )
+    if voltage_map is not None and (args.hv_standard is None or args.hv_pollution_degree is None):
+        return None, (
+            "--voltage-map requires --hv-standard and --hv-pollution-degree; "
+            "the per-pair requirement is derived from an IEC table."
+        )
     net_class_map = (
         Path(args.net_class_map).resolve() if args.net_class_map else _find_net_class_map(pcb)
     )
@@ -1005,6 +1029,9 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             hv_working_voltage=args.hv_working_voltage,
             hv_pollution_degree=args.hv_pollution_degree,
             hv_material_group=args.hv_material_group,
+            hv_voltage_map=voltage_map,
+            hv_waive_same_footprint=bool(getattr(args, "hv_waive_same_footprint", False)),
+            hv_waive_attach_zone=bool(getattr(args, "hv_waive_attach_zone", False)),
             fill_tolerance_mm2=float(args.fill_tolerance),
             operation="generate" if args.generate else "verify",
             project_root=project_root,
@@ -1884,6 +1911,9 @@ def _gate_hv_isolation(options: ReadinessOptions) -> CheckOutcome | None:
         hv_working_voltage=options.hv_working_voltage,
         hv_pollution_degree=options.hv_pollution_degree,
         hv_material_group=options.hv_material_group,
+        voltage_map_path=options.hv_voltage_map,
+        waive_same_footprint=options.hv_waive_same_footprint,
+        waive_attach_zone=options.hv_waive_attach_zone,
     )
     evidence_path.write_text(
         json.dumps(
@@ -1896,6 +1926,16 @@ def _gate_hv_isolation(options: ReadinessOptions) -> CheckOutcome | None:
                 "hv_working_voltage": options.hv_working_voltage,
                 "hv_pollution_degree": options.hv_pollution_degree,
                 "hv_material_group": options.hv_material_group,
+                "voltage_map": (
+                    _rel(options, options.hv_voltage_map) if options.hv_voltage_map else None
+                ),
+                "voltage_map_sha256": (
+                    _sha256_file(options.hv_voltage_map) if options.hv_voltage_map else None
+                ),
+                "waive_same_footprint": options.hv_waive_same_footprint,
+                "waive_attach_zone": options.hv_waive_attach_zone,
+                "waived_count": status.waived_count,
+                "gate_passed": status.passed if status.threshold_supplied else None,
                 "isolation": status.to_dict(),
             },
             indent=2,
@@ -2879,7 +2919,13 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
         else set()
     )
 
-    for candidate in (options.pcb, options.schematic, options.project, options.net_class_map):
+    for candidate in (
+        options.pcb,
+        options.schematic,
+        options.project,
+        options.net_class_map,
+        options.hv_voltage_map,
+    ):
         if candidate is not None and candidate.is_file():
             paths.add(candidate.resolve())
 
@@ -3212,6 +3258,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
                 project=remap(options.project),
                 output_dir=candidate / options.output_dir.resolve().relative_to(original),
                 net_class_map=remap(options.net_class_map),
+                hv_voltage_map=remap(options.hv_voltage_map),
                 evidence_dir=candidate
                 / "output"
                 / ("readiness" if options.operation == "generate" else diagnostic_name),
@@ -3637,6 +3684,29 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         choices=["I", "II", "IIIa", "IIIb"],
         default="IIIa",
         help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
+    )
+    parser.add_argument(
+        "--voltage-map",
+        dest="voltage_map",
+        default=None,
+        help=(
+            "Per-net voltage map JSON (as `kct creepage --voltage-map`): derive the "
+            "HV requirement per pair from |V_a - V_b| instead of one flat working "
+            "voltage. Requires --hv-standard and --hv-pollution-degree. The map's "
+            "sha256 is recorded in the HV evidence."
+        ),
+    )
+    parser.add_argument(
+        "--waive-same-footprint",
+        dest="hv_waive_same_footprint",
+        action="store_true",
+        help="With --voltage-map: waive component-internal (same-footprint) HV pairs, listed in evidence.",
+    )
+    parser.add_argument(
+        "--waive-attach-zone",
+        dest="hv_waive_attach_zone",
+        action="store_true",
+        help="With --voltage-map: waive attach-zone HV pairs whose residual copper clears, listed in evidence.",
     )
     parser.add_argument(
         "--fill-tolerance",
