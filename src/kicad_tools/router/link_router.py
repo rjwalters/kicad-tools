@@ -127,7 +127,7 @@ class LinkRouteRules:
             or not link_net_name
         ):
             return [(geom, full)]
-        from shapely.geometry import box
+        from shapely.geometry import box  # type: ignore[import-untyped]
 
         from .pairwise_clearance import _norm_net_key
 
@@ -204,7 +204,7 @@ def _pad_layers(pad_layers: list[str], copper: list[str]) -> list[str]:
 
 def _pad_geometry(fp: Any, pad: Any) -> Any:
     """Board-relative copper outline of a footprint pad (un-eroded)."""
-    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+    from shapely.geometry import LineString, Point, Polygon
 
     from kicad_tools.core.geometry import rotate_pad_offset
 
