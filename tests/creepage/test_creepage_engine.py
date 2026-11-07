@@ -1273,6 +1273,26 @@ def test_floating_island_between_hv_and_lv_fails_pair(tmp_path):
     assert out["pair_count"] == len(report.pairs)
 
 
+def test_floating_island_chain_is_searched(tmp_path):
+    # HV edge x=111, GND edge x=117.  Islands span 111.5-113.5 and 114.5-116.5:
+    # chain 0.5 + 1.0 + 0.5 = 2.0 mm; the best single hop is 4.0 mm (#8579).
+    report = _island_report(tmp_path, [(112.5, 110), (115.5, 110)])
+    pair = _conductor_pair(report, "GND")
+    assert pair.creepage_mm == pytest.approx(2.0, abs=1e-3)
+    assert not pair.passed
+    assert pair.to_dict()["via_floating"] == "pad"
+    assert report.to_dict()["netless_treatment"] == "floating"
+
+
+def test_floating_island_chain_never_exceeds_direct(tmp_path):
+    # Two islands well off the HV->GND axis cannot lengthen the 6 mm direct gap.
+    baseline = _island_report(tmp_path, [])
+    report = _island_report(tmp_path, [(112.5, 118), (115.5, 118)])
+    assert _conductor_pair(report, "GND").creepage_mm == pytest.approx(
+        _conductor_pair(baseline, "GND").creepage_mm
+    )
+
+
 def test_floating_island_far_away_leaves_pair_unchanged(tmp_path):
     baseline = _island_report(tmp_path, [])
     report = _island_report(tmp_path, [(114, 118)])
