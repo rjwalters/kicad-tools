@@ -23920,6 +23920,7 @@ class Autorouter:
         timeout_provider: Callable[[], float | None] | None = None,
         min_trial_budget: float = 0.0,
         abandon_margin: int | None = PD_ABANDON_ROUTED_MARGIN,
+        route_only_nets: frozenset[str] | set[str] | list[str] | None = None,
     ) -> PlacementDeltaFeedbackResult | PlacementFeedbackResult:
         """Close the router<->placement loop with classifier-driven deltas (#4467).
 
@@ -23973,6 +23974,9 @@ class Autorouter:
                 move more of the target's pads into a track-blocking keepout
                 rule area (Issue #5890).  Dormant on a board that declares
                 none.
+            route_only_nets: The ``--nets`` set the pass was limited to (Issue
+                #8566).  A delta whose target carries nets outside it is
+                skipped, since those nets' reach was never measured.
             min_confidence / stagnation_patience / outer_timeout: Forwarded to
                 the legacy loop only when the toggle is off.
             net_class_map: Optional ``{net_name: NetClassRouting}`` sidecar
@@ -24020,6 +24024,7 @@ class Autorouter:
             delta_proposer=delta_proposer,
             excluded_nets=excluded_nets,
             net_class_map=net_class_map,
+            route_only_nets=route_only_nets,
         )
         if loop_observer is not None:
             loop_observer(loop)
