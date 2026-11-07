@@ -86,6 +86,16 @@ def run_readiness_command(args) -> int:
     if hv_material_group and hv_material_group != "IIIa":
         sub_argv.extend(["--hv-material-group", hv_material_group])
 
+    voltage_map = getattr(args, "readiness_voltage_map", None)
+    if voltage_map:
+        sub_argv.extend(["--voltage-map", voltage_map])
+
+    if getattr(args, "readiness_waive_same_footprint", False):
+        sub_argv.append("--waive-same-footprint")
+
+    if getattr(args, "readiness_waive_attach_zone", False):
+        sub_argv.append("--waive-attach-zone")
+
     fill_tolerance = getattr(args, "readiness_fill_tolerance", None)
     if fill_tolerance is not None:
         sub_argv.extend(["--fill-tolerance", str(fill_tolerance)])

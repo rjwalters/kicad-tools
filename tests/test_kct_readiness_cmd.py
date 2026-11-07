@@ -1022,6 +1022,82 @@ def test_a_malformed_pcb_blocks_the_isolation_gate(tmp_path):
     assert any("could not" in blocker.lower() for blocker in report["blockers"])
 
 
+def _write_voltage_map(board: Path, mapping: dict) -> Path:
+    path = board / "output" / "vmap.json"
+    path.write_text(json.dumps(mapping))
+    return path
+
+
+_VMAP_ARGS = ("--hv-standard", "iec60664", "--hv-pollution-degree", "2")
+
+
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_hv_voltage_map_same_potential_pair_passes_and_is_recorded(tmp_path):
+    """Issue #8570: a ~1mm pair at the SAME potential passes under the census,
+    while the flat 250 V path still fails on the identical board."""
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    vmap = _write_voltage_map(board, {"L_MAINS": 0, "GND": 0})
+
+    flat_code, flat = run(
+        board,
+        _NoOpRefillEngines(board),
+        *_VMAP_ARGS,
+        "--hv-working-voltage",
+        "250",
+    )
+    assert flat_code != 0
+    assert check_status(flat, "hv_isolation") == "failed"
+
+    code, report = run(board, _NoOpRefillEngines(board), *_VMAP_ARGS, "--voltage-map", str(vmap))
+    assert code == 0
+    assert check_status(report, "hv_isolation") == "passed"
+    evidence = json.loads((board / "output" / "readiness" / "hv-isolation.json").read_text())
+    assert evidence["voltage_map_sha256"] == hashlib.sha256(vmap.read_bytes()).hexdigest()
+    assert evidence["waive_same_footprint"] is False
+    assert evidence["waived_count"] == 0
+    assert evidence["gate_passed"] is True
+    assert any(path.endswith("vmap.json") for path in report["inputs"])
+
+
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_hv_voltage_map_with_real_potential_difference_still_fails(tmp_path):
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    vmap = _write_voltage_map(board, {"L_MAINS": 150, "GND": 0})
+
+    code, report = run(board, _NoOpRefillEngines(board), *_VMAP_ARGS, "--voltage-map", str(vmap))
+
+    assert code != 0
+    assert check_status(report, "hv_isolation") == "failed"
+
+
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_hv_voltage_map_is_hash_bound_in_report_inputs(tmp_path):
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    vmap = _write_voltage_map(board, {"L_MAINS": 0, "GND": 0})
+    code, report = run(board, _NoOpRefillEngines(board), *_VMAP_ARGS, "--voltage-map", str(vmap))
+    assert code == 0
+    recorded = {k: v for k, v in report["inputs"].items() if k.endswith("vmap.json")}
+    assert recorded == {next(iter(recorded)): hashlib.sha256(vmap.read_bytes()).hexdigest()}
+
+
+def test_hv_waiver_flag_without_voltage_map_is_rejected(tmp_path, capsys):
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+
+    code, report = run(board, _NoOpRefillEngines(board), "--waive-same-footprint")
+
+    assert code != 0
+    assert report == {}
+    assert "require --voltage-map" in capsys.readouterr().err
+
+
 def test_board_without_hv_nets_omits_the_gate_entirely(tmp_path):
     board = make_board(tmp_path)
     (board / "output" / "net_class_map.json").write_text(json.dumps({"GND": {"name": "Power"}}))
@@ -1342,6 +1418,38 @@ def test_ready_is_unreachable_when_a_required_check_is_absent():
 
     assert report["status"] == "blocked"
     assert any("Required checks did not pass" in b for b in report["blockers"])
+
+
+def test_unified_cli_forwards_voltage_map_and_waiver_flags(tmp_path, monkeypatch):
+    board = make_board(tmp_path)
+    seen: dict = {}
+
+    def fake_main(argv, engines=None):
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(readiness_cmd, "main", fake_main)
+    from kicad_tools.cli import main as cli_main
+
+    vmap = tmp_path / "vmap.json"
+    rc = cli_main(
+        [
+            "readiness",
+            str(board),
+            "--voltage-map",
+            str(vmap),
+            "--waive-same-footprint",
+            "--waive-attach-zone",
+        ]
+    )
+    assert rc == 0
+    assert seen["argv"] == [
+        str(board),
+        "--voltage-map",
+        str(vmap),
+        "--waive-same-footprint",
+        "--waive-attach-zone",
+    ]
 
 
 def test_unified_cli_dispatches_the_readiness_subcommand(tmp_path, monkeypatch):

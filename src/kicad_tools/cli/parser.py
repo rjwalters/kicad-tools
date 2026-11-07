@@ -7308,6 +7308,30 @@ def _add_readiness_parser(subparsers) -> None:
         help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
     )
     rd_parser.add_argument(
+        "--voltage-map",
+        dest="readiness_voltage_map",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Per-net voltage map JSON (as `kct creepage --voltage-map`): derive the "
+            "HV requirement per pair from |V_a - V_b| instead of one flat working "
+            "voltage. Requires --hv-standard and --hv-pollution-degree. The map's "
+            "sha256 is recorded in the HV evidence."
+        ),
+    )
+    rd_parser.add_argument(
+        "--waive-same-footprint",
+        dest="readiness_waive_same_footprint",
+        action="store_true",
+        help="With --voltage-map: waive component-internal (same-footprint) HV pairs, listed in evidence.",
+    )
+    rd_parser.add_argument(
+        "--waive-attach-zone",
+        dest="readiness_waive_attach_zone",
+        action="store_true",
+        help="With --voltage-map: waive attach-zone HV pairs whose residual copper clears, listed in evidence.",
+    )
+    rd_parser.add_argument(
         "--fill-tolerance",
         dest="readiness_fill_tolerance",
         metavar="MM2",

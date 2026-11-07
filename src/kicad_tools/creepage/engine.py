@@ -2285,3 +2285,23 @@ def compute_creepage_census(
     # Deterministic ordering: by net A, then edge last, then net B.
     report.pairs.sort(key=lambda p: (p.net_a, p.kind == "edge", p.net_b))
     return report
+
+
+def apply_census_waivers(report: CreepageReport, *, waive_same_footprint: bool = False) -> None:
+    """Mark waived pairs on ``report`` (shared by ``kct creepage`` and readiness).
+
+    Same-footprint waiver (#4403): component-internal pairs are marked waived
+    only when ``waive_same_footprint`` is set.  Attach-zone waiver (#8028): rows
+    the census classified ``attach_zone`` (which only happens when the census
+    was given ``attach_zones``) are waived when the copper outside the zone
+    still passes; a failing residual keeps the pair FAIL.  Waived pairs stay
+    listed; only :attr:`CreepageReport.gate_passed` honours them, never
+    :attr:`CreepageReport.passed`.
+    """
+    if waive_same_footprint:
+        for pair in report.pairs:
+            if pair.relationship == "same_footprint":
+                pair.waived = True
+    for pair in report.pairs:
+        if pair.relationship == "attach_zone" and pair.residual_passed:
+            pair.waived = True
