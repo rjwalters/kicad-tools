@@ -1029,7 +1029,9 @@ class TestNameOnlyPadNetsRoundTrip:
     @staticmethod
     def _pad_map(board: Path) -> dict[tuple[str, str], str]:
         pcb = PCB.load(board)
-        return {(fp.reference, pad.number): pad.net_name for fp in pcb.footprints for pad in fp.pads}
+        return {
+            (fp.reference, pad.number): pad.net_name for fp in pcb.footprints for pad in fp.pads
+        }
 
     def test_assigned_pad_nets_survive_kicad_resave(self, tmp_path: Path) -> None:
         board = tmp_path / "b.kicad_pcb"
