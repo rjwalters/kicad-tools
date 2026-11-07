@@ -67,6 +67,23 @@ _loom_root_unreadable() {
     [[ -d "$1" ]] && ! command ls "$1" >/dev/null 2>&1
 }
 
+# _loom_root_unusable <target> — true if worktrees could not be created at
+# <target> on this host (#13639): the dir exists but is not writable, or it does
+# not exist and its nearest existing ancestor is not a writable directory (e.g.
+# a committed `/Volumes/Stripe` on a Linux worker: `/Volumes` is absent and `/`
+# is not writable). Side-effect free — never mkdirs. A nonexistent leaf under a
+# writable ancestor is usable (callers `mkdir -p` it).
+_loom_root_unusable() {
+    local p="$1" parent
+    while [[ ! -e "$p" ]]; do
+        parent="$(dirname "$p")"
+        [[ "$parent" == "$p" ]] && return 0
+        p="$parent"
+    done
+    [[ -d "$p" && -w "$p" && -x "$p" ]] && return 1
+    return 0
+}
+
 # loom_worktree_root <repo_root>
 #
 # Echoes the absolute worktree base directory. `repo_root` must be an absolute
@@ -80,6 +97,11 @@ loom_worktree_root() {
             local env_target="${LOOM_WORKTREE_ROOT%/}/$(basename "$repo_root")"
             if _loom_root_unreadable "$env_target"; then
                 echo "loom_worktree_root: LOOM_WORKTREE_ROOT target exists but is unreadable (readdir failed, e.g. macOS TCC removable-volumes denial): '$env_target'; falling back to default" >&2
+                echo "$repo_root/.loom/worktrees"
+                return 0
+            fi
+            if _loom_root_unusable "$env_target"; then
+                echo "loom_worktree_root: LOOM_WORKTREE_ROOT target is missing or not writable on this host: '$env_target'; falling back to default" >&2
                 echo "$repo_root/.loom/worktrees"
                 return 0
             fi
@@ -101,6 +123,11 @@ loom_worktree_root() {
             local cfg_target="${cfg_root%/}/$(basename "$repo_root")"
             if _loom_root_unreadable "$cfg_target"; then
                 echo "loom_worktree_root: worktree.root target exists but is unreadable (readdir failed, e.g. macOS TCC removable-volumes denial): '$cfg_target'; falling back to default" >&2
+                echo "$repo_root/.loom/worktrees"
+                return 0
+            fi
+            if _loom_root_unusable "$cfg_target"; then
+                echo "loom_worktree_root: worktree.root target is missing or not writable on this host: '$cfg_target'; falling back to default" >&2
                 echo "$repo_root/.loom/worktrees"
                 return 0
             fi
