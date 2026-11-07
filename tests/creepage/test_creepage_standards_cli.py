@@ -302,6 +302,8 @@ def test_min_only_json_schema_unchanged(tmp_path, capsys):
         "passed",
         "gate_passed",
         "waived_count",
+        "netless_items",  # additive floating-island coverage keys (#8548)
+        "netless_treatment",
     }
     for pair in payload["pairs"]:
         # Drift-guard: ``relationship`` is now an always-on additive key (#4403);

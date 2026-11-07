@@ -3257,6 +3257,63 @@ def _add_pcb_parser(subparsers) -> None:
         help="Report the would-be transform without modifying the PCB file",
     )
 
+    # pcb add-board-info
+    pcb_board_info = pcb_subparsers.add_parser(
+        "add-board-info",
+        help="Stamp project/rev/date board identification on silkscreen",
+        description=(
+            "Add a board-level silkscreen gr_text whose {project}, {rev} and "
+            "{date} fields come from the PCB title block. Use --at X Y for "
+            "explicit placement or --auto to find a free region clear of "
+            "pads, other silk, courtyards and the board edge."
+        ),
+    )
+    pcb_board_info.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_board_info.add_argument(
+        "--text",
+        default="{project} {rev} {date}",
+        help="Text template; fields: {project} {rev} {date} (default: '%(default)s')",
+    )
+    pcb_board_info.add_argument(
+        "--layer",
+        choices=["F.SilkS", "B.SilkS"],
+        default="F.SilkS",
+        help="Silkscreen layer (B.SilkS text is mirrored)",
+    )
+    pcb_board_info.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Text centre in KiCad file coordinates (mm)",
+    )
+    pcb_board_info.add_argument(
+        "--auto",
+        action="store_true",
+        help="Pick a free region automatically (nearest the bottom-left corner)",
+    )
+    pcb_board_info.add_argument(
+        "--order-placeholder",
+        nargs="?",
+        const="JLCJLCJLCJLC",
+        default=None,
+        metavar="TEXT",
+        help="Also stamp a fab order-number placeholder (default text: JLCJLCJLCJLC)",
+    )
+    pcb_board_info.add_argument("--font-size", type=float, default=1.0, help="Font size (mm)")
+    pcb_board_info.add_argument(
+        "--font-thickness", type=float, default=0.15, help="Font stroke thickness (mm)"
+    )
+    pcb_board_info.add_argument(
+        "-o", "--output", dest="output", help="Output file path (default: overwrite input PCB)"
+    )
+    pcb_board_info.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    pcb_board_info.add_argument(
+        "--dry-run", action="store_true", help="Preview without modifying the PCB file"
+    )
+
     # pcb lock-footprints / unlock-footprints
     for _cmd_name, _help_verb in (
         ("lock-footprints", "Lock"),
