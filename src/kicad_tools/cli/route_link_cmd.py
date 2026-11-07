@@ -380,7 +380,25 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
                 raise_floor(num, float(mm))
     for num, mm in _parse_net_clearances(spec.net_clearance, names).items():
         raise_floor(num, mm)
-    return replace(base, clearance_by_net=floors)
+    relax: frozenset[int] = frozenset()
+    attach_zones: Any = ()
+    if voltages is not None:
+        # Issue #8573: map-derived floors relax inside attach zones, as the
+        # census waives them; an explicit --net-clearance floor never relaxes.
+        from kicad_tools.router.pairwise_clearance import build_attach_zones
+
+        explicit = set(base.clearance_by_net or {}) | set(
+            _parse_net_clearances(spec.net_clearance, names)
+        )
+        relax = frozenset(n for n in floors if n not in explicit)
+        attach_zones = build_attach_zones(pcb.footprints)
+    return replace(
+        base,
+        clearance_by_net=floors,
+        attach_zones=attach_zones,
+        attach_relax_nets=relax,
+        net_names={num: name for name, num in names.items()},
+    )
 
 
 def _resolve_end(
@@ -696,7 +714,11 @@ def _commit_links(
 
     Returns ``(written path | None, refusal message | None)``.
     """
-    from kicad_tools.router.link_router import append_link_routes, collapse_link_route
+    from kicad_tools.router.link_router import (
+        append_link_routes,
+        collapse_link_route,
+        route_clears_floors,
+    )
 
     created = out_path != pcb_path and not out_path.exists()
     if out_path != pcb_path:
@@ -723,6 +745,11 @@ def _commit_links(
         # staircases merged); if the gate refuses it, retry the raw route so a
         # collapse can never cost a link that would otherwise commit.
         collapsed = collapse_link_route(route)
+        # Issue #8573: the collapse has no clearance oracle and KiCad DRC does
+        # not know --net-clearance, so re-check it against the per-net floors.
+        link_rules = _rules_for_link(args, pcb, rules, spec)
+        if link_rules.clearance_by_net and not route_clears_floors(collapsed, model, link_rules):
+            collapsed = route
         candidates = [collapsed, route] if collapsed.segments != route.segments else [route]
         for candidate in candidates:
             failed, reason = None, ""

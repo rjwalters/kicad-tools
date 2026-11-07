@@ -92,12 +92,61 @@ class LinkRouteRules:
     #: mapped below it (or absent) keeps ``clearance``.  ``None`` keeps the
     #: single-scalar behaviour exactly.
     clearance_by_net: Mapping[int, float] | None = None
+    #: Issue #8573: ``AttachZone`` regions (as built by
+    #: ``pairwise_clearance.build_attach_zones``) inside which the map-derived
+    #: floor of a net in ``attach_relax_nets`` relaxes to ``clearance`` -- the
+    #: same waiver ``kct creepage --waive-attach-zone`` applies.  Copper of such
+    #: a net outside the zone keeps its full floor.  ``net_names`` maps net
+    #: number -> name for the zone's name-keyed test.
+    attach_zones: Sequence[Any] = ()
+    attach_relax_nets: frozenset[int] = frozenset()
+    net_names: Mapping[int, str] | None = None
 
     def clearance_for(self, net_number: int) -> float:
         """Clearance this link must keep from copper on ``net_number``."""
         if self.clearance_by_net is None:
             return self.clearance
         return max(self.clearance, self.clearance_by_net.get(net_number, self.clearance))
+
+    def clearance_parts(
+        self, link_net_name: str, net_number: int, layer: str, geom: Any
+    ) -> list[tuple[Any, float]]:
+        """``geom`` (foreign copper of ``net_number`` on ``layer``) split by clearance.
+
+        Normally ``[(geom, clearance_for(net))]``.  The part of the copper that
+        lies inside an attach zone shared by the link net and ``net_number``
+        gets only the base ``clearance`` when the net's floor is map-derived.
+        """
+        full = self.clearance_for(net_number)
+        if (
+            not self.attach_zones
+            or net_number not in self.attach_relax_nets
+            or full <= self.clearance
+            or not self.net_names
+            or net_number not in self.net_names
+            or not link_net_name
+        ):
+            return [(geom, full)]
+        from shapely.geometry import box
+
+        from .pairwise_clearance import _norm_net_key
+
+        a, b = _norm_net_key(link_net_name), _norm_net_key(self.net_names[net_number])
+        parts: list[tuple[Any, float]] = []
+        rest = geom
+        for z in self.attach_zones:
+            if a not in z.net_names or b not in z.net_names:
+                continue
+            if not (z.covers_layer(a, layer) and z.covers_layer(b, layer)):
+                continue
+            zbox = box(z.min_x, z.min_y, z.max_x, z.max_y)
+            inside = rest.intersection(zbox)
+            if not inside.is_empty:
+                parts.append((inside, self.clearance))
+                rest = rest.difference(zbox)
+        if not rest.is_empty:
+            parts.append((rest, full))
+        return parts
 
 
 @dataclass
@@ -506,7 +555,8 @@ def route_link(
         by_clearance: dict[float, list[Any]] = {}
         for it in model.items:
             if it.net != net_number and layer in it.layers and it.layers[layer].intersects(window):
-                by_clearance.setdefault(rules.clearance_for(it.net), []).append(it.layers[layer])
+                for part, c in rules.clearance_parts(net_name, it.net, layer, it.layers[layer]):
+                    by_clearance.setdefault(c, []).append(part)
         groups = [(unary_union(geoms), c) for c, geoms in sorted(by_clearance.items())]
         foreign_by_layer[layer] = groups
         for foreign, c in groups:
@@ -689,6 +739,28 @@ def _route_violates_foreign(
     return False
 
 
+def route_clears_floors(route: LinkRoute, model: _BoardModel, rules: LinkRouteRules) -> bool:
+    """True if ``route`` keeps every per-net floor of ``rules`` (Issue #8573).
+
+    An exact re-check of finished geometry -- e.g. the output of
+    :func:`collapse_link_route`, which merges segments without a clearance
+    oracle -- against the same foreign-copper groups :func:`route_link` used.
+    """
+    from shapely.ops import unary_union
+
+    by_layer: dict[str, list[tuple[Any, float]]] = {}
+    for layer in model.copper:
+        by_c: dict[float, list[Any]] = {}
+        for it in model.items:
+            if it.net != route.net_number and layer in it.layers:
+                for part, c in rules.clearance_parts(
+                    route.net_name, it.net, layer, it.layers[layer]
+                ):
+                    by_c.setdefault(c, []).append(part)
+        by_layer[layer] = [(unary_union(g), c) for c, g in sorted(by_c.items())]
+    return not _route_violates_foreign(route, by_layer, route.width / 2)
+
+
 def _via_site_blocker(
     model: _BoardModel, net_number: int, site: tuple[float, float], rules: LinkRouteRules
 ) -> str | None:
@@ -704,10 +776,12 @@ def _via_site_blocker(
     for it in model.items:
         if it.net == net_number:
             continue
-        need = rules.clearance_for(it.net) + rules.via_size / 2
+        link_name = (rules.net_names or {}).get(net_number, "")
         for layer, geom in it.layers.items():
-            if p.distance(geom) < need - 1e-4:
-                return f"via site is {p.distance(geom):.3f} mm from foreign copper on {layer} (needs {need:.3f} mm)"
+            for part, c in rules.clearance_parts(link_name, it.net, layer, geom):
+                need = c + rules.via_size / 2
+                if p.distance(part) < need - 1e-4:
+                    return f"via site is {p.distance(part):.3f} mm from foreign copper on {layer} (needs {need:.3f} mm)"
     for geom in model.pad_geoms:
         if p.distance(geom) < rules.via_size / 2 + 0.05 - 1e-4:
             return "via site is inside or against a pad (no via-in-pad)"
