@@ -1420,6 +1420,38 @@ def test_ready_is_unreachable_when_a_required_check_is_absent():
     assert any("Required checks did not pass" in b for b in report["blockers"])
 
 
+def test_unified_cli_forwards_voltage_map_and_waiver_flags(tmp_path, monkeypatch):
+    board = make_board(tmp_path)
+    seen: dict = {}
+
+    def fake_main(argv, engines=None):
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(readiness_cmd, "main", fake_main)
+    from kicad_tools.cli import main as cli_main
+
+    vmap = tmp_path / "vmap.json"
+    rc = cli_main(
+        [
+            "readiness",
+            str(board),
+            "--voltage-map",
+            str(vmap),
+            "--waive-same-footprint",
+            "--waive-attach-zone",
+        ]
+    )
+    assert rc == 0
+    assert seen["argv"] == [
+        str(board),
+        "--voltage-map",
+        str(vmap),
+        "--waive-same-footprint",
+        "--waive-attach-zone",
+    ]
+
+
 def test_unified_cli_dispatches_the_readiness_subcommand(tmp_path, monkeypatch):
     board = make_board(tmp_path)
     seen: dict = {}
