@@ -251,7 +251,7 @@ def test_degenerate_query_falls_back_to_a_full_ring_scan_and_stays_exact(pour_po
 # --- predicate-level equivalence (indexed vs. forced-linear) -----------------
 
 
-def _fill(points, *, net=3, name="GND", layer="In1.Cu") -> FilledPolygon:
+def _fill(points, *, net=3, name="GND", layer="F.Cu") -> FilledPolygon:
     return FilledPolygon(net_number=net, net_name=name, layer=layer, points=list(points))
 
 
@@ -305,7 +305,7 @@ def test_edge_margin_predicate_matches_linear(pour_points, monkeypatch):
 
 
 def test_same_net_fill_predicate_matches_linear(pour_points, monkeypatch):
-    fills = [_fill(pour_points)]
+    fills = [_fill(pour_points, layer="In1.Cu")]
     rng = random.Random(555)
     samples = [(rng.uniform(-3.0, 43.0), rng.uniform(-3.0, 33.0)) for _ in range(1200)]
     indexed = [stitch_cmd._point_on_same_net_fill(x, y, 0.225, fills, "In1.Cu") for x, y in samples]
