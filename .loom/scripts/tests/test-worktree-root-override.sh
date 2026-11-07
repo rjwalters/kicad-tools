@@ -192,11 +192,14 @@ assert_eq "$r" "recognized" "default-root worktree recognized by GC predicate"
 
 # Overridden root outside .loom/worktrees: recognized only because the resolved
 # root now matches (the old substring-only check would have skipped it).
-r=$(LOOM_WORKTREE_ROOT="/Volumes/Stripe" gc_recognizes "/Users/foo/repo" "/Volumes/Stripe/repo/issue-9")
+# (A writable base is used: since #13639 a missing/unwritable root falls back.)
+GC_BASE=$(mktemp -d /tmp/loom-gc-base.XXXXXX)
+r=$(LOOM_WORKTREE_ROOT="$GC_BASE" gc_recognizes "/Users/foo/repo" "$GC_BASE/repo/issue-9")
 assert_eq "$r" "recognized" "overridden-root worktree recognized by GC predicate (regression #3530)"
 
 # Sanity: an unrelated path outside both is still skipped (user-owned).
-r=$(LOOM_WORKTREE_ROOT="/Volumes/Stripe" gc_recognizes "/Users/foo/repo" "/Users/foo/somewhere-else")
+r=$(LOOM_WORKTREE_ROOT="$GC_BASE" gc_recognizes "/Users/foo/repo" "/Users/foo/somewhere-else")
+rm -rf "$GC_BASE"
 assert_eq "$r" "skipped" "unrelated path is not recognized (stays user-owned)"
 
 # The wiring is present in the real script (guards against silent unwiring).
@@ -298,6 +301,48 @@ else
 fi
 chmod 755 "$UNREADABLE_CFG_TARGET"
 rm -rf "$UNREADABLE_CFG_BASE" "$CFGREPO2"
+
+# --- Test 10 (#13639): missing root under an unwritable ancestor -> falls back ---
+echo ""
+echo "Test 10: override target missing under an unwritable ancestor -> falls back (env + config)"
+unset LOOM_WORKTREE_ROOT
+MISSING_REPO="/tmp/loom-missing-root-repo/reporoot"
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "  (skipped: running as root can write anywhere)"
+else
+    MISSING_BASE="/nonexistent-loom-vol-13639/Stripe"
+    r=$(LOOM_WORKTREE_ROOT="$MISSING_BASE" loom_worktree_root "$MISSING_REPO" 2>/dev/null)
+    assert_eq "$r" "$MISSING_REPO/.loom/worktrees" "missing env-override root under unwritable ancestor falls back"
+    if LOOM_WORKTREE_ROOT="$MISSING_BASE" loom_worktree_root "$MISSING_REPO" 2>&1 >/dev/null | grep -q "$MISSING_BASE"; then
+        pass "missing env-override root warns naming the path"
+    else
+        fail "missing env-override root did not warn naming the path"
+    fi
+    MCFG=$(mktemp -d /tmp/loom-missing-cfgrepo.XXXXXX)
+    mkdir -p "$MCFG/.loom"
+    printf '{ "worktree": { "root": "%s/" } }\n' "$MISSING_BASE" > "$MCFG/.loom/config.json"
+    r=$(loom_worktree_root "$MCFG" 2>/dev/null)
+    assert_eq "$r" "$MCFG/.loom/worktrees" "missing config-override root (trailing slash) falls back"
+    rm -rf "$MCFG"
+
+    # Existing but unwritable dir (chmod 555) also falls back.
+    RO_BASE=$(mktemp -d /tmp/loom-ro-base.XXXXXX)
+    mkdir -p "$RO_BASE/reporoot"
+    chmod 555 "$RO_BASE/reporoot"
+    r=$(LOOM_WORKTREE_ROOT="$RO_BASE" loom_worktree_root "$MISSING_REPO" 2>/dev/null)
+    assert_eq "$r" "$MISSING_REPO/.loom/worktrees" "read-only existing override target falls back"
+    # Missing leaf under a read-only parent also falls back.
+    r=$(LOOM_WORKTREE_ROOT="$RO_BASE/reporoot/sub" loom_worktree_root "$MISSING_REPO" 2>/dev/null)
+    assert_eq "$r" "$MISSING_REPO/.loom/worktrees" "missing root under read-only parent falls back"
+    chmod 755 "$RO_BASE/reporoot"
+    rm -rf "$RO_BASE"
+fi
+
+# Missing-but-creatable root (writable parent) is still honored.
+CREATABLE_BASE="$(mktemp -d /tmp/loom-creatable.XXXXXX)/not-yet"
+r=$(LOOM_WORKTREE_ROOT="$CREATABLE_BASE" loom_worktree_root "$MISSING_REPO" 2>/dev/null)
+assert_eq "$r" "$CREATABLE_BASE/reporoot" "missing-but-creatable root is still returned (no regression)"
+rm -rf "$(dirname "$CREATABLE_BASE")"
 
 # --- Summary ---
 echo ""

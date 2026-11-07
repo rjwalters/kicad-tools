@@ -87,6 +87,15 @@ SWEPT_SURFACES: dict[str, list[str]] = {
     "build": ["project"],
     "pipeline": ["board.kicad_pcb"],
     "stitch": ["board.kicad_pcb"],
+    "tapeout-sign-off": [
+        "bundle",
+        "--board",
+        "board.kicad_pcb",
+        "--readiness",
+        "readiness.json",
+        "--reviewer",
+        "Ann",
+    ],
 }
 
 # Fields whose value is wall-clock time and therefore deliberately volatile.

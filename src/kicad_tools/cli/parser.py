@@ -252,6 +252,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_fix_silkscreen_parser(subparsers)
     _add_place_silk_refs_parser(subparsers)
     _add_repair_clearance_parser(subparsers)
+    _add_repair_creepage_parser(subparsers)
     _add_fix_drc_parser(subparsers)
     _add_fix_erc_parser(subparsers)
     _add_parts_parser(subparsers)
@@ -278,6 +279,7 @@ def create_parser() -> argparse.ArgumentParser:
     _add_board_metrics_parser(subparsers)
     _add_readiness_parser(subparsers)
     _add_submit_jlcpcb_parser(subparsers)
+    _add_tapeout_signoff_parser(subparsers)
     _add_clean_parser(subparsers)
     _add_impedance_parser(subparsers)
     _add_mcp_parser(subparsers)
@@ -3303,6 +3305,63 @@ def _add_pcb_parser(subparsers) -> None:
         help="Report the would-be transform without modifying the PCB file",
     )
 
+    # pcb add-board-info
+    pcb_board_info = pcb_subparsers.add_parser(
+        "add-board-info",
+        help="Stamp project/rev/date board identification on silkscreen",
+        description=(
+            "Add a board-level silkscreen gr_text whose {project}, {rev} and "
+            "{date} fields come from the PCB title block. Use --at X Y for "
+            "explicit placement or --auto to find a free region clear of "
+            "pads, other silk, courtyards and the board edge."
+        ),
+    )
+    pcb_board_info.add_argument("pcb", help="Path to .kicad_pcb file")
+    pcb_board_info.add_argument(
+        "--text",
+        default="{project} {rev} {date}",
+        help="Text template; fields: {project} {rev} {date} (default: '%(default)s')",
+    )
+    pcb_board_info.add_argument(
+        "--layer",
+        choices=["F.SilkS", "B.SilkS"],
+        default="F.SilkS",
+        help="Silkscreen layer (B.SilkS text is mirrored)",
+    )
+    pcb_board_info.add_argument(
+        "--at",
+        nargs=2,
+        type=float,
+        metavar=("X", "Y"),
+        help="Text centre in KiCad file coordinates (mm)",
+    )
+    pcb_board_info.add_argument(
+        "--auto",
+        action="store_true",
+        help="Pick a free region automatically (nearest the bottom-left corner)",
+    )
+    pcb_board_info.add_argument(
+        "--order-placeholder",
+        nargs="?",
+        const="JLCJLCJLCJLC",
+        default=None,
+        metavar="TEXT",
+        help="Also stamp a fab order-number placeholder (default text: JLCJLCJLCJLC)",
+    )
+    pcb_board_info.add_argument("--font-size", type=float, default=1.0, help="Font size (mm)")
+    pcb_board_info.add_argument(
+        "--font-thickness", type=float, default=0.15, help="Font stroke thickness (mm)"
+    )
+    pcb_board_info.add_argument(
+        "-o", "--output", dest="output", help="Output file path (default: overwrite input PCB)"
+    )
+    pcb_board_info.add_argument(
+        "--format", choices=["text", "json"], default="text", help="Output format"
+    )
+    pcb_board_info.add_argument(
+        "--dry-run", action="store_true", help="Preview without modifying the PCB file"
+    )
+
     # pcb lock-footprints / unlock-footprints
     for _cmd_name, _help_verb in (
         ("lock-footprints", "Lock"),
@@ -5107,6 +5166,24 @@ def _add_repair_clearance_parser(subparsers) -> None:
         default="text",
         help="Output format (default: text)",
     )
+
+
+def _add_repair_creepage_parser(subparsers) -> None:
+    """Add repair-creepage subcommand parser (Issue #8545)."""
+    from .repair_creepage_cmd import add_repair_creepage_args
+
+    parser = subparsers.add_parser(
+        "repair-creepage",
+        help="Repair HV creepage shortfalls by translating wide traces/vias (keeps width)",
+        description=(
+            "Repair HV creepage shortfalls by translating wide traces/vias. The DRC "
+            "regression gate compares error COUNTS only: a move that fixes one "
+            "violation and creates another is not caught, so re-run `kct check` on the "
+            "result. Without -o the input board is overwritten, even on a partial repair "
+            "(exit 1)."
+        ),
+    )
+    add_repair_creepage_args(parser)
 
 
 def _add_fix_drc_parser(subparsers) -> None:
@@ -7097,6 +7174,18 @@ def _add_submit_jlcpcb_parser(subparsers) -> None:
     )
 
 
+def _add_tapeout_signoff_parser(subparsers) -> None:
+    """Add ``tapeout-sign-off`` (records the human sign-off, #8537)."""
+    from .tapeout_signoff_cmd import add_arguments
+
+    add_arguments(
+        subparsers.add_parser(
+            "tapeout-sign-off",
+            help="Record a human sign-off in a tapeout bundle's manifest.json",
+        )
+    )
+
+
 def _add_readiness_parser(subparsers) -> None:
     """Add the ``readiness`` parser (scriptable manufacturing sign-off, #4977).
 
@@ -7284,6 +7373,30 @@ def _add_readiness_parser(subparsers) -> None:
         choices=["I", "II", "IIIa", "IIIb"],
         default="IIIa",
         help="Insulation material group by CTI (default: IIIa, conservative for FR-4).",
+    )
+    rd_parser.add_argument(
+        "--voltage-map",
+        dest="readiness_voltage_map",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Per-net voltage map JSON (as `kct creepage --voltage-map`): derive the "
+            "HV requirement per pair from |V_a - V_b| instead of one flat working "
+            "voltage. Requires --hv-standard and --hv-pollution-degree. The map's "
+            "sha256 is recorded in the HV evidence."
+        ),
+    )
+    rd_parser.add_argument(
+        "--waive-same-footprint",
+        dest="readiness_waive_same_footprint",
+        action="store_true",
+        help="With --voltage-map: waive component-internal (same-footprint) HV pairs, listed in evidence.",
+    )
+    rd_parser.add_argument(
+        "--waive-attach-zone",
+        dest="readiness_waive_attach_zone",
+        action="store_true",
+        help="With --voltage-map: waive attach-zone HV pairs whose residual copper clears, listed in evidence.",
     )
     rd_parser.add_argument(
         "--fill-tolerance",

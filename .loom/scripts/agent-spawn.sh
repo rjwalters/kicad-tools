@@ -2,7 +2,7 @@
 # agent-spawn.sh - Thin stub delegating to `loom-daemon agent-spawn`.
 #
 # This script preserves backward compatibility for callers that invoke
-# agent-spawn.sh directly (loom-start.sh, loom-scale.sh, operators).
+# agent-spawn.sh directly (loom-start.sh, operators).
 #
 # The Python `loom_tools.agent_spawn` implementation was ported to native
 # `loom-daemon agent-spawn` in epic #4081 Phase 3 family 4 (issue #4415); this

@@ -37,6 +37,7 @@ Present it grouped like this (keep descriptions terse, one line each):
 | Command | What it does |
 |---------|--------------|
 | `/loom:sweep <issue>` | Run one issue through the full lifecycle (Curator → Builder → Judge → Doctor → Merge). Also `--prs` for a PR set. |
+| `/loom:accelerate [--dry-run] [--yes] [--max-parallel N]` | Session-only `/loom:sweep all` + `all --prs` loop sized to this machine, to push one repo faster alongside the fleet. No daemon. |
 | `/loom:loom` | Operate the Layer 2 `loom-daemon` — dispatch, monitor, and cancel sweeps via MCP tools. |
 | `/loom:watch [--until HH:MM]` | Watch the fleet on a tick loop: health probe, bounded remediation, end-of-window summary. `--dry-run` for one read-only tick. |
 

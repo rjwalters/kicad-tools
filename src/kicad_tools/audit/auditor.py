@@ -312,10 +312,18 @@ class IsolationStatus:
     # Full engine census dict (CreepageReport.to_dict()) -- kept verbatim so
     # JSON provenance matches ``kct creepage --format json``.
     report: dict = field(default_factory=dict)
+    # Voltage-map census mode (issue #8570): ``passed`` is the waiver-aware
+    # ``gate_passed`` and these record what was waived.  Listed, never dropped.
+    voltage_map_used: bool = False
+    waived_count: int = 0
+    waived_pairs: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "checked": self.checked,
+            "voltage_map_used": self.voltage_map_used,
+            "waived_count": self.waived_count,
+            "waived_pairs": [dict(p) for p in self.waived_pairs],
             "hv_present": self.hv_present,
             "threshold_supplied": self.threshold_supplied,
             "could_not_verify": self.could_not_verify,
@@ -351,6 +359,10 @@ def check_isolation(
     hv_material_group: str = "IIIa",
     hv_overvoltage_category: str = "II",
     hv_insulation: str = "basic",
+    voltage_map_path: str | Path | None = None,
+    waive_same_footprint: bool = False,
+    waive_attach_zone: bool = False,
+    census_threshold: float = 30.0,
 ) -> IsolationStatus:
     """Standalone HV creepage/clearance isolation check (issue #4333, phase 3).
 
@@ -372,10 +384,48 @@ def check_isolation(
     ``hv_insulation`` (``basic`` / ``supplementary`` / ``reinforced``, default
     ``basic``) selects the insulation rule for the derived creepage and
     clearance (issue #7082).
+
+    ``voltage_map_path`` (issue #8570) switches to the ``kct creepage
+    --voltage-map`` engine: the requirement is derived per pair from |V_a - V_b|
+    (needs ``hv_standard`` + ``hv_pollution_degree``; ``hv_working_voltage`` is
+    optional) and ``waive_same_footprint`` / ``waive_attach_zone`` apply the
+    census waivers.  The verdict then keys off the waiver-aware ``gate_passed``;
+    without a voltage map or waivers it keys off the raw ``passed`` exactly as
+    before.
     """
     status = IsolationStatus(standard=hv_standard)
     if hv_standard is not None:
         status.insulation = hv_insulation
+
+    voltage_map = None
+    edge_voltage = 0.0
+    pair_bounds: dict = {}
+    if voltage_map_path is not None:
+        import json
+
+        from kicad_tools.creepage.engine import (
+            pair_bounds_from_dict,
+            voltage_map_from_dict,
+        )
+
+        if hv_standard is None or hv_pollution_degree is None:
+            status.could_not_verify = True
+            status.hv_present = True
+            status.details = (
+                "voltage map supplied but --hv-standard and --hv-pollution-degree "
+                "are both required to derive per-pair requirements -- isolation NOT verified."
+            )
+            return status
+        try:
+            raw = json.loads(Path(voltage_map_path).read_text())
+            voltage_map, edge_voltage = voltage_map_from_dict(raw)
+            pair_bounds = pair_bounds_from_dict(raw)
+        except (OSError, ValueError, TypeError) as e:
+            status.could_not_verify = True
+            status.hv_present = True
+            status.details = f"voltage map could not be loaded: {e}"
+            return status
+    status.voltage_map_used = voltage_map is not None
 
     # Parse the net-class-map sidecar with the SAME block ``kct check``'s
     # DRC rules use so HV selection agrees with the diff-pair DRC rules
@@ -404,7 +454,14 @@ def check_isolation(
     from kicad_tools.creepage.engine import resolve_hv_nets
 
     try:
-        hv_nets = resolve_hv_nets(pcb, hv_net_class, resolved_net_class_map)
+        hv_nets = resolve_hv_nets(
+            pcb,
+            hv_net_class,
+            resolved_net_class_map,
+            voltage_map=voltage_map,
+            edge_voltage=edge_voltage,
+            census_threshold=census_threshold if voltage_map is not None else None,
+        )
     except Exception as e:  # pragma: no cover - defensive
         # Never let HV-net resolution crash the whole audit.
         logger.warning("Isolation check: HV-net resolution failed: %s", e)
@@ -493,13 +550,14 @@ def check_isolation(
     required_clearance_mm: float | None = None
     creepage_prov: dict | None = None
     clearance_prov: dict | None = None
+    std = None
     if hv_standard is not None:
         from kicad_tools.creepage.standards import (
             StandardLookupError,
             get_standard,
         )
 
-        if hv_working_voltage is None or hv_pollution_degree is None:
+        if hv_pollution_degree is None or (voltage_map is None and hv_working_voltage is None):
             status.could_not_verify = True
             status.details = (
                 "HV standard supplied but --hv-working-voltage and "
@@ -508,20 +566,22 @@ def check_isolation(
             return status
         try:
             std = get_standard(hv_standard)
-            required_creepage_mm, creepage_prov = std.required_creepage(
-                float(hv_working_voltage),
-                int(hv_pollution_degree),
-                hv_material_group,
-                hv_insulation,
-            )
-            # Clearance = max(F.2 at the F.1 rated impulse voltage, F.8 at the
-            # steady-state peak, PD floor) -- issue #7057.
-            required_clearance_mm, clearance_prov = std.required_clearance(
-                float(hv_working_voltage),
-                int(hv_pollution_degree),
-                hv_overvoltage_category,
-                hv_insulation,
-            )
+            if voltage_map is None:
+                assert hv_working_voltage is not None
+                required_creepage_mm, creepage_prov = std.required_creepage(
+                    float(hv_working_voltage),
+                    int(hv_pollution_degree),
+                    hv_material_group,
+                    hv_insulation,
+                )
+                # Clearance = max(F.2 at the F.1 rated impulse voltage, F.8 at
+                # the steady-state peak, PD floor) -- issue #7057.
+                required_clearance_mm, clearance_prov = std.required_clearance(
+                    float(hv_working_voltage),
+                    int(hv_pollution_degree),
+                    hv_overvoltage_category,
+                    hv_insulation,
+                )
             status.standard_edition = std.edition
         except StandardLookupError as e:
             # Safety-critical: fail LOUD, never emit a guessed number.
@@ -529,7 +589,14 @@ def check_isolation(
             status.details = f"standard-table lookup failed: {e}"
             return status
 
-    from kicad_tools.creepage.engine import compute_creepage_census
+    from kicad_tools.creepage.engine import apply_census_waivers, compute_creepage_census
+
+    # Attach-zone waiver (#8028): same zone builder ``kct creepage`` uses.
+    attach_zones = None
+    if waive_attach_zone:
+        from kicad_tools.router.pairwise_clearance import build_attach_zones
+
+        attach_zones = build_attach_zones(pcb.footprints)
 
     try:
         report = compute_creepage_census(
@@ -542,14 +609,20 @@ def check_isolation(
             required_clearance_mm=required_clearance_mm,
             standard=hv_standard,
             standard_edition=status.standard_edition,
-            working_voltage=hv_working_voltage,
+            working_voltage=None if voltage_map is not None else hv_working_voltage,
             pollution_degree=hv_pollution_degree,
             material_group=(hv_material_group if hv_standard is not None else None),
             creepage_provenance=creepage_prov,
             clearance_provenance=clearance_prov,
+            voltage_map=voltage_map,
+            standard_obj=std if voltage_map is not None else None,
+            edge_voltage=edge_voltage,
             overvoltage_category=hv_overvoltage_category,
             insulation=hv_insulation,
+            attach_zones=attach_zones,
+            pair_bounds=pair_bounds or None,
         )
+        apply_census_waivers(report, waive_same_footprint=waive_same_footprint)
     except Exception as e:
         # A genuine census crash must NOT be coerced into a clean PASS.
         logger.warning("Isolation check: creepage census failed: %s", e)
@@ -568,7 +641,21 @@ def check_isolation(
     if threshold_supplied:
         # Fully gated: the verdict can hard-fail on this result.
         status.checked = True
-        status.passed = report.passed
+        waiver_aware = voltage_map is not None or waive_same_footprint or waive_attach_zone
+        status.passed = report.gate_passed if waiver_aware else report.passed
+        status.waived_count = sum(1 for p in report.pairs if p.waived)
+        status.waived_pairs = [
+            {
+                "net_a": p.net_a,
+                "net_b": p.net_b,
+                "kind": p.kind,
+                "relationship": p.relationship,
+                "creepage_mm": round(p.creepage_mm, 4),
+                "clearance_mm": round(p.clearance_mm, 4),
+            }
+            for p in report.pairs
+            if p.waived
+        ]
         status.failing_pairs = [
             {
                 "net_a": p.net_a,
@@ -587,11 +674,14 @@ def check_isolation(
                 ),
             }
             for p in report.pairs
-            if not p.passed
+            if not p.passed and not (waiver_aware and p.waived)
         ]
         if status.passed:
             status.details = (
                 f"All {status.pair_count} HV pair(s) clear the required creepage/clearance."
+                if not status.waived_count
+                else f"All non-waived HV pair(s) clear the required creepage/clearance "
+                f"({status.waived_count} of {status.pair_count} WAIVED)."
             )
         else:
             status.details = (

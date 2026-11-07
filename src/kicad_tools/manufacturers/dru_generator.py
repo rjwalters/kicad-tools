@@ -358,6 +358,11 @@ def merge_dru_floors(
     return _check_dru_loadable(f"{prefix}\n{block}\n", path)
 
 
+def _dru_quote(value: str) -> str:
+    """Escape a net/class name for a single-quoted DRU condition literal."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def generate_dru(
     rules: DesignRules,
     manufacturer_name: str = "",
@@ -599,10 +604,21 @@ def generate_dru(
                 else 0.0
             )
 
+            # Per-net targets are scoped to their nets (#8527); a class-wide
+            # target keeps the ``A.NetClass`` scope.
+            net_scope = tuple(getattr(nc, "net_scope", ()) or ())
+            if net_scope:
+                scope = " || ".join(f"A.NetName == '{_dru_quote(n)}'" for n in net_scope)
+                scope_cond = f"({scope})"
+                label = f"{nc.name} {nc.target_ampacity:g}A"
+            else:
+                scope_cond = f"A.NetClass == '{_dru_quote(nc.name)}'"
+                label = nc.name
+
             # External copper: front and back layers.
             lines.append(
-                f'(rule "Ampacity Min Width ({nc.name}, external){label_suffix}"\n'
-                f"  (condition \"A.NetClass == '{nc.name}' && A.Type == 'track'"
+                f'(rule "Ampacity Min Width ({label}, external){label_suffix}"\n'
+                f"  (condition \"{scope_cond} && A.Type == 'track'"
                 f" && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')\")\n"
                 f"  (constraint track_width (min {external_width_mm:.4f}mm)))"
             )
@@ -610,8 +626,8 @@ def generate_dru(
                 continue
             # Internal copper: any track that is not on an external layer.
             lines.append(
-                f'(rule "Ampacity Min Width ({nc.name}, internal){label_suffix}"\n'
-                f"  (condition \"A.NetClass == '{nc.name}' && A.Type == 'track'"
+                f'(rule "Ampacity Min Width ({label}, internal){label_suffix}"\n'
+                f"  (condition \"{scope_cond} && A.Type == 'track'"
                 f" && A.Layer != 'F.Cu' && A.Layer != 'B.Cu'\")\n"
                 f"  (constraint track_width (min {internal_width_mm:.4f}mm)))"
             )

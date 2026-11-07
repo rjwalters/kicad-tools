@@ -971,7 +971,11 @@ class ManufacturingPackage:
             else:
                 logger.info(fab_override_msg)
 
+        rules = self._apply_stackup_copper(rules)
         net_classes = self._load_net_classes(result)
+
+        dru_path = Path(self.pcb_path).with_suffix(".kicad_dru")
+        dru_before = self._ampacity_block(dru_path)
 
         try:
             written = write_drc_constraints(
@@ -988,6 +992,60 @@ class ManufacturingPackage:
             return
 
         result.drc_constraint_paths = written
+
+        # #8527: the sign-off DRC ran against the committed DRU; flag a changed
+        # ampacity block so nobody ships a DRU that was never DRC'd.
+        dru_after = self._ampacity_block(dru_path)
+        if dru_before != dru_after:
+            msg = (
+                f"Export changed the ampacity rules in {dru_path.name}; the "
+                "sign-off DRC did not run against them. Re-run "
+                "`kicad-cli pcb drc` against the shipped .kicad_dru."
+            )
+            logger.warning(msg)
+            result.warnings.append(msg)
+
+    @staticmethod
+    def _ampacity_block(dru_path: Path) -> list[str]:
+        """Return the ampacity rule blocks of a ``.kicad_dru`` (empty if none).
+
+        The regex assumes each rule spans exactly three lines (name, condition,
+        constraint), matching ``generate_dru`` in ``dru_generator.py``; change
+        them together.
+        """
+        try:
+            text = dru_path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        return re.findall(r'\(rule "Ampacity Min Width[^"]*"[^\n]*\n[^\n]*\n[^\n]*', text)
+
+    def _apply_stackup_copper(self, rules):
+        """Use the board's declared stackup copper weights for ampacity rules (#8527).
+
+        The profile lookup keys on a hard-coded 1 oz, so a declared 2 oz outer
+        stackup would otherwise produce 1 oz ampacity widths.  Only overrides
+        what the board declares; undeclared stays at the profile value.
+        """
+        try:
+            from dataclasses import replace as _replace
+
+            from ..physics.stackup import Stackup
+            from ..schema.pcb import PCB
+
+            # Read the declared stackup directly (as ``kct check`` does): the
+            # fab-profile-matched lookup returns nothing for layer counts the
+            # profile has no copper option for, silently reverting to 1 oz.
+            derived = Stackup.from_pcb(PCB.load(str(self.pcb_path))).outer_inner_copper_oz()
+            outer, inner = derived if derived is not None else (None, None)
+            updates = {}
+            if outer:
+                updates["outer_copper_oz"] = float(outer)
+            if inner and rules.inner_copper_oz > 0:
+                updates["inner_copper_oz"] = float(inner)
+            return _replace(rules, **updates) if updates else rules
+        except Exception as e:  # noqa: BLE001 - best effort; keep profile weights
+            logger.debug("Could not read stackup copper for DRU: %s", e)
+            return rules
 
     def _load_net_classes(self, result: ManufacturingResult) -> list | None:
         """Load the board's net-class-map sidecar as deduped classes (#8393).

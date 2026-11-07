@@ -314,6 +314,39 @@ fi
 assert_eq "$(LOOM_CORES_OVERRIDE=28 bash -c "source '$DISK_HEADROOM_LIB'; loom_subagent_target_from_cores \"\$(loom_detect_cores)\"")" "6" \
     "composition: LOOM_CORES_OVERRIDE=28 -> target 6"
 
+# --- Test 10: loom_localhost_parallelism (#13663) ---
+echo ""
+echo "Test 10: loom_localhost_parallelism sizes /loom:accelerate to the host"
+
+lp() {
+    local out
+    out="$(loom_localhost_parallelism "$@")"
+    printf '%s|%s' "$(printf '%s\n' "$out" | sed -n '1p')" "$(printf '%s\n' "$out" | sed -n '2p')"
+}
+
+# Defaults: per-builder RAM 4 GB, per-worktree disk 8 GB.
+assert_eq "$(lp 28 64 200 20)" "6|cores" "28 cores, ample RAM/disk -> 6 (cores)"
+assert_eq "$(lp 8 64 200 20)" "3|cores" "8 cores -> floor target 3 (cores)"
+assert_eq "$(lp 28 12 200 20)" "3|ram" "12GB RAM -> 3 (ram)"
+assert_eq "$(lp 28 64 24 20)" "3|disk" "24GB disk -> 3 (disk)"
+assert_eq "$(lp 28 64 200 2)" "2|candidates" "2 candidates -> 2 (candidates)"
+assert_eq "$(lp 28 64 200 20 2)" "2|max_parallel" "--max-parallel 2 caps -> 2 (max_parallel)"
+assert_eq "$(lp 28 64 200 20 9)" "9|max_parallel" "--max-parallel 9 raises past 6 (max_parallel)"
+assert_eq "$(lp 28 8 200 20 9)" "2|ram" "raised max-parallel still clamped by RAM"
+assert_eq "$(lp 28 2 200 20)" "1|floor" "RAM below one builder -> floor 1"
+assert_eq "$(lp 28 64 1 20)" "1|floor" "nearly full disk -> floor 1"
+# Unknown != zero (#4164): an unmeasurable probe skips its clamp.
+assert_eq "$(lp 28 unknown unknown 20)" "6|cores" "unknown RAM/disk -> clamp skipped, not zero"
+assert_eq "$(lp 28 unknown 24 20)" "3|disk" "unknown RAM, measured disk -> disk binds"
+if loom_localhost_parallelism 8 abc 100 5 >/dev/null 2>&1; then fail "non-integer ram should fail"; else pass "non-integer ram rejected"; fi
+if loom_localhost_parallelism 8 16 100 5 0 >/dev/null 2>&1; then fail "max_parallel 0 should fail"; else pass "max_parallel 0 rejected"; fi
+
+# loom_detect_ram_gb: override and unknown-vs-zero.
+assert_eq "$(LOOM_RAM_GB_OVERRIDE=32 loom_detect_ram_gb)" "32" "LOOM_RAM_GB_OVERRIDE=32 -> 32"
+assert_eq "$(LOOM_RAM_GB_OVERRIDE=0 loom_detect_ram_gb)" "0" "a measured 0 stays 0"
+ram="$(loom_detect_ram_gb 2>/dev/null || true)"
+if [[ -z "$ram" || "$ram" =~ ^[0-9]+$ ]]; then pass "loom_detect_ram_gb returns an integer or nothing ($ram)"; else fail "loom_detect_ram_gb returned '$ram'"; fi
+
 # --- Summary ---
 echo ""
 echo "Tests run: $TESTS_RUN, Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"

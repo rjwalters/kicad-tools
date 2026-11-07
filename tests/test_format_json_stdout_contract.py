@@ -68,6 +68,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "check": ["{pcb}"],
     "creepage": ["{pcb}", "--min", "1.0"],
     "creepage-export-rules": ["{pro}"],
+    "repair-creepage": ["{pcb}", "--min", "1.0", "--dry-run"],
     # -- sch family ---------------------------------------------------------
     "sch summary": ["{sch}"],
     "sch hierarchy": ["{sch}"],
@@ -175,6 +176,7 @@ CONTRACT_ARGV: dict[str, list[str]] = {
     "pcb lock-footprints": ["{pcb}", "--dry-run"],
     "pcb unlock-footprints": ["{pcb}", "--dry-run"],
     "pcb add-zone": ["{pcb}", "--net", "GND", "--layer", "B.Cu", "--dry-run"],
+    "pcb add-board-info": ["{pcb}", "--text", "REV A", "--auto", "--dry-run"],
     "pcb snap-rotation": ["{pcb}", "--dry-run"],
     "pcb edit-outline": ["{pcb}", "--list"],
     "pcb net-audit": ["{pcb}"],
@@ -476,6 +478,7 @@ EXEMPT: dict[str, str] = {
     "models sync": "network: fetches the pinned kicad-packages3D subset (stubbed run in tests/test_models_sync.py)",
     "placement refine": "interactive: --format json is a stdin/stdout JSON Lines session",
     "submit-jlcpcb": "network: stock gate queries the LCSC/JLCPCB API and needs a tapeout bundle (JSON result unit-tested in tests/test_submission_workflow.py)",
+    "tapeout-sign-off": "needs a signed tapeout bundle with a fresh readiness receipt (JSON result unit-tested in tests/test_submission_workflow.py)",
 }
 
 # Leaves whose fixture run shells out to kicad-cli; skipped when it is absent

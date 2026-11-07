@@ -202,7 +202,32 @@ The `manifest.json` `kct export` wrote in Gate 3 only covers **what `kct export`
 - Record the **declared BOM exemptions** from Gate 4 (a list of `{ref, category, reason}`; empty list if none).
 - Record the **per-rule warning counts** from Gate 4b (a `rule_id` → warning-count map, plus the list of acknowledged assembly-affecting rules), so a later re-verification can diff the warning population **per rule** rather than against an aggregate total. An aggregate-only warning number in the manifest is non-compliant for the same reason it is in Gate 4b.
 
+**Exact schema `kct submit-jlcpcb` consumes** (the same module, `export/submission_workflow.py`, reads and writes it):
+
+```json
+{"files": {"<bundle-relative path>": {"sha256": "<hex>", "size": <bytes>}},
+ "tapeout": {"board_sha256": "<sha256 of the board .kicad_pcb>",
+             "readiness_sha256": "<sha256 of the passing readiness.json receipt>",
+             "human_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>"}}}
+```
+
+Per-file records use the keys `sha256` and `size` (not `bytes`). The `tapeout` block is **not** written by `kct export` or by this skill: it is a human act. After the gates pass, the human (or the agent on their explicit instruction, with their name) records it:
+
+```bash
+kct tapeout-sign-off <dir> --board <board.kicad_pcb> --readiness <readiness.json> --reviewer "<name>"
+```
+
+It verifies the manifest's file set equals `<dir>` and every `sha256`/`size`, and **refuses (exit 2, manifest untouched)** unless the `kct readiness` receipt is `ready` with every check passed (`kct_check`, `native_drc`, `artifacts`, `bom` present), hashes `--board` in its `inputs`, and covers every bundle file; only then does it write `tapeout`, including the receipt's sha256. Never invent a reviewer. After any change to the bundle or board, re-run the gates (or `kct readiness --verify`) to get a fresh receipt, and only then re-sign.
+
 **Gate condition:** a `manifest.json` exists, is newer than every other file it lists, its file set equals the actual contents of `<dir>` (nothing in the directory is unchecksummed, nothing checksummed is missing), and it records the per-rule warning counts. A stale or partial manifest is a **failure** — it breaks the "upload as-is" contract.
+
+### Readiness compatibility (`kct readiness --verify` accepts this bundle)
+
+`kct readiness --verify` re-checks a tapeout bundle's `artifacts` and `bom` gates. Keep this layout so both sign-off routes agree (issue #8571):
+
+- `manufacturing.zip` sits **beside** the bundle directory (`<pcb-dir>/manufacturing.zip` next to `<pcb-dir>/manufacturing/`), with members either flat or `manufacturing/`-prefixed, byte-identical to the bundle files. Tapeout does not write it, so zip the bundle files yourself (byte-identical) or pass `--no-archive` to skip the outer-archive comparison (the receipt then says the comparison was skipped). `kct readiness <board> --generate` only regenerates bundles that `kct readiness` itself produced; it refuses a tapeout bundle. Without the archive, `artifacts` fails with `bundle has no manufacturing.zip next to ...`.
+- `manifest.json` keeps `files{name: {sha256, size}}` for every file, and a **top-level** `preflight[]` (do not nest it) carrying the `bom_lcsc_values` entry that Gate 4 reads and the `bom` gate re-reads.
+- `README.txt` and `gerbers/gerbers.zip` (with Gerber and drill members) are present.
 
 ## Tapeout verdict
 

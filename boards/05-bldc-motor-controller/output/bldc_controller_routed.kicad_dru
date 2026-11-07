@@ -44,12 +44,12 @@
 (rule "Silkscreen Height - jlcpcb"
   (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
   (constraint text_height (min 1.0mm)))
-(rule "Ampacity Min Width (Motor power, external) - jlcpcb"
-  (condition "A.NetClass == 'Motor power' && A.Type == 'track' && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')")
+(rule "Ampacity Min Width (Motor power 0.5A, external) - jlcpcb"
+  (condition "(A.NetName == 'VIN' || A.NetName == 'FUSED' || A.NetName == 'VM' || A.NetName == 'PHASE_A' || A.NetName == 'PHASE_B' || A.NetName == 'PHASE_C' || A.NetName == 'GND_SENSE') && A.Type == 'track' && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')")
   (constraint track_width (min 0.1155mm)))
-(rule "Ampacity Min Width (Motor power, internal) - jlcpcb"
-  (condition "A.NetClass == 'Motor power' && A.Type == 'track' && A.Layer != 'F.Cu' && A.Layer != 'B.Cu'")
-  (constraint track_width (min 0.6008mm)))
+(rule "Ampacity Min Width (Motor power 0.5A, internal) - jlcpcb"
+  (condition "(A.NetName == 'VIN' || A.NetName == 'FUSED' || A.NetName == 'VM' || A.NetName == 'PHASE_A' || A.NetName == 'PHASE_B' || A.NetName == 'PHASE_C' || A.NetName == 'GND_SENSE') && A.Type == 'track' && A.Layer != 'F.Cu' && A.Layer != 'B.Cu'")
+  (constraint track_width (min 0.3004mm)))
 
 (rule "Reviewed clearance - Audio"
   (condition "(A.NetClass == 'Audio' || B.NetClass == 'Audio') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")

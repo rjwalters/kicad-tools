@@ -20,7 +20,7 @@ def run_pcb_command(args) -> int:
     if not args.pcb_command:
         print("Usage: kicad-tools pcb <command> [options] <file>")
         print(
-            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, prune, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, add-fiducials, move-footprint, move-via, transplant, page-fit, center-on-sheet, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
+            "Commands: summary, footprints, nets, traces, stackup, zones, strip, reinforce, dedupe, prune, reannotate, sync-netlist, annotate-pintypes, add-3d-models, remove-footprint, add-fiducials, move-footprint, move-via, transplant, page-fit, center-on-sheet, add-board-info, lock-footprints, unlock-footprints, add-zone, snap-rotation, edit-outline, net-audit, model-audit, diff, export-dsn, import-ses, current-paths-audit"
         )
         return 1
 
@@ -136,6 +136,10 @@ def run_pcb_command(args) -> int:
     # Handle center-on-sheet command
     if args.pcb_command == "center-on-sheet":
         return _run_center_on_sheet_command(args, pcb_path)
+
+    # Handle add-board-info command
+    if args.pcb_command == "add-board-info":
+        return _run_add_board_info_command(args, pcb_path)
 
     # Handle lock-footprints / unlock-footprints commands
     if args.pcb_command in ("lock-footprints", "unlock-footprints"):
@@ -1811,6 +1815,27 @@ def _run_center_on_sheet_command(args, pcb_path: Path) -> int:
         title_block=getattr(args, "title_block", None),
         grid=getattr(args, "grid", None),
         dry_run=getattr(args, "dry_run", False),
+        output_format=getattr(args, "format", "text"),
+    )
+
+
+def _run_add_board_info_command(args, pcb_path: Path) -> int:
+    """Handle the 'pcb add-board-info' command."""
+    from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+
+    at = getattr(args, "at", None)
+    output = getattr(args, "output", None)
+    return run_add_board_info(
+        pcb_path=pcb_path,
+        text=args.text,
+        layer=args.layer,
+        at=(at[0], at[1]) if at else None,
+        auto=getattr(args, "auto", False),
+        order_placeholder=getattr(args, "order_placeholder", None),
+        font_size=args.font_size,
+        font_thickness=args.font_thickness,
+        dry_run=getattr(args, "dry_run", False),
+        output_path=Path(output) if output else None,
         output_format=getattr(args, "format", "text"),
     )
 

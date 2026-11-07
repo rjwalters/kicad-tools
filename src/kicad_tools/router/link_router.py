@@ -92,12 +92,61 @@ class LinkRouteRules:
     #: mapped below it (or absent) keeps ``clearance``.  ``None`` keeps the
     #: single-scalar behaviour exactly.
     clearance_by_net: Mapping[int, float] | None = None
+    #: Issue #8573: ``AttachZone`` regions (as built by
+    #: ``pairwise_clearance.build_attach_zones``) inside which the map-derived
+    #: floor of a net in ``attach_relax_nets`` relaxes to ``clearance`` -- the
+    #: same waiver ``kct creepage --waive-attach-zone`` applies.  Copper of such
+    #: a net outside the zone keeps its full floor.  ``net_names`` maps net
+    #: number -> name for the zone's name-keyed test.
+    attach_zones: Sequence[Any] = ()
+    attach_relax_nets: frozenset[int] = frozenset()
+    net_names: Mapping[int, str] | None = None
 
     def clearance_for(self, net_number: int) -> float:
         """Clearance this link must keep from copper on ``net_number``."""
         if self.clearance_by_net is None:
             return self.clearance
         return max(self.clearance, self.clearance_by_net.get(net_number, self.clearance))
+
+    def clearance_parts(
+        self, link_net_name: str, net_number: int, layer: str, geom: Any
+    ) -> list[tuple[Any, float]]:
+        """``geom`` (foreign copper of ``net_number`` on ``layer``) split by clearance.
+
+        Normally ``[(geom, clearance_for(net))]``.  The part of the copper that
+        lies inside an attach zone shared by the link net and ``net_number``
+        gets only the base ``clearance`` when the net's floor is map-derived.
+        """
+        full = self.clearance_for(net_number)
+        if (
+            not self.attach_zones
+            or net_number not in self.attach_relax_nets
+            or full <= self.clearance
+            or not self.net_names
+            or net_number not in self.net_names
+            or not link_net_name
+        ):
+            return [(geom, full)]
+        from shapely.geometry import box  # type: ignore[import-untyped]
+
+        from .pairwise_clearance import _norm_net_key
+
+        a, b = _norm_net_key(link_net_name), _norm_net_key(self.net_names[net_number])
+        parts: list[tuple[Any, float]] = []
+        rest = geom
+        for z in self.attach_zones:
+            if a not in z.net_names or b not in z.net_names:
+                continue
+            if not (z.covers_layer(a, layer) and z.covers_layer(b, layer)):
+                continue
+            zbox = box(z.min_x, z.min_y, z.max_x, z.max_y)
+            inside = rest.intersection(zbox)
+            if not inside.is_empty:
+                parts.append((inside, self.clearance))
+                rest = rest.difference(zbox)
+        if not rest.is_empty:
+            parts.append((rest, full))
+        return parts
 
 
 @dataclass
@@ -155,7 +204,7 @@ def _pad_layers(pad_layers: list[str], copper: list[str]) -> list[str]:
 
 def _pad_geometry(fp: Any, pad: Any) -> Any:
     """Board-relative copper outline of a footprint pad (un-eroded)."""
-    from shapely.geometry import LineString, Point, Polygon  # type: ignore[import-untyped]
+    from shapely.geometry import LineString, Point, Polygon
 
     from kicad_tools.core.geometry import rotate_pad_offset
 
@@ -506,7 +555,8 @@ def route_link(
         by_clearance: dict[float, list[Any]] = {}
         for it in model.items:
             if it.net != net_number and layer in it.layers and it.layers[layer].intersects(window):
-                by_clearance.setdefault(rules.clearance_for(it.net), []).append(it.layers[layer])
+                for part, c in rules.clearance_parts(net_name, it.net, layer, it.layers[layer]):
+                    by_clearance.setdefault(c, []).append(part)
         groups = [(unary_union(geoms), c) for c, geoms in sorted(by_clearance.items())]
         foreign_by_layer[layer] = groups
         for foreign, c in groups:
@@ -689,6 +739,28 @@ def _route_violates_foreign(
     return False
 
 
+def route_clears_floors(route: LinkRoute, model: _BoardModel, rules: LinkRouteRules) -> bool:
+    """True if ``route`` keeps every per-net floor of ``rules`` (Issue #8573).
+
+    An exact re-check of finished geometry -- e.g. the output of
+    :func:`collapse_link_route`, which merges segments without a clearance
+    oracle -- against the same foreign-copper groups :func:`route_link` used.
+    """
+    from shapely.ops import unary_union
+
+    by_layer: dict[str, list[tuple[Any, float]]] = {}
+    for layer in model.copper:
+        by_c: dict[float, list[Any]] = {}
+        for it in model.items:
+            if it.net != route.net_number and layer in it.layers:
+                for part, c in rules.clearance_parts(
+                    route.net_name, it.net, layer, it.layers[layer]
+                ):
+                    by_c.setdefault(c, []).append(part)
+        by_layer[layer] = [(unary_union(g), c) for c, g in sorted(by_c.items())]
+    return not _route_violates_foreign(route, by_layer, route.width / 2)
+
+
 def _via_site_blocker(
     model: _BoardModel, net_number: int, site: tuple[float, float], rules: LinkRouteRules
 ) -> str | None:
@@ -704,10 +776,12 @@ def _via_site_blocker(
     for it in model.items:
         if it.net == net_number:
             continue
-        need = rules.clearance_for(it.net) + rules.via_size / 2
+        link_name = (rules.net_names or {}).get(net_number, "")
         for layer, geom in it.layers.items():
-            if p.distance(geom) < need - 1e-4:
-                return f"via site is {p.distance(geom):.3f} mm from foreign copper on {layer} (needs {need:.3f} mm)"
+            for part, c in rules.clearance_parts(link_name, it.net, layer, geom):
+                need = c + rules.via_size / 2
+                if p.distance(part) < need - 1e-4:
+                    return f"via site is {p.distance(part):.3f} mm from foreign copper on {layer} (needs {need:.3f} mm)"
     for geom in model.pad_geoms:
         if p.distance(geom) < rules.via_size / 2 + 0.05 - 1e-4:
             return "via site is inside or against a pad (no via-in-pad)"
@@ -795,6 +869,7 @@ def explain_link_failure(
     line = LineString([a.point, b.point]) if a.point != b.point else Point(a.point)
     half_w = rules.trace_width / 2
     best: tuple[float, dict[str, Any]] | None = None
+    near: list[tuple[float, str, int, Any, float]] = []  # corridor candidates
     for it in model.items:
         if it.net == net_number:
             continue
@@ -803,6 +878,7 @@ def explain_link_failure(
             if allowed_layers is not None and layer not in allowed_layers:
                 continue
             d = line.distance(geom)
+            near.append((d, layer, it.net, geom, rules.clearance_for(it.net)))
             slack = d - need
             if best is None or slack < best[0]:
                 name = getattr(pcb.nets.get(it.net), "name", "") or f"net {it.net}"
@@ -819,7 +895,78 @@ def explain_link_failure(
     out: dict[str, Any] = {"reason": "no clearance-legal route inside the search window"}
     if best is not None:
         out["blocker"] = best[1]
+    bound = _corridor_bound(pcb, rules, near, line)
+    if bound is not None:
+        out["corridor"] = bound
+        out["reason"] = (
+            f"corridor too narrow: {bound['net_a']} and {bound['net_b']} ({bound['layer']}) "
+            f"are {bound['gap_mm']:.3f} mm apart but the link needs "
+            f">= {bound['required_mm']:.3f} mm "
+            f"({bound['clearance_a_mm']:.3f} + {bound['clearance_b_mm']:.3f} clearance "
+            f"+ {rules.trace_width:.3f} width)"
+        )
     return out
+
+
+def _crosses_line(across: Any, link_line: Any) -> bool:
+    """True when ``across`` is more perpendicular than parallel to ``link_line``."""
+    (ax, ay), (bx, by) = across.coords[0], across.coords[-1]
+    (lx1, ly1), (lx2, ly2) = link_line.coords[0], link_line.coords[-1]
+    ux, uy = bx - ax, by - ay
+    vx, vy = lx2 - lx1, ly2 - ly1
+    nu, nv = math.hypot(ux, uy), math.hypot(vx, vy)
+    if nu == 0 or nv == 0:
+        return False
+    return bool(abs(ux * vx + uy * vy) / (nu * nv) < 0.5)
+
+
+def _corridor_bound(
+    pcb: PCB,
+    rules: LinkRouteRules,
+    near: list[tuple[float, str, int, Any, float]],
+    link_line: Any,
+) -> dict[str, Any] | None:
+    """The geometric bound when two foreign items flank the link too tightly (#8546).
+
+    Two foreign conductors on one layer, both near the straight a-b line and on
+    opposite sides of it, leave a corridor of ``gap``.  The track fits only if
+    ``gap >= clearance_a + clearance_b + width``; when it does not, no router
+    could succeed on that layer and the bound is a better answer than "no route".
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import nearest_points
+
+    best: tuple[float, dict[str, Any]] | None = None
+    cand = sorted(near, key=lambda t: t[0])[:16]
+    for i, (da, la, na, ga, ca) in enumerate(cand):
+        for db, lb, nb, gb, cb in cand[i + 1 :]:
+            if la != lb or na == nb:
+                continue
+            # Flanking means the connecting segment runs across the link, not along it.
+            p1, p2 = nearest_points(ga, gb)
+            across = LineString([p1, p2]) if p1 != p2 else None
+            if across is None or not _crosses_line(across, link_line):
+                continue
+            required = ca + cb + rules.trace_width
+            gap = ga.distance(gb)
+            if gap >= required - 1e-9 or da > required or db > required:
+                continue
+            slack = gap - required
+            if best is None or slack < best[0]:
+                name = lambda n: getattr(pcb.nets.get(n), "name", "") or f"net {n}"  # noqa: E731
+                best = (
+                    slack,
+                    {
+                        "layer": la,
+                        "net_a": name(na),
+                        "net_b": name(nb),
+                        "gap_mm": round(gap, 3),
+                        "required_mm": round(required, 3),
+                        "clearance_a_mm": round(ca, 3),
+                        "clearance_b_mm": round(cb, 3),
+                    },
+                )
+    return best[1] if best else None
 
 
 def _octilinear(p: tuple[float, float], q: tuple[float, float]) -> bool:

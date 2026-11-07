@@ -1,6 +1,6 @@
 {
-  "loom_version": "0.19.1270",
-  "loom_commit": "db33bfde17c210bfbacb1d2272e47c2903005e5a",
+  "loom_version": "0.19.1272",
+  "loom_commit": "e5c0a2337e961ef581094e8a8a6e300d1551e4f7",
   "install_date": "2026-08-10",
   "installed_files": [
     ".claude/agents/loom-architect.md",
@@ -150,7 +150,6 @@
     ".loom/scripts/cli/loom-daemon-watchdog.sh",
     ".loom/scripts/cli/loom-help.sh",
     ".loom/scripts/cli/loom-logs.sh",
-    ".loom/scripts/cli/loom-scale.sh",
     ".loom/scripts/cli/loom-send.sh",
     ".loom/scripts/cli/loom-start.sh",
     ".loom/scripts/cli/loom-status.sh",
@@ -678,9 +677,10 @@
     ".loom/scripts/tests/test-guide-awaiting-revision-park.sh",
     ".loom/scripts/tests/test-guide-transient-first-at.sh",
     ".loom/scripts/tests/test-resync-installed-agents-md-create.sh",
-    ".loom/scripts/tests/test-premise-check.sh"
+    ".loom/scripts/tests/test-premise-check.sh",
+    ".claude/commands/loom/accelerate.md"
   ],
-  "last_resync": "2026-11-06",
+  "last_resync": "2026-11-07",
   "loom_source_remote": "https://github.com/rjwalters/loom.git",
   "requires_daemon": "0.19.1146"
 }

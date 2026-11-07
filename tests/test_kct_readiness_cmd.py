@@ -20,7 +20,7 @@ import pytest
 
 from kicad_tools._shapely import has_shapely
 from kicad_tools.cli import readiness_cmd
-from kicad_tools.cli.board_readiness import read_readiness
+from kicad_tools.cli.board_readiness import read_readiness, readiness_input_hash
 from kicad_tools.cli.readiness_cmd import EngineRun, Engines
 from tests.creepage.fixtures import board_close_hv_source, board_no_hv_source, board_source
 
@@ -372,7 +372,8 @@ def test_report_hashes_sources_rules_and_delivered_files(tmp_path):
         "project.kct",
     ):
         assert required in inputs, required
-        digest = hashlib.sha256((board / required).read_bytes()).hexdigest()
+        # The manufacturing manifest is hashed in canonical form (#8580).
+        digest = readiness_input_hash(required, (board / required).read_bytes())
         assert inputs[required] == digest, required
     # The report never hashes itself.
     assert "output/readiness.json" not in inputs
@@ -1022,6 +1023,82 @@ def test_a_malformed_pcb_blocks_the_isolation_gate(tmp_path):
     assert any("could not" in blocker.lower() for blocker in report["blockers"])
 
 
+def _write_voltage_map(board: Path, mapping: dict) -> Path:
+    path = board / "output" / "vmap.json"
+    path.write_text(json.dumps(mapping))
+    return path
+
+
+_VMAP_ARGS = ("--hv-standard", "iec60664", "--hv-pollution-degree", "2")
+
+
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_hv_voltage_map_same_potential_pair_passes_and_is_recorded(tmp_path):
+    """Issue #8570: a ~1mm pair at the SAME potential passes under the census,
+    while the flat 250 V path still fails on the identical board."""
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    vmap = _write_voltage_map(board, {"L_MAINS": 0, "GND": 0})
+
+    flat_code, flat = run(
+        board,
+        _NoOpRefillEngines(board),
+        *_VMAP_ARGS,
+        "--hv-working-voltage",
+        "250",
+    )
+    assert flat_code != 0
+    assert check_status(flat, "hv_isolation") == "failed"
+
+    code, report = run(board, _NoOpRefillEngines(board), *_VMAP_ARGS, "--voltage-map", str(vmap))
+    assert code == 0
+    assert check_status(report, "hv_isolation") == "passed"
+    evidence = json.loads((board / "output" / "readiness" / "hv-isolation.json").read_text())
+    assert evidence["voltage_map_sha256"] == hashlib.sha256(vmap.read_bytes()).hexdigest()
+    assert evidence["waive_same_footprint"] is False
+    assert evidence["waived_count"] == 0
+    assert evidence["gate_passed"] is True
+    assert any(path.endswith("vmap.json") for path in report["inputs"])
+
+
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_hv_voltage_map_with_real_potential_difference_still_fails(tmp_path):
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    vmap = _write_voltage_map(board, {"L_MAINS": 150, "GND": 0})
+
+    code, report = run(board, _NoOpRefillEngines(board), *_VMAP_ARGS, "--voltage-map", str(vmap))
+
+    assert code != 0
+    assert check_status(report, "hv_isolation") == "failed"
+
+
+@pytest.mark.skipif(not has_shapely(), reason="creepage requires shapely")
+def test_hv_voltage_map_is_hash_bound_in_report_inputs(tmp_path):
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+    vmap = _write_voltage_map(board, {"L_MAINS": 0, "GND": 0})
+    code, report = run(board, _NoOpRefillEngines(board), *_VMAP_ARGS, "--voltage-map", str(vmap))
+    assert code == 0
+    recorded = {k: v for k, v in report["inputs"].items() if k.endswith("vmap.json")}
+    assert recorded == {next(iter(recorded)): hashlib.sha256(vmap.read_bytes()).hexdigest()}
+
+
+def test_hv_waiver_flag_without_voltage_map_is_rejected(tmp_path, capsys):
+    board = make_board(tmp_path)
+    _write_hv_pcb(board, board_close_hv_source())
+    _write_net_class_map(board, {"L_MAINS": "HV"})
+
+    code, report = run(board, _NoOpRefillEngines(board), "--waive-same-footprint")
+
+    assert code != 0
+    assert report == {}
+    assert "require --voltage-map" in capsys.readouterr().err
+
+
 def test_board_without_hv_nets_omits_the_gate_entirely(tmp_path):
     board = make_board(tmp_path)
     (board / "output" / "net_class_map.json").write_text(json.dumps({"GND": {"name": "Power"}}))
@@ -1344,6 +1421,38 @@ def test_ready_is_unreachable_when_a_required_check_is_absent():
     assert any("Required checks did not pass" in b for b in report["blockers"])
 
 
+def test_unified_cli_forwards_voltage_map_and_waiver_flags(tmp_path, monkeypatch):
+    board = make_board(tmp_path)
+    seen: dict = {}
+
+    def fake_main(argv, engines=None):
+        seen["argv"] = argv
+        return 0
+
+    monkeypatch.setattr(readiness_cmd, "main", fake_main)
+    from kicad_tools.cli import main as cli_main
+
+    vmap = tmp_path / "vmap.json"
+    rc = cli_main(
+        [
+            "readiness",
+            str(board),
+            "--voltage-map",
+            str(vmap),
+            "--waive-same-footprint",
+            "--waive-attach-zone",
+        ]
+    )
+    assert rc == 0
+    assert seen["argv"] == [
+        str(board),
+        "--voltage-map",
+        str(vmap),
+        "--waive-same-footprint",
+        "--waive-attach-zone",
+    ]
+
+
 def test_unified_cli_dispatches_the_readiness_subcommand(tmp_path, monkeypatch):
     board = make_board(tmp_path)
     seen: dict = {}
@@ -1506,6 +1615,64 @@ def test_verify_mode_reads_the_retained_manifest_lcsc_check(tmp_path):
     bom = _bom_check(report)
     assert bom["status"] == "failed"
     assert any("C51118" in b for b in report["blockers"])
+
+
+def _verify_report(board: Path, fake: FakeEngines, *extra: str) -> tuple[int, dict]:
+    code = readiness_cmd.main([str(board), "--mfr", "jlcpcb", *extra], engines=fake.bundle())
+    out = board / "output"
+    # Verify writes its receipt under readiness-verification/; the generate run
+    # that built the fixture left a stale output/readiness.json beside it.
+    candidates = [
+        out / "readiness-attempt" / "readiness.json",
+        out / "readiness-verification" / "readiness.json",
+        out / "readiness.json",
+    ]
+    path = next(c for c in candidates if c.is_file())
+    return code, json.loads(path.read_text())
+
+
+def test_verify_missing_outer_archive_names_artifact_not_temp_path_8571(tmp_path):
+    board = make_board(tmp_path)
+    assert run(board, FakeEngines(board))[0] == 0
+    (board / "output" / "manufacturing.zip").unlink()
+
+    code, report = _verify_report(board, FakeEngines(board))
+
+    assert code != 0
+    assert check_status(report, "artifacts") == "failed"
+    blockers = [b for b in report["blockers"] if "manufacturing.zip" in b]
+    assert blockers
+    assert all("kct-readiness-candidate-" not in b for b in blockers)
+    assert any("--no-archive" in b for b in blockers)
+
+
+def test_verify_corrupt_outer_archive_keeps_unreadable_message_8571(tmp_path):
+    board = make_board(tmp_path)
+    assert run(board, FakeEngines(board))[0] == 0
+    (board / "output" / "manufacturing.zip").write_bytes(b"not a zip")
+
+    code, report = _verify_report(board, FakeEngines(board))
+
+    assert code != 0
+    assert any("outer archive is unreadable" in b for b in report["blockers"])
+
+
+def test_verify_tapeout_layout_without_archive_passes_with_no_archive_8571(tmp_path):
+    """A bundle laid out per tapeout.md passes artifacts + bom when the archive is opted out."""
+    board = make_board(tmp_path)
+    assert run(board, FakeEngines(board))[0] == 0
+    (board / "output" / "manufacturing.zip").unlink()
+    manifest_path = board / "output" / "manufacturing" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.pop("producer", None)
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    code, report = _verify_report(board, FakeEngines(board), "--no-archive")
+
+    assert check_status(report, "artifacts") == "passed"
+    artifacts = next(c for c in report["checks"] if c["name"] == "artifacts")
+    assert "skipped" in artifacts["detail"] and "--no-archive" in artifacts["detail"]
+    assert _bom_check(report)["status"] == "passed"
 
 
 class TestDiscoverTierFromSpec:

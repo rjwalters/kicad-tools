@@ -36,6 +36,7 @@ Provides CLI commands for common KiCad operations via the `kicad-tools` or `kct`
     kicad-tools create-pcb <schematic>  - Create PCB from schematic
     kicad-tools readiness <board>      - Manufacturing-readiness sign-off + readiness.json
     kicad-tools submit-jlcpcb <bundle> - Prepare JLCPCB PCBA submission (never orders)
+    kicad-tools tapeout-sign-off <bundle> - Record human sign-off in a tapeout manifest
     kicad-tools init <project>         - Initialize project with manufacturer rules
     kicad-tools run <script>           - Run Python script with kicad-tools interpreter
     kicad-tools bench external         - Zero-touch DeepPCB-comparable board benchmarks
@@ -506,6 +507,11 @@ def _dispatch_command(args) -> int:
 
         return run_repair_clearance_command(args)
 
+    elif args.command == "repair-creepage":
+        from .repair_creepage_cmd import run_repair_creepage_command
+
+        return run_repair_creepage_command(args)
+
     elif args.command == "fix-drc":
         from .commands.validation import run_fix_drc_command
 
@@ -602,6 +608,11 @@ def _dispatch_command(args) -> int:
         from .submit_jlcpcb_cmd import run as submit_jlcpcb_run
 
         return submit_jlcpcb_run(args)
+
+    elif args.command == "tapeout-sign-off":
+        from .tapeout_signoff_cmd import run as tapeout_signoff_run
+
+        return tapeout_signoff_run(args)
 
     elif args.command == "readiness":
         from .commands.readiness import run_readiness_command

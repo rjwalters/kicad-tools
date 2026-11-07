@@ -10,6 +10,48 @@ from pathlib import Path
 
 from .known_issues import KNOWN_ISSUES_FILENAME, defects, validate_known_issues
 
+MANUFACTURING_MANIFEST = "output/manufacturing/manifest.json"
+
+
+def _canonical_manifest_bytes(raw: bytes) -> bytes | None:
+    """Manifest bytes minus the top-level ``tapeout`` sign-off key (Issue #8580).
+
+    ``kct tapeout-sign-off`` adds ``tapeout`` to ``manifest.json``; that must not
+    stale a readiness receipt that attests the evidence, not the sign-off.
+    Returns ``None`` when the manifest is not a JSON object.
+    """
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    data.pop("tapeout", None)
+    return json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+
+
+def readiness_input_hash(rel_name: str, raw: bytes) -> str:
+    """Hash a readiness input; the manufacturing manifest uses its canonical form.
+
+    Every other input (and an unparseable manifest) keeps the raw-bytes hash.
+    """
+    if Path(rel_name).as_posix() == MANUFACTURING_MANIFEST:
+        canonical = _canonical_manifest_bytes(raw)
+        if canonical is not None:
+            return hashlib.sha256(canonical).hexdigest()
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _input_hash_matches(name: str, raw: bytes, expected: object) -> bool:
+    if readiness_input_hash(name, raw) == expected:
+        return True
+    # Receipts written before #8580 pinned the raw manifest bytes; they stay
+    # valid until the manifest changes (a signed one needs `kct readiness`).
+    return (
+        Path(name).as_posix() == MANUFACTURING_MANIFEST
+        and hashlib.sha256(raw).hexdigest() == expected
+    )
+
 
 def read_readiness(board_dir: Path) -> dict:
     """Load the v1 sidecar, failing closed on missing or changed evidence.
@@ -71,8 +113,7 @@ def read_readiness(board_dir: Path) -> dict:
             target = (root / path).resolve()
             if not target.is_relative_to(root):
                 raise ValueError("input path leaves board directory")
-            actual = hashlib.sha256(target.read_bytes()).hexdigest()
-            if actual != expected:
+            if not _input_hash_matches(name, target.read_bytes(), expected):
                 raise ValueError(f"Evidence is stale: {name} changed")
         external = data.get("external_inputs")
         if external is not None:

@@ -41,6 +41,17 @@ def _emit_dru(pcb: Path) -> str:
     ncm, _ = resolve_net_class_map_for_board(ncm, pcb_obj)
     layers = len(pcb_obj.copper_layers)
     rules = get_profile("jlcpcb").get_design_rules(layers=layers, copper_oz=1.0)
+    # Real ``kct check`` repoints ampacity at the declared stackup copper.
+    from dataclasses import replace
+
+    from kicad_tools.cli.check_cmd import stackup_copper_oz
+
+    outer, inner = stackup_copper_oz(pcb_obj)
+    rules = replace(
+        rules,
+        outer_copper_oz=outer if outer is not None else rules.outer_copper_oz,
+        inner_copper_oz=inner if inner is not None else rules.inner_copper_oz,
+    )
 
     class _Checker:
         design_rules = rules
@@ -73,13 +84,22 @@ def test_export_without_sidecar_unchanged(tmp_path: Path) -> None:
 
 def test_dedupe_net_classes_one_per_name() -> None:
     from kicad_tools.manufacturers.project_generator import dedupe_net_classes
+    from kicad_tools.router.rules import NetClassRouting
 
-    class _C:
-        def __init__(self, name: str) -> None:
-            self.name = name
+    def _c(name: str, amps: float | None = 3.0) -> NetClassRouting:
+        return NetClassRouting(name=name, target_ampacity=amps)
 
-    got = dedupe_net_classes({"a": _C("p"), "b": _C("p"), "c": _C("q")})
-    assert [c.name for c in got] == ["p", "q"]
+    # One entry per (class, target); nets sharing a target are grouped.
+    got = dedupe_net_classes(
+        {"a": _c("p"), "b": _c("p"), "c": _c("q"), "d": _c("q", None), "e": _c("p", 5.0)}
+    )
+    assert [(c.name, c.target_ampacity, c.net_scope) for c in got] == [
+        ("p", 3.0, ("a", "b")),
+        ("p", 5.0, ("e",)),
+        ("q", 3.0, ("c",)),
+    ]
+    # Entries without a target are dropped.
+    assert dedupe_net_classes({"d": _c("q", None)}) == []
     assert dedupe_net_classes({}) is None
 
 
