@@ -5,6 +5,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ---
 ## Archives
 
+- [2026-09](work_log/WORK_LOG_2026-09.md)
 - [2026-08](work_log/WORK_LOG_2026-08.md)
 - [2026-07](work_log/WORK_LOG_2026-07.md)
 - [2026-06](work_log/WORK_LOG_2026-06.md)
@@ -15,6 +16,40 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-06
 
+- **PR #8562**: fix: shift board-level silk into board-relative frame in silk DRC and ref placement
+- **PR #8560**: fix: skip non-gating pour_slot warnings in match_warning_allowance
+- **PR #8555**: fix: exempt board_only footprints from sync-netlist orphan removal
+- **PR #8553**: feat: add --refs to place-silk-refs and --nets/--region to pcb prune
+- **PR #8552**: fix: exempt exclude_from_bom/board_only footprints from bom_pcb_match orphan warning
+- **PR #8544**: fix(export): use bare footprint in JLCPCB BOM and CPL, normalise in submit preflight
+- **PR #8543**: fix: fall back to anonymous LCSC stock and ungate --guided in submit-jlcpcb
+- **PR #8542**: fix: resolve fp_circle courtyards and exempt hidden fiducial refs
+- **PR #8534**: feat: add rpi-hat footprint generator and inventory J-ref connectors
+- **PR #8526**: fix: refill zones in route-link DRC gate and name offending items on rollback
+- **PR #8524**: fix: route-link emits name-only net refs and collapses staircases
+- **PR #8522**: fix: refetch stale-unverified parts stock and add availability --no-cache
+- **PR #8521**: fix: bump evidence hash version to ev3 for sheet-absolute locations
+- **PR #8520**: fix: warn when placement/DRC extension is not built and make --check hint accurate
+- **PR #8516**: chore(tooling): update Squad 0.19.24→0.19.34
+- **PR #8515**: chore(tooling): update Repo Skills 0.25.4→0.25.10
+- **PR #8514**: chore(repo-hygiene): index two unlisted docs, drop orphaned #8149 study driver
+- **PR #8513**: test: add non-zero-origin regression tests for sheet-absolute coordinates
+- **PR #8512**: chore(loom): resync installed Loom to v0.19.1270
+- **Issue #8561** (closed): Silk DRC rules miss board-level gr_text on origin-offset boards (frame mismatch)
+- **Issue #8559** (closed): board 05 readiness refresh refuses: 66 pour_slot warnings on main (also boards 04/07 dry-run replays)
+- **Issue #8551** (closed): pcb sync-netlist --remove-orphans deletes board_only footprints (fiducials, holes)
+- **Issue #8549** (closed): export preflight bom_pcb_match warns on exclude_from_bom / board_only footprints (fiducials)
+- **Issue #8547** (closed): place-silk-refs has no --refs scope (would move 8 unflagged refs to fix 1); pcb prune has no --nets/--region (board-wide only)
+- **Issue #8540** (closed): check: fp_circle courtyards unresolved (fiducial overlap silently unchecked); silk_ref_obscured fires on hidden fiducial refs
+- **Issue #8539** (closed): submit-jlcpcb stock gate: no credentials → every line 'stock unknown (transport-error)' with no explanation; no LCSC fallback; --guided/website unreachable when blocked
+- **Issue #8538** (closed): export/submit-jlcpcb: BOM Footprint is lib-qualified but CPL Package is bare; submit preflight compares literally and refuses 134/136 rows without naming one
+- **Issue #8529** (closed): Rigid Raspberry Pi HAT part: 2x20 header + four mounting holes as one generated footprint
+- **Issue #8525** (closed): route-link per-link DRC gate runs without --refill-zones: every new via on a board with inner planes is rolled back (4 phantom clearance/hole_clearance)
+- **Issue #8523** (closed): route-link writes bare numeric (net N) refs on name-only boards (2nd producer behind #8492) and un-merged 0.05 mm staircases; optimize-traces can't clean them
+- **Issue #8519** (closed): build-native --check: placement/DRC hint says 'build with: kct build-native', which only builds the router
+- **Issue #8518** (closed): parts availability: 7-day cache vs 24 h stock-verification window leaves entries permanently unverified (no --no-cache); summary miscounts low_stock
+- **Issue #8517** (closed): check: #8493 frame change altered evidence hashes without a version bump — every waiver on an origin-offset board reports evidence_changed
+- **Issue #8511** (closed): Add non-zero-origin regression tests for #8493's netclass and reinforce coordinate fix
 - **PR #8508**: fix(optimizer): drop segments a same-net route already carries
 - **Issue #8505** (closed): Optimizer chain split at interior via (#8387) emits duplicate stub segments
 - **PR #8484**: feat(submit-jlcpcb): add optional [submit] extra for the playwright driver
@@ -3398,11 +3433,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #4904** (closed): Explore Konnect item 10: manufacturing pre-flight shape + offline JLCPCB catalog vs kct:tapeout
 - **Issue #4902** (closed): Explore Konnect item 8: layered config with natural-language design rules vs manufacturer profiles/recipes
 - **PR #4835**: chore(deps): bump nanoid from 3.3.12 to 3.3.18 in /site
-
-### 2026-09-06
-
-- **Issue #4954** (closed): mypy 2.x bump surfaces ~50 new type errors (implicit-Optional + missing generic args)
-
 
 ### 2026-07-20 (evening)
 

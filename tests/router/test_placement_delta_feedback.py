@@ -1890,3 +1890,95 @@ class TestReorderPinsAtomicRevert:
         assert any("clearance violations 0 -> 3" in r for r in result.reverted_reasons)
         assert _ub_bindings(pcb) == {"1": "DQ1", "2": "DQ0"}
         assert router.pads[("UB", "1")].net_name == "DQ1"
+
+
+# --------------------------------------------------------------------------- #
+# Footprint-collision guard + --nets scoping (#8566)                           #
+# --------------------------------------------------------------------------- #
+
+
+def _sized(pad: FakePad, w: float = 1.0, h: float = 1.0, net_name: str = "") -> FakePad:
+    pad.width = w
+    pad.height = h
+    if net_name:
+        pad.net_name = net_name
+    return pad
+
+
+def _collision_loop(neighbour: FakePad, **kw):
+    """UB's pad 2 (x=12) reflects to x=8 on rotate_180, which fixes net 2."""
+    return _make_loop(
+        footprint_refs=[("UB", 10.0, 10.0), ("UA", neighbour.x, neighbour.y)],
+        pads=[_sized(FakePad(12.0, 10.0, "UB", "2")), neighbour],
+        total_nets=2,
+        failed_predicate=_rotate_fixes_net2,
+        proposer=lambda _pcb: [_rotate_delta()],
+        **kw,
+    )
+
+
+class TestFootprintCollisionGuard:
+    def test_improving_move_onto_neighbour_pad_is_reverted(self):
+        loop, router, pcb = _collision_loop(_sized(FakePad(8.0, 10.0, "UA", "1")))
+        result = loop.run_delta(max_adjustments=3)
+        assert result.applied_deltas == []
+        assert result.exit_reason == "pd_reverted"
+        assert "pad/courtyard overlaps" in result.reverted_reasons[0]
+        assert "0 -> 1" in result.reverted_reasons[0]
+        assert pcb.footprints[0].rotation == 0.0
+        assert _ub_pad(router).x == pytest.approx(12.0)
+
+    def test_improving_clean_move_is_still_kept(self):
+        loop, router, _pcb = _collision_loop(_sized(FakePad(20.0, 10.0, "UA", "1")))
+        result = loop.run_delta(max_adjustments=3)
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
+        assert _ub_pad(router).x == pytest.approx(8.0)
+
+    def test_touching_pads_are_not_an_overlap(self):
+        loop, _router, _pcb = _collision_loop(_sized(FakePad(7.0, 10.0, "UA", "1")))
+        result = loop.run_delta(max_adjustments=3)
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
+
+    def test_preexisting_overlap_does_not_reject_every_move(self):
+        # A wide neighbour pad covers x=8 AND x=12: the count is 1 before and
+        # after, so the move is not "new" damage.
+        loop, _router, _pcb = _collision_loop(_sized(FakePad(10.0, 10.0, "UA", "1"), 8.0, 1.0))
+        result = loop.run_delta(max_adjustments=3)
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
+
+    def test_guard_can_be_disabled(self):
+        loop, _router, _pcb = _collision_loop(_sized(FakePad(8.0, 10.0, "UA", "1")))
+        result = loop.run_delta(max_adjustments=3, require_no_footprint_collision=False)
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
+
+
+class TestRouteOnlyNetsScope:
+    def _loop(self, **kw):
+        return _make_loop(
+            footprint_refs=[("UB", 10.0, 10.0)],
+            pads=[
+                _sized(FakePad(12.0, 10.0, "UB", "2"), net_name="DQ2"),
+                _sized(FakePad(12.0, 12.0, "UB", "3"), net_name="OTHER"),
+            ],
+            total_nets=2,
+            failed_predicate=_rotate_fixes_net2,
+            proposer=lambda _pcb: [_rotate_delta()],
+            **kw,
+        )
+
+    def test_target_with_out_of_scope_net_is_skipped(self):
+        loop, router, _pcb = self._loop(route_only_nets={"DQ2"})
+        result = loop.run_delta(max_adjustments=3)
+        assert result.applied_deltas == []
+        assert _ub_pad(router).x == pytest.approx(12.0)
+        assert any("outside the --nets set" in r for r in result.skip_reasons)
+
+    def test_target_fully_inside_scope_is_allowed(self):
+        loop, _router, _pcb = self._loop(route_only_nets={"DQ2", "OTHER"})
+        result = loop.run_delta(max_adjustments=3)
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
+
+    def test_no_nets_filter_is_unchanged(self):
+        loop, _router, _pcb = self._loop()
+        result = loop.run_delta(max_adjustments=3)
+        assert [d.target_ref for d in result.applied_deltas] == ["UB"]
