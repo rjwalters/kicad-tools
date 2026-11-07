@@ -1253,9 +1253,14 @@ class FootprintGraphic:
         # Center/radius (for circle)
         if center := sexp.find("center"):
             graphic.center = (center.get_float(0) or 0.0, center.get_float(1) or 0.0)
-        if end := sexp.find("end"):
-            # For circles, end is a point on the circumference
-            pass
+        if graphic_type == "circle" and graphic.center is not None:
+            # For circles, end is a point on the circumference, so the radius
+            # is its distance from the centre (#8540).
+            if sexp.find("end") is not None:
+                graphic.radius = math.hypot(
+                    graphic.end[0] - graphic.center[0],
+                    graphic.end[1] - graphic.center[1],
+                )
 
         # Polygon vertices (for fp_poly): (pts (xy X Y) ...).
         if graphic_type == "poly":

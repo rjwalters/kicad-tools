@@ -258,12 +258,19 @@ def _iter_owned_static_silk(pcb: PCB):
                 footprint.reference,
             )
 
+    # Footprints are board-relative after load; gr_text / gr_* are still
+    # sheet-absolute, so shift them into the same frame (Issue #8561).
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
     for text in pcb.texts:
         side = _silk_side(text.layer)
         if side is None or text.hidden:
             continue
         geom = _oriented_text_geometry(
-            text.text, text.font_size, text.font_thickness, text.position, text.rotation
+            text.text, text.font_size, text.font_thickness, to_board(text.position), text.rotation
         )
         if geom is None:
             continue
@@ -273,7 +280,7 @@ def _iter_owned_static_silk(pcb: PCB):
         side = _silk_side(board_graphic.layer)
         if side is None:
             continue
-        geom = _stroke_geometry(board_graphic, None)
+        geom = _stroke_geometry(board_graphic, to_board if (ox or oy) else None)
         if geom is None:
             continue
         yield side, geom, f"gr_{board_graphic.graphic_type}", None

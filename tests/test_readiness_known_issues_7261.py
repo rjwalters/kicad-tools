@@ -124,6 +124,19 @@ def test_match_rejects_a_repeated_unkeyable_or_waived_aware_finding():
     assert len(unaccepted) == 2  # the repeated R3-2 and the unkeyable rule
 
 
+def test_match_ignores_non_gating_pour_slot_warnings_8559():
+    slot = _warning("pour_slot", ["VM", "VCP"])
+    assert match_warning_allowance([_R3, _R4, slot, dict(slot)], _ALLOW) == ([], [])
+
+
+def test_match_non_gating_does_not_hide_other_warnings_or_stale_8559():
+    slot = _warning("pour_slot", ["VM", "VCP"])
+    other = _warning("via_at_pad_edge", ["Via@3/3", "R9-1"])
+    unaccepted, stale = match_warning_allowance([_R3, slot, other], _ALLOW)
+    assert len(unaccepted) == 1 and "R9-1" in unaccepted[0]
+    assert stale == ["via_at_pad_edge R4-2 (#7220)"]
+
+
 @pytest.mark.parametrize(
     "spec",
     [
