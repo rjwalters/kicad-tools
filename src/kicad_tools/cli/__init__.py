@@ -506,6 +506,11 @@ def _dispatch_command(args) -> int:
 
         return run_repair_clearance_command(args)
 
+    elif args.command == "repair-creepage":
+        from .repair_creepage_cmd import run_repair_creepage_command
+
+        return run_repair_creepage_command(args)
+
     elif args.command == "fix-drc":
         from .commands.validation import run_fix_drc_command
 

@@ -1119,7 +1119,9 @@ class Pad:
         # Net — handles both (net N "name") and (net "name") formats.
         # KiCad 10 may emit (net "name") without a numeric net number.
         if net := sexp.find("net"):
-            first_int = net.get_int(0)
+            # Only a bare integer atom is a net number; quoted "12" is a name (#8550).
+            first_val = net.get_value(0)
+            first_int = first_val if isinstance(first_val, int) else None
             if first_int is not None:
                 # Traditional format: (net N "name")
                 pad.net_number = first_int
@@ -6854,6 +6856,11 @@ class PCB:
         net = Net(number=next_num, name=net_name)
         self._nets[next_num] = net
 
+        # Issue #8550: KiCad 10 name-only boards have no top-level net table;
+        # pads reference nets by name. Keep the net in memory only.
+        if self._net_name_only_dialect:
+            return net
+
         # Add to the S-expression tree - insert after the last net, not at the end
         # KiCad requires nets to be declared before footprints
         net_sexp = SExp.list("net", next_num, net_name)
@@ -7563,7 +7570,11 @@ class PCB:
                         pad_sexp.remove(net_node)
 
                     # Add new net node
-                    new_net_node = SExp.list("net", net.number, net.name)
+                    # Issue #8550: name-only boards use (net "name") on pads.
+                    if self._net_name_only_dialect:
+                        new_net_node = SExp.list("net", SExp.quoted_atom(net.name))
+                    else:
+                        new_net_node = SExp.list("net", net.number, net.name)
                     pad_sexp.append(new_net_node)
                     sexp_pad_found = True
 
@@ -8253,12 +8264,14 @@ class PCB:
                 # Number-only ``(net N)`` pads get ``net_name`` filled in memory
                 # by ``_fixup_net_numbers``; only a node with a name atom can
                 # disagree (issue #7519).
-                name_idx = 0 if net_node is None or net_node.get_int(0) is None else 1
+                # A quoted numeric-looking name is a name, not a number (#8550).
+                numbered = net_node is not None and isinstance(net_node.get_value(0), int)
+                name_idx = 1 if numbered else 0
                 if net_node is None or net_node.get_string(name_idx) is not None:
                     fields.append("net_name")
                 # Name-only ``(net "X")`` pads get ``net_number`` filled in memory
                 # by ``_fixup_net_numbers``; only a numbered node can disagree.
-                if net_node is not None and net_node.get_int(0) is not None:
+                if numbered:
                     fields.append("net_number")
                 for fname in fields:
                     if getattr(pad, fname) != getattr(node_pad, fname):
