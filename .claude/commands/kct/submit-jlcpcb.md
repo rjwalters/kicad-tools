@@ -19,7 +19,7 @@ through `export/submission_workflow.py`. It prepares and verifies; a human place
 
 ## Steps
 
-1. **Preflight (offline, before any network call).** Refuses on: a `manifest.json` file whose sha256/size no longer matches; no `tapeout.human_signoff` recorded in the manifest; a board file whose sha256 differs from `tapeout.board_sha256`.
+1. **Preflight (offline, before any network call).** Refuses on: a `manifest.json` file whose sha256/size no longer matches; no `tapeout.human_signoff` recorded in the manifest (record it with `kct tapeout-sign-off <bundle> --board <board.kicad_pcb> --readiness <readiness.json> --reviewer "<name>"`); no readiness receipt hash (`tapeout.readiness_sha256`); a board file whose sha256 differs from `tapeout.board_sha256`.
 2. **Prepare + verify.** Layer count (board copper layers) and assembly sides (CPL `Layer` column) come from the board/bundle, never guessed; quantity is `--quantity`.
 3. **Stock gate.** Live `refresh_inventory` at `per_board × quantity`. Every short line is listed with need vs stock; unknown stock blocks. Lines you hold in your JLC parts inventory are passed explicitly with `--inventory-covered C123,C456` and shown as covered; this is never inferred.
 4. **Optional API leg** (`--upload --reviewer NAME`, credentials in the environment): uploads the exact Gerber bytes, fetches the audit preview and records the receipt in `upload-ledger.jsonl`. Refused when the stock gate is blocked.
