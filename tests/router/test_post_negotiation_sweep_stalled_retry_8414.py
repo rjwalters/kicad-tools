@@ -210,6 +210,35 @@ def test_subgrid_retry_skips_nested_route_when_escapes_spend_the_budget():
     subgrid.apply_escape_segments.assert_not_called()
 
 
+def test_subgrid_retry_keeps_failure_records_when_budget_spent_after_apply():
+    calls: list = []
+    marked: list = []
+    subgrid = MagicMock()
+    subgrid.analyze_pads.return_value = SimpleNamespace(has_off_grid_pads=True)
+    subgrid.generate_escape_segments.return_value = SimpleNamespace(
+        success_count=1, unblocked_count=1
+    )
+    # The budget runs out inside apply_escape_segments.
+    subgrid.apply_escape_segments.side_effect = lambda _r: time.sleep(0.3)
+    subgrid.get_escape_routes.return_value = [object()]
+    failure = SimpleNamespace(net=1)
+    fake = SimpleNamespace(
+        nets={1: ["a", "b"]},
+        pads={"a": object(), "b": object()},
+        net_names={1: "N"},
+        _subgrid=subgrid,
+        routes=[],
+        routing_failures=[failure],
+        _mark_route=marked.append,
+        route_net=lambda net, **kw: calls.append(kw) or [],
+    )
+
+    assert Autorouter._retry_net_with_subgrid(fake, 1, per_net_timeout=0.2) == []
+    assert calls == [], "nested route_net must not start on a spent budget"
+    assert fake.routing_failures == [failure], "still-failed net keeps its failure record"
+    assert marked == [] and fake.routes == []
+
+
 def test_via_conflict_resolver_stops_iterating_conflicts_on_spent_budget():
     calls: list = []
     blocker = SimpleNamespace(blocking_type="via")

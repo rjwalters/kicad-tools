@@ -6948,9 +6948,6 @@ class Autorouter:
                 per_net_timeout, _route_net_started
             ):
                 has_pin_access_failure = False
-                self._pin_access_retries_skipped = (
-                    getattr(self, "_pin_access_retries_skipped", 0) + 1
-                )
             if has_pin_access_failure:
                 subgrid_recovered = False
                 # Sub-grid retry is only useful when waypoint injection is
@@ -25695,7 +25692,9 @@ class Autorouter:
             return []
         subgrid.apply_escape_segments(result)
 
-        if result.success_count == 0:
+        # Stop here (before marking routes or clearing the net's failure
+        # records) so a spent budget leaves the net's failure records intact.
+        if result.success_count == 0 or _spent():
             return []
 
         net_name = self.net_names.get(net, f"Net {net}")
@@ -25715,8 +25714,6 @@ class Autorouter:
         self.routing_failures = [f for f in self.routing_failures if f.net != net]
 
         # Retry routing on what is left (the escape work above spent some).
-        if _spent():
-            return []
         retry_routes = self.route_net(
             net,
             _subgrid_retry=True,
