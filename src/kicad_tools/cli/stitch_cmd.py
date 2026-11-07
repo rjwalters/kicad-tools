@@ -437,6 +437,69 @@ class FilledPolygon:
 
 
 @dataclass
+class KeepoutPolygon(FilledPolygon):
+    """A track/via-blocking keep-out rule area as a stitch obstacle (Issue #8587).
+
+    Rides in the other-net fill pool so every via-site and stub-leg check
+    already wired to ``other_net_filled_polygons`` sees it, but is judged on
+    KiCad's rule-area semantics: no clearance margin, only the object types it
+    forbids, and (for tracks) only on the layers it covers.  ``net_number`` is
+    ``-1`` so it never counts as a pad's own-net fill.
+    """
+
+    layers: tuple[str, ...] = ()
+    blocks_tracks: bool = True
+    blocks_vias: bool = True
+    name: str = ""
+
+    def covers_layer(self, layer: str | None) -> bool:
+        """True when the area applies on ``layer`` (``None`` = any layer)."""
+        if layer is None or not self.layers:
+            return True
+        for spec in self.layers:
+            if spec == "*.Cu" or spec == layer:
+                return True
+            if spec == "F&B.Cu" and layer in ("F.Cu", "B.Cu"):
+                return True
+            if spec == "*.In.Cu" and layer.startswith("In"):
+                return True
+        return False
+
+    def label(self) -> str:
+        return f"keep-out rule area '{self.name}'" if self.name else "keep-out rule area"
+
+
+def _keepout_polygons_from_pcb(pcb_path: Path) -> list[KeepoutPolygon]:
+    """Track/via-blocking rule areas of ``pcb_path`` in stitch's (sheet) frame.
+
+    Reuses the shared parse ``kct route`` uses (``rule_area_resolve``);
+    returns ``[]`` when the board cannot be loaded by the schema parser.
+    """
+    try:
+        from kicad_tools.router.rule_area_resolve import keepout_rule_area_specs
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(pcb_path)
+        origin = getattr(pcb, "board_origin", (0.0, 0.0))
+        specs = keepout_rule_area_specs(pcb, offset=(float(origin[0]), float(origin[1])))
+    except Exception:  # pragma: no cover - defensive: no keep-outs known
+        return []
+    return [
+        KeepoutPolygon(
+            net_number=-1,
+            net_name="",
+            layer="",
+            points=list(spec.polygon),
+            layers=spec.layer_names,
+            blocks_tracks=spec.blocks_tracks,
+            blocks_vias=spec.blocks_vias,
+            name=spec.name,
+        )
+        for spec in specs
+    ]
+
+
+@dataclass
 class ZonePolygon:
     """A zone boundary polygon with its net and layer."""
 
@@ -2784,6 +2847,7 @@ def _check_stub_path_clearance(
                 trace_half_width,
                 other_net_filled_polygons,
                 clearance,
+                stub_layer=stub_layer,
             ):
                 return False
 
@@ -3128,6 +3192,7 @@ def _check_multileg_path_clearance(
     *,
     stub_layer: str | None = None,
     other_net_pad_bboxes: list[PadBBox] | None = None,
+    keepouts: Sequence[KeepoutPolygon] = (),
 ) -> bool:
     """Check if a multi-segment trace path has adequate clearance.
 
@@ -3195,6 +3260,22 @@ def _check_multileg_path_clearance(
         ):
             return False
 
+    return _keepouts_allow_path(points, trace_half_width, stub_layer, keepouts)
+
+
+def _keepouts_allow_path(
+    points: Sequence[tuple[float, float]],
+    half_width: float,
+    layer: str | None,
+    keepouts: Sequence[KeepoutPolygon],
+) -> bool:
+    """False when a stub polyline crosses a keep-out that forbids tracks (Issue #8587)."""
+    for k in keepouts:
+        if not (k.blocks_tracks and k.covers_layer(layer)):
+            continue
+        for (sx, sy), (ex, ey) in zip(points, points[1:], strict=False):
+            if _segment_touches_polygon(sx, sy, ex, ey, half_width, k):
+                return False
     return True
 
 
@@ -3291,6 +3372,7 @@ def calculate_extended_escape_position(
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
     other_net_pad_bboxes: list[PadBBox] | None = None,
     pad_edge_guard: PadEdgeGuard | None = None,
+    keepouts: Sequence[KeepoutPolygon] = (),
 ) -> tuple[float, float, list[tuple[float, float]]] | None:
     """Calculate an extended escape route for pads in dense IC pin fields.
 
@@ -3483,6 +3565,11 @@ def calculate_extended_escape_position(
             ):
                 return False
 
+        # Issue #8587: keep-out rule areas that forbid vias.
+        for k in keepouts:
+            if k.blocks_vias and _circle_touches_polygon(vx, vy, via_radius, k):
+                return False
+
         # Issue #4432: same-net FILL containment gate.  Reject an escape via
         # landing where the same-net pour has retreated (keepout void /
         # clearance pullback).  No-op when no same-net fill on the layer.
@@ -3538,6 +3625,7 @@ def calculate_extended_escape_position(
                             other_net_track_index,
                             stub_layer=_stub_layer(pad),
                             other_net_pad_bboxes=other_net_pad_bboxes,
+                            keepouts=keepouts,
                         ):
                             continue
 
@@ -3586,6 +3674,7 @@ def calculate_extended_escape_position(
                             other_net_track_index,
                             stub_layer=_stub_layer(pad),
                             other_net_pad_bboxes=other_net_pad_bboxes,
+                            keepouts=keepouts,
                         ):
                             continue
 
@@ -3644,6 +3733,7 @@ def calculate_extended_escape_position(
                                 other_net_track_index,
                                 stub_layer=_stub_layer(pad),
                                 other_net_pad_bboxes=other_net_pad_bboxes,
+                                keepouts=keepouts,
                             ):
                                 continue
 
@@ -3724,7 +3814,7 @@ def calculate_extended_escape_position(
                 other_net_pad_bboxes,
             ):
                 return False
-        return True
+        return _keepouts_allow_path(pts, trace_half_width, trace_layer, keepouts)
 
     angular_steps = 16  # 22.5deg increments — covers diagonals
     polar_radii = [
@@ -4400,8 +4490,14 @@ def _check_point_filled_polygon_clearance(
     Returns:
         True if clearance is satisfied, False if there is a violation
     """
-    required = radius + clearance
     for fp in filled_polygons:
+        if isinstance(fp, KeepoutPolygon):
+            # Issue #8587: a via (through, so any layer) against a rule area
+            # that forbids vias: its annulus must not touch the area.
+            if fp.blocks_vias and _circle_touches_polygon(px, py, radius, fp):
+                return False
+            continue
+        required = radius + clearance
         # Bounding-box pre-filter
         if (
             px + required < fp.min_x
@@ -4592,6 +4688,7 @@ def _check_segment_filled_polygon_clearance(
     half_width: float,
     filled_polygons: list[FilledPolygon],
     clearance: float,
+    stub_layer: str | None = None,
 ) -> bool:
     """Check if a trace segment clears all filled polygons.
 
@@ -4609,6 +4706,16 @@ def _check_segment_filled_polygon_clearance(
     """
     required = half_width + clearance
     for fp in filled_polygons:
+        if isinstance(fp, KeepoutPolygon):
+            # Issue #8587: a track on ``stub_layer`` against a rule area that
+            # forbids tracks there (no clearance margin, as in KiCad).
+            if (
+                fp.blocks_tracks
+                and fp.covers_layer(stub_layer)
+                and _segment_touches_polygon(sx, sy, ex, ey, half_width, fp)
+            ):
+                return False
+            continue
         # Bounding-box pre-filter for the segment
         seg_min_x = min(sx, ex) - required
         seg_max_x = max(sx, ex) + required
@@ -4651,6 +4758,36 @@ def _check_segment_filled_polygon_clearance(
                 return False
 
     return True
+
+
+def _circle_touches_polygon(px: float, py: float, radius: float, fp: FilledPolygon) -> bool:
+    """True when the disc ``(px, py, radius)`` overlaps polygon ``fp``."""
+    return _segment_touches_polygon(px, py, px, py, radius, fp)
+
+
+def _segment_touches_polygon(
+    sx: float, sy: float, ex: float, ey: float, half_width: float, fp: FilledPolygon
+) -> bool:
+    """True when a segment swept by ``half_width`` overlaps polygon ``fp``."""
+    if (
+        max(sx, ex) + half_width < fp.min_x
+        or min(sx, ex) - half_width > fp.max_x
+        or max(sy, ey) + half_width < fp.min_y
+        or min(sy, ey) - half_width > fp.max_y
+    ):
+        return False
+    pts = fp.points
+    if point_in_polygon(sx, sy, pts) or point_in_polygon(ex, ey, pts):
+        return True
+    n = len(pts)
+    for i in range(n):
+        j = (i + 1) % n
+        if (
+            segment_to_segment_distance(sx, sy, ex, ey, pts[i][0], pts[i][1], pts[j][0], pts[j][1])
+            < half_width
+        ):
+            return True
+    return False
 
 
 def point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
@@ -6081,14 +6218,19 @@ def run_stitch(
     # OWN net's fill, and sibling target nets' fills join the other-net pool
     # (unless the caller lets foreign fills yield), so each net is gated
     # exactly as a single-net call for that net would gate it.
+    # Issue #8587: keep-out rule areas that forbid tracks and/or vias.
+    keepout_polys = _keepout_polygons_from_pcb(pcb_path)
+
     def _fill_pools(pad: PadInfo) -> tuple[list[FilledPolygon], list[FilledPolygon]]:
         """Per-pad ``(own_net_fill, other_net_fill)`` polygon pools."""
-        return _split_fill_pools(
+        own, other = _split_fill_pools(
             pad.net_number,
             same_net_filled_polys,
             other_net_filled_polys,
             foreign_fills_yield=foreign_fills_yield,
         )
+        # Issue #8587: keep-out rule areas are obstacles for every pad.
+        return own, other + keepout_polys
 
     # Net-number -> net-name lookup so skip diagnostics can name the
     # offending signal (e.g. ``net 8 'SWO'``) instead of just a number.
@@ -6255,6 +6397,7 @@ def run_stitch(
                     same_net_fill_layer=terminus_layer,
                     other_net_track_index=eff_track_index,
                     pad_edge_guard=pad_edge_guard,
+                    keepouts=[k for k in eff_other_fill if isinstance(k, KeepoutPolygon)],
                 )
 
                 if extended_pos is None:
@@ -6329,6 +6472,9 @@ def run_stitch(
                                 same_net_fill_layer=terminus_layer,
                                 other_net_track_index=eff_track_index,
                                 pad_edge_guard=pad_edge_guard,
+                                keepouts=[
+                                    k for k in eff_other_fill if isinstance(k, KeepoutPolygon)
+                                ],
                             )
                             if micro_extended is not None:
                                 return (None, None, micro_extended, True)
@@ -6630,11 +6776,22 @@ def run_stitch(
                     if micro_via
                     else f"dog-leg and extended escape up to {escape_distance}mm also failed"
                 )
+                keepout_note = ""
+                near_keepouts = [
+                    k.label()
+                    for k in keepout_polys
+                    if _segment_touches_polygon(
+                        pad.x, pad.y, pad.x, pad.y, escape_distance + via_size, k
+                    )
+                ]
+                if near_keepouts:
+                    # Issue #8587: name the keep-out(s) that bound the search.
+                    keepout_note = f"; blocked by {', '.join(dict.fromkeys(near_keepouts))}"
                 result.pads_skipped.append(
                     (
                         pad,
                         f"no valid via location (clearance conflict, {strategy_note}; "
-                        f"nearest obstacle: {detail.reason})",
+                        f"nearest obstacle: {detail.reason}{keepout_note})",
                     )
                 )
                 continue
