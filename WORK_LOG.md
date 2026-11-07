@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-07
 
+- **PR #8606**: chore(loom): resync installed Loom to v0.19.1275
+- **PR #8605**: test: verify --complete creepage rollback on a synthetic mains fixture
+- **PR #8601**: fix(router): bound pad-escape and sub-grid retries in the post-negotiation sweep
+- **PR #8600**: chore(release): v0.28.0
+- **Issue #8422** (closed): Live-verify --complete creepage rollback on a real mains board (follow-up to #8396)
 - **PR #8595**: chore(loom): resync installed Loom to v0.19.1273
 - **PR #8594**: fix(readiness): accept non-output bundle layout and --verify receipt in tapeout sign-off
 - **PR #8593**: fix(stitch): ignore foreign inner-layer fill as via/stub obstacle
