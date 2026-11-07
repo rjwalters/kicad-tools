@@ -240,6 +240,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Also try a 90-degree rotated orientation when the original does not fit",
     )
+    parser.add_argument(
+        "--refs",
+        metavar="REF[,REF...]",
+        help=(
+            "Comma-separated reference designators to move; all other references "
+            "stay put (but still act as obstacles). Default: all references"
+        ),
+    )
     parser.add_argument("-o", "--output", help="Output file path (default: overwrite input)")
     parser.add_argument(
         "--dry-run", action="store_true", help="Preview the move plan without modifying files"
@@ -286,8 +294,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error parsing PCB file: {e}", file=sys.stderr)
         return 1
 
+    only: set[str] | None = None
+    if args.refs is not None:
+        only = {r.strip() for r in args.refs.split(",") if r.strip()}
+        if not only:
+            print("Error: --refs requires at least one reference designator", file=sys.stderr)
+            return 1
+        known = {fp.reference for fp in placer.pcb.footprints}
+        unknown = sorted(only - known)
+        if unknown:
+            print(f"Error: unknown reference(s) in --refs: {', '.join(unknown)}", file=sys.stderr)
+            return 1
+
     try:
         result = placer.plan(
+            only=only,
             clearance_mm=args.clearance,
             edge_clearance_mm=args.edge_clearance,
             mask_clearance_mm=mask_clearance,

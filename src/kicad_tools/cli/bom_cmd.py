@@ -100,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Check stock availability from LCSC/JLCPCB",
     )
     parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="With --check-availability, bypass the parts cache and fetch live",
+    )
+    parser.add_argument(
         "--validate",
         action="store_true",
         help="Validate BOM against JLCPCB/LCSC parts library for assembly",
@@ -149,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Check availability if requested
     if args.check_availability:
-        return check_availability(bom, args.quantity, args.format)
+        return check_availability(bom, args.quantity, args.format, bypass_cache=args.no_cache)
 
     # JLCPCB groups by value/footprint/LCSC itself, so it takes the
     # filtered, ungrouped list (and so honours --exclude / --include-dnp).
@@ -326,7 +331,7 @@ def output_jlcpcb(items: list[BOMItem]) -> None:
     print(formatter.format(items), end="")
 
 
-def check_availability(bom, quantity: int, output_format: str) -> int:
+def check_availability(bom, quantity: int, output_format: str, bypass_cache: bool = False) -> int:
     """Check availability for BOM items and output results."""
     try:
         from ..cost.availability import LCSCAvailabilityChecker
@@ -342,7 +347,7 @@ def check_availability(bom, quantity: int, output_format: str) -> int:
 
     try:
         with LCSCAvailabilityChecker() as checker:
-            result = checker.check_bom(bom, quantity=quantity)
+            result = checker.check_bom(bom, quantity=quantity, bypass_cache=bypass_cache)
     except Exception as e:
         print(f"Error checking availability: {e}", file=sys.stderr)
         return 1

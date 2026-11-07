@@ -326,33 +326,10 @@ def _run_strip_command(args, pcb_path: Path) -> int:
     remove_orphan_vias = getattr(args, "remove_orphan_vias", False)
 
     # Parse and validate the optional --region bounding box.
-    region = None
-    region_arg = getattr(args, "region", None)
-    if region_arg:
-        parts = [p.strip() for p in region_arg.split(",")]
-        if len(parts) != 4:
-            print(
-                "Error: --region expects 'x1,y1,x2,y2' (four comma-separated "
-                f"numbers), got {region_arg!r}",
-                file=sys.stderr,
-            )
-            return 1
-        try:
-            x1, y1, x2, y2 = (float(p) for p in parts)
-        except ValueError:
-            print(
-                f"Error: --region values must be numeric, got {region_arg!r}",
-                file=sys.stderr,
-            )
-            return 1
-        if x1 >= x2 or y1 >= y2:
-            print(
-                "Error: --region must satisfy x1 < x2 and y1 < y2 "
-                f"(got x1={x1}, y1={y1}, x2={x2}, y2={y2})",
-                file=sys.stderr,
-            )
-            return 1
-        region = (x1, y1, x2, y2)
+    region, region_err = _parse_region_arg(getattr(args, "region", None))
+    if region_err:
+        print(region_err, file=sys.stderr)
+        return 1
 
     # Load PCB
     try:
@@ -720,6 +697,30 @@ def _run_dedupe_command(args, pcb_path: Path) -> int:
     return 0
 
 
+def _parse_region_arg(
+    region_arg: str | None,
+) -> tuple[tuple[float, float, float, float] | None, str | None]:
+    """Parse ``--region x1,y1,x2,y2``; returns ``(region, error_message)``."""
+    if not region_arg:
+        return None, None
+    parts = [p.strip() for p in region_arg.split(",")]
+    if len(parts) != 4:
+        return None, (
+            "Error: --region expects 'x1,y1,x2,y2' (four comma-separated "
+            f"numbers), got {region_arg!r}"
+        )
+    try:
+        x1, y1, x2, y2 = (float(p) for p in parts)
+    except ValueError:
+        return None, f"Error: --region values must be numeric, got {region_arg!r}"
+    if x1 >= x2 or y1 >= y2:
+        return None, (
+            "Error: --region must satisfy x1 < x2 and y1 < y2 "
+            f"(got x1={x1}, y1={y1}, x2={x2}, y2={y2})"
+        )
+    return (x1, y1, x2, y2), None
+
+
 def _run_prune_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb prune' command (issue #8216).
 
@@ -762,9 +763,33 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             print(f"Error loading current paths: {e}", file=sys.stderr)
             return 1
 
+    nets: list[str] | None = None
+    if getattr(args, "nets", None):
+        nets = [n.strip() for n in args.nets.split(",") if n.strip()]
+        if not nets:
+            print("Error: --nets requires at least one net name", file=sys.stderr)
+            return 1
+        try:
+            from kicad_tools.schema.pcb import PCB as _PCB
+
+            known = {n.name for n in _PCB.load(pcb_path).nets.values()}
+        except Exception as e:
+            print(f"Error loading PCB: {e}", file=sys.stderr)
+            return 1
+        unknown = sorted(set(nets) - known)
+        if unknown:
+            print(f"Error: unknown net(s) in --nets: {', '.join(unknown)}", file=sys.stderr)
+            return 1
+    region, region_err = _parse_region_arg(getattr(args, "region", None))
+    if region_err:
+        print(region_err, file=sys.stderr)
+        return 1
+
     try:
         pcb, res = prune_board(
             pcb_path,
+            nets=nets,
+            region=region,
             verify_drc=not getattr(args, "no_drc", False),
             apply=not dry_run,
             declared_nets=declared_nets,
@@ -805,6 +830,8 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         "nets": [_net(p) for p in res.accepted],
         "rejected_by_drc": [_net(p) for p in res.rejected],
         "uncut_loops": res.uncut_loops,
+        "scope": {"nets": nets, "region": list(region) if region else None},
+        "region_skipped": [_net(p) for p in res.region_skipped],
     }
     if output_format == "json":
         print(json.dumps(result, indent=2))
@@ -820,6 +847,8 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             print(f"    {n['net']}: -{n['segments_removed']} seg, {n['ends_snapped']} snapped")
         for n in result["rejected_by_drc"]:
             print(f"    {n['net']}: kept (edit would add DRC violations)")
+        for n in result["region_skipped"]:
+            print(f"    {n['net']}: region_skipped (edits extend outside --region)")
         for u in res.uncut_loops:
             print(
                 f"    {u['net']}: loop left in place ({u.get('reason', 'all segments >= --wide')}, "

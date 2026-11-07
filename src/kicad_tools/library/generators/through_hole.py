@@ -181,23 +181,27 @@ def create_pin_header(
     span = (pins_per_row - 1) * pitch
     row_offset = pitch / 2 if rows == 2 else 0
 
-    pin_num = 1
-    for row in range(rows):
-        x = -row_offset + row * pitch if rows == 2 else 0
-        for i in range(pins_per_row):
-            y = -span / 2 + i * pitch
-            fp.add_pad(
-                str(pin_num),
-                x=x,
-                y=y,
-                width=pad_diameter,
-                height=pad_diameter,
-                pad_type="thru_hole",
-                shape="rect" if pin_num == 1 else "circle",
-                drill=drill,
-                layers=("*.Cu", "*.Mask"),
-            )
-            pin_num += 1
+    # Single row: pins 1..N down the column.  Dual row: odd pins in the left
+    # column, even pins in the right, stepping together (KiCad stock
+    # PinHeader_2xN numbering; matches the Pi GPIO header).
+    for idx in range(pins):
+        if rows == 1:
+            x, i = 0.0, idx
+        else:
+            x = -row_offset + (idx % 2) * pitch
+            i = idx // 2
+        pin_num = idx + 1
+        fp.add_pad(
+            str(pin_num),
+            x=x,
+            y=-span / 2 + i * pitch,
+            width=pad_diameter,
+            height=pad_diameter,
+            pad_type="thru_hole",
+            shape="rect" if pin_num == 1 else "circle",
+            drill=drill,
+            layers=("*.Cu", "*.Mask"),
+        )
 
     # Silkscreen outline
     silk_margin = 0.3
@@ -227,4 +231,120 @@ def create_pin_header(
     # Fab layer
     fp.add_rect((-silk_x, -silk_y), (silk_x, silk_y), "F.Fab", 0.1)
 
+    return fp
+
+
+# Raspberry Pi HAT mechanical spec (HAT outline 65 x 56.5 mm, holes 58 x 49 mm).
+_HAT_HOLE_DRILL = 2.75  # spec: 2.75 +/- 0.05 mm
+_HAT_LAND_MIN = 6.2  # spec: mounting hole land min. 6.2 mm
+_HAT_HOLE_SPACING_X = 49.0
+_HAT_HOLE_SPACING_Y = 58.0
+_HAT_OUTLINE = (65.0, 56.5)  # (long, short)
+
+
+def _translate_graphic(g, dx: float, dy: float) -> None:
+    """Shift a footprint graphic in place by (dx, dy)."""
+    for attr, delta in (
+        ("start_x", dx),
+        ("end_x", dx),
+        ("mid_x", dx),
+        ("center_x", dx),
+        ("start_y", dy),
+        ("end_y", dy),
+        ("mid_y", dy),
+        ("center_y", dy),
+    ):
+        if hasattr(g, attr):
+            setattr(g, attr, getattr(g, attr) + delta)
+
+
+def create_rpi_hat(
+    keepout_diameter: float = _HAT_LAND_MIN,
+    name: str | None = None,
+) -> Footprint:
+    """
+    Create a Raspberry Pi HAT part: 2x20 header plus four mounting holes.
+
+    The header (pin 1 at the origin, as in KiCad's stock
+    ``PinHeader_2x20_P2.54mm_Vertical``) and the four 2.75 mm NPTH mounting
+    holes are one rigid footprint, so the holes cannot drift away from the
+    header.  The holes are unnumbered pads, so the CPL centroid stays on the
+    header.  A 65 x 56.5 mm HAT outline is drawn on F.Fab and a copper
+    keep-out of ``keepout_diameter`` is emitted around each hole.
+
+    Gotcha: the keep-outs are footprint-local zones.  Inside a ``.kicad_pcb``
+    KiCad stores footprint-owned zones in board coordinates, so an in-place
+    board edit should emit board-level rule areas instead.
+
+    Args:
+        keepout_diameter: Copper keep-out diameter around each hole in mm
+            (0 disables the keep-outs)
+        name: Custom footprint name
+
+    Returns:
+        Footprint object ready for export
+    """
+    import math
+
+    from ..footprint import KeepoutZone
+
+    if keepout_diameter < 0:
+        raise ValueError(f"keepout_diameter must be >= 0, got {keepout_diameter}")
+
+    pitch = 2.54
+    fp = create_pin_header(
+        40,
+        rows=2,
+        pitch=pitch,
+        name=name or "RPi_HAT_2x20_P2.54mm_MountingHoles",
+    )
+    fp.description = "Raspberry Pi HAT: 2x20 header with four 2.75mm mounting holes"
+    fp.tags = ["RPi", "HAT", "PinHeader", "THT", "MountingHole"]
+
+    # Move pin 1 to the origin (create_pin_header centres the header).
+    dx = pitch / 2
+    dy = 19 * pitch / 2
+    for pad in fp.pads:
+        pad.x += dx
+        pad.y += dy
+    for g in fp.graphics:
+        _translate_graphic(g, dx, dy)
+
+    cx = pitch / 2
+    x_lo = cx - _HAT_HOLE_SPACING_X
+    y_lo = -4.87
+    y_hi = y_lo + _HAT_HOLE_SPACING_Y
+    holes = [(cx, y_lo), (x_lo, y_lo), (cx, y_hi), (x_lo, y_hi)]
+    for hx, hy in holes:
+        fp.add_pad(
+            "",
+            x=hx,
+            y=hy,
+            width=_HAT_HOLE_DRILL,
+            height=_HAT_HOLE_DRILL,
+            pad_type="np_thru_hole",
+            shape="circle",
+            drill=_HAT_HOLE_DRILL,
+            layers=("*.Cu", "*.Mask"),
+        )
+        if keepout_diameter > 0:
+            # Circumscribe the 16-gon so its flats keep the full land.
+            r = keepout_diameter / 2 / math.cos(math.pi / 16)
+            pts = [
+                (hx + r * math.cos(2 * math.pi * k / 16), hy + r * math.sin(2 * math.pi * k / 16))
+                for k in range(16)
+            ]
+            fp.zones.append(KeepoutZone(points=pts, layers=("*.Cu",), name="hat_hole_keepout"))
+
+    # HAT outline (65 long along Y, 56.5 wide along X).  The far (-x) edge keeps
+    # the spec's 3.5 mm hole margin; the extra 0.5 mm goes on the header (+x) side.
+    long_side, short_side = _HAT_OUTLINE
+    x0 = x_lo - 3.5
+    ocy = (y_lo + y_hi) / 2
+    fp.add_rect(
+        (x0, ocy - long_side / 2),
+        (x0 + short_side, ocy + long_side / 2),
+        "F.Fab",
+        0.1,
+    )
     return fp
