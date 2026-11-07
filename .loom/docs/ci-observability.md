@@ -652,6 +652,15 @@ producers use:
   unchanged. Throughput is about one backfill limit per tick if the sender
   drains between ticks; raise `observability.queueCapacity` to speed a large
   replay, not to hide loss.
+- **The bulk lane has a reserved share (#13688).** Each pass reads the queue's
+  free backfill headroom once. The fast lane (run/job facts) may admit at most
+  the larger half of it; the rest is held for the bulk lane, whose cursor
+  drives rotation. A fast-lane backlog bigger than the backfill limit can
+  therefore no longer starve the bulk cursor at 0. Headroom the bulk lane does
+  not use (nothing to offer below the fast lane's offset) goes back to the fast
+  lane in the same pass. The share is a constant, not a config key. Raising
+  `observability.queueCapacity` is still the way to speed a large replay: it
+  scales both lanes, but it is not needed for the bulk cursor to advance.
 
 **Pressure counters.** Each entry of `observability_exports` in
 `loom-daemon status --json` carries a `queue` object, per exporter:
