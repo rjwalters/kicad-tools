@@ -20,7 +20,7 @@ import pytest
 
 from kicad_tools._shapely import has_shapely
 from kicad_tools.cli import readiness_cmd
-from kicad_tools.cli.board_readiness import read_readiness
+from kicad_tools.cli.board_readiness import read_readiness, readiness_input_hash
 from kicad_tools.cli.readiness_cmd import EngineRun, Engines
 from tests.creepage.fixtures import board_close_hv_source, board_no_hv_source, board_source
 
@@ -372,7 +372,8 @@ def test_report_hashes_sources_rules_and_delivered_files(tmp_path):
         "project.kct",
     ):
         assert required in inputs, required
-        digest = hashlib.sha256((board / required).read_bytes()).hexdigest()
+        # The manufacturing manifest is hashed in canonical form (#8580).
+        digest = readiness_input_hash(required, (board / required).read_bytes())
         assert inputs[required] == digest, required
     # The report never hashes itself.
     assert "output/readiness.json" not in inputs
