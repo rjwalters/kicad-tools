@@ -35,7 +35,7 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8468**: feat(submit-jlcpcb): website leg, factory-match gate, cart hand-off (part 3/3 of #8465)
+- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
 
 ## PRs Awaiting Review
 
@@ -47,7 +47,7 @@ _None._
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#8476**: feat(submit-jlcpcb): attended website driver to a saved JLCPCB cart
+_None._
 
 ## Proposed
 
@@ -63,7 +63,9 @@ Issues carrying `loom:curated`.
 - **#8422**: Live-verify --complete creepage rollback on a real mains board (follow-up to #8396) *(curated)*
 - **#8425**: Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B *(curated)*
 - **#8434**: Changelog Fragment Check re-runs on every label change; Loom role label churn keeps it queued *(curated)*
-- **#8468**: feat(submit-jlcpcb): website leg, factory-match gate, cart hand-off (part 3/3 of #8465) *(curated)*
+- **#8486**: route perf: nets proven sealed are re-searched at full budget and re-rescued every iteration (43% of search time, rescue 0/15 for ~1,475 s each pass) *(curated)*
+- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step *(curated)*
+- **#8577**: route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class (fails kicad-cli DRC) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -85,8 +87,8 @@ _None._
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 1 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 11 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 13 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
