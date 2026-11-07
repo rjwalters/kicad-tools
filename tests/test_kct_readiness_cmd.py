@@ -1511,8 +1511,14 @@ def test_verify_mode_reads_the_retained_manifest_lcsc_check(tmp_path):
 def _verify_report(board: Path, fake: FakeEngines, *extra: str) -> tuple[int, dict]:
     code = readiness_cmd.main([str(board), "--mfr", "jlcpcb", *extra], engines=fake.bundle())
     out = board / "output"
-    path = out / ("readiness-attempt/readiness.json" if code else "readiness.json")
-    path = path if path.is_file() else out / "readiness-verification" / "readiness.json"
+    # Verify writes its receipt under readiness-verification/; the generate run
+    # that built the fixture left a stale output/readiness.json beside it.
+    candidates = [
+        out / "readiness-attempt" / "readiness.json",
+        out / "readiness-verification" / "readiness.json",
+        out / "readiness.json",
+    ]
+    path = next(c for c in candidates if c.is_file())
     return code, json.loads(path.read_text())
 
 
@@ -1547,10 +1553,16 @@ def test_verify_tapeout_layout_without_archive_passes_with_no_archive_8571(tmp_p
     board = make_board(tmp_path)
     assert run(board, FakeEngines(board))[0] == 0
     (board / "output" / "manufacturing.zip").unlink()
+    manifest_path = board / "output" / "manufacturing" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.pop("producer", None)
+    manifest_path.write_text(json.dumps(manifest, indent=2))
 
     code, report = _verify_report(board, FakeEngines(board), "--no-archive")
 
     assert check_status(report, "artifacts") == "passed"
+    artifacts = next(c for c in report["checks"] if c["name"] == "artifacts")
+    assert "skipped" in artifacts["detail"] and "--no-archive" in artifacts["detail"]
     assert _bom_check(report)["status"] == "passed"
 
 

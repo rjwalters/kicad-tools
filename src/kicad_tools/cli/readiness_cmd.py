@@ -2434,7 +2434,9 @@ def _verify_finished_artifacts(options: ReadinessOptions) -> CheckOutcome:
         except FileNotFoundError:
             problems.append(
                 f"bundle has no {_ARCHIVE_NAME} next to {options.output_dir.name}/; "
-                f"produce it with 'kct readiness ...' (generate) or pass --no-archive"
+                f"zip the bundle files beside it (flat or {options.output_dir.name}/-prefixed "
+                f"members, byte-identical) or pass --no-archive; regenerate with "
+                f"'kct readiness <board> --generate' only if kct readiness produced the bundle"
             )
         except (OSError, zipfile.BadZipFile) as exc:
             problems.append(f"outer archive is unreadable: {exc}")
@@ -2443,7 +2445,12 @@ def _verify_finished_artifacts(options: ReadinessOptions) -> CheckOutcome:
         FAILED if problems else PASSED,
         "; ".join(problems)
         if problems
-        else "Retained package manifest, source provenance and archive bytes verified.",
+        else (
+            "Retained package manifest, source provenance and archive bytes verified."
+            if options.archive
+            else "Retained package manifest and source provenance verified; "
+            "outer-archive comparison skipped (--no-archive)."
+        ),
         blockers=[f"Finished manufacturing package: {problem}" for problem in problems],
     )
 
