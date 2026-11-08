@@ -36,12 +36,13 @@ _None._
 Issues currently being built (`loom:building`).
 
 - **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
+- **#8609**: Routing ~10-12x slower on Apple Silicon with the metal (mlx) extra; uv sync --all-extras fails on macOS
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#8611**: fix(router): force NumPy grid arrays for pure-Python A*; platform-mark cupy
 
 ## Approved (Awaiting Merge)
 
@@ -57,15 +58,15 @@ Issues carrying `loom:curated`.
 - **#5539**: Champion: Merge-Risk Hold Digest *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback *(curated)*
-- **#8396**: route --complete commits cross-footprint copper that fails pairwise HV creepage (+16 pairs, down to 0.40 mm vs 1.6 mm) that the negotiated pass respects *(curated)*
-- **#8399**: Boards 02/04/07: evidence refresh refused on main by unaccepted redundant_copper warnings (#8218), blocks #8385 *(curated)*
 - **#8414**: Post-negotiation sweep overruns its announced 60 s bound until the global timeout *(curated)*
-- **#8422**: Live-verify --complete creepage rollback on a real mains board (follow-up to #8396) *(curated)*
 - **#8425**: Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B *(curated)*
 - **#8434**: Changelog Fragment Check re-runs on every label change; Loom role label churn keeps it queued *(curated)*
 - **#8486**: route perf: nets proven sealed are re-searched at full budget and re-rescued every iteration (43% of search time, rescue 0/15 for ~1,475 s each pass) *(curated)*
 - **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step *(curated)*
 - **#8577**: route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class (fails kicad-cli DRC) *(curated)*
+- **#8602**: Board 07: DRC-verified prune and re-derive authored escapes so validate.py passes (part of #8399) *(curated)*
+- **#8609**: Routing ~10-12x slower on Apple Silicon with the metal (mlx) extra; uv sync --all-extras fails on macOS *(curated)*
+- **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -85,8 +86,8 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 0 |
+| In Progress (`loom:building`) | 2 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 13 |
 | Architect / Hermit proposals | 0 |

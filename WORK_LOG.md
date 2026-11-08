@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-08
 
+- **PR #8618**: fix(router): charge HV mask setup to the Python fallback's budget; O(N) exact dilation
+- **PR #8617**: fix(waivers): warn on unmatched --waive keys and keep approval on same-digest rebind
+- **PR #8616**: perf(router): coarse copper key and sub-cap back-off for known-failing nets
+- **PR #8615**: fix(export): skip waived, oversize and designer-DRU ampacity floors
+- **Issue #8614** (closed): waivers: --waive aborts the whole batch on one unmatched key; orphan waivers unreported
+- **Issue #8612** (closed): export still appends ampacity track_width floors to the designer .kicad_dru (per-net after #8528)
 - **PR #8608**: chore(release): v0.28.1
 - **Issue #8396** (closed): route --complete commits cross-footprint copper that fails pairwise HV creepage (+16 pairs, down to 0.40 mm vs 1.6 mm) that the negotiated pass respects
 
