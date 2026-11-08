@@ -1189,6 +1189,7 @@ _EXPORT_PASS_THROUGH_CASES = {
     "no_bom": (["--no-bom"], True),
     "no_cpl": (["--no-cpl"], True),
     "no_project_zip": (["--no-project-zip"], True),
+    "no_ampacity_rules": (["--no-ampacity-rules"], True),
     "keep_versions": (["--keep-versions"], True),
     "keep_build_artifacts": (["--keep-build-artifacts"], True),
     "keep_gerber_files": (["--keep-gerber-files"], True),

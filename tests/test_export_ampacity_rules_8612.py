@@ -73,6 +73,18 @@ def test_no_ampacity_rules_flag(tmp_path: Path) -> None:
     assert "Ampacity Min Width" not in dru
 
 
+def test_no_ampacity_rules_reaches_config_via_cli_builder(tmp_path: Path) -> None:
+    from kicad_tools.cli.export_cmd import build_manufacturing_config, build_parser
+
+    args = build_parser().parse_args(["board.kicad_pcb", "--no-ampacity-rules"])
+    cfg = build_manufacturing_config(
+        output_dir=tmp_path,
+        emit_ampacity_rules=not getattr(args, "no_ampacity_rules", False),
+    )
+    assert cfg.emit_ampacity_rules is False
+    assert build_manufacturing_config(output_dir=tmp_path).emit_ampacity_rules is True
+
+
 def test_designer_clearance_rule_skips_ampacity(tmp_path: Path) -> None:
     pcb = _stage(tmp_path)
     pcb.with_suffix(".kicad_dru").write_text(
