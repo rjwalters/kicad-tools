@@ -25,11 +25,15 @@ extension is the most likely cause of multi-minute-per-net routing.
 
 ### Check the acceleration backend before timing routes
 
-On Apple Silicon, an installed `mlx` (the `metal` extra) used to make the
-pure-Python A* fallback ~10-12x slower (Issue #8609). The pure-Python router
-now forces NumPy grid arrays, but still confirm what is active before
-benchmarking: `uv pip list | grep -i -E 'mlx|cupy'`, or the
-`Grid using ... backend` log line from `RoutingGrid._select_backend`.
+When a `RoutingGrid` is built with a `PerformanceConfig` on a GPU backend
+(MLX/CuPy), the pure-Python A* does per-cell scalar indexing that is ~30x
+slower than on NumPy (Issue #8609, measured on an MLX grid). `Router` now
+forces NumPy grid arrays as a defensive guard. The default `kct route` path
+builds the grid without a `config`, so it is NumPy regardless of installed
+extras; the original ~1,650 s vs ~140 s report is **not** explained by this
+and its real cause is unconfirmed. When benchmarking, check what is active:
+`uv pip list | grep -i -E 'mlx|cupy'`, and the `Grid using ... backend` log
+line from `RoutingGrid._select_backend`.
 `uv sync --all-extras` now resolves on macOS (`cupy-cuda12x` is skipped there).
 
 ### Rebuilding after editing C++ sources
