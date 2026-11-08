@@ -14,6 +14,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-08
+
+- **PR #8608**: chore(release): v0.28.1
+- **Issue #8396** (closed): route --complete commits cross-footprint copper that fails pairwise HV creepage (+16 pairs, down to 0.40 mm vs 1.6 mm) that the negotiated pass respects
+
 ### 2026-11-07
 
 - **PR #8606**: chore(loom): resync installed Loom to v0.19.1275
