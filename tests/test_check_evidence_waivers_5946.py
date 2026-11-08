@@ -220,6 +220,52 @@ class TestWriter:
         assert [e.evidence_hash for e in entries if e.key] == ["ev1:bbb"]
         assert entries[-1].issue == "#9"
 
+    def test_same_digest_rebind_keeps_original_approval(self, tmp_path):
+        path = tmp_path / "b.kct-waivers.json"
+        v = replace(_v(), evidence_hash="ev2:abc123")
+        write_keyed_waivers(
+            path, [v], reason="orig", reviewer="alice", issue="#1", date="2026-01-02"
+        )
+        v3 = replace(_v(), evidence_hash="ev3:abc123")
+        write_keyed_waivers(path, [v3], reason="new", reviewer="bob", date="2026-11-08")
+        (e,) = json.loads(path.read_text())["waivers"]
+        assert e["evidence_hash"] == "ev3:abc123"
+        assert (e["reviewer"], e["date"], e["reason"], e["issue"]) == (
+            "alice",
+            "2026-01-02",
+            "orig",
+            "#1",
+        )
+        assert e["rebound_at"] == "2026-11-08"
+        assert load_waivers(path).entries[0].rebound_at == "2026-11-08"
+
+    def test_changed_digest_replaces_entry(self, tmp_path):
+        path = tmp_path / "b.kct-waivers.json"
+        write_keyed_waivers(
+            path,
+            [replace(_v(), evidence_hash="ev2:abc")],
+            reason="orig",
+            reviewer="alice",
+            date="2026-01-02",
+        )
+        write_keyed_waivers(
+            path,
+            [replace(_v(), evidence_hash="ev3:def")],
+            reason="new",
+            reviewer="bob",
+            date="2026-11-08",
+        )
+        (e,) = json.loads(path.read_text())["waivers"]
+        assert (e["reviewer"], e["date"], e["reason"]) == ("bob", "2026-11-08", "new")
+        assert "rebound_at" not in e
+
+    def test_orphan_waiver_count(self):
+        from kicad_tools.cli.check_cmd import _orphan_waiver_count
+
+        res = DRCResults()
+        res.violations = [_v(rule_id="waiver_unused"), _v()]
+        assert _orphan_waiver_count(res) == 1
+
     def test_refuses_to_clobber_a_malformed_file(self, tmp_path):
         path = tmp_path / "w.json"
         path.write_text("{nope")
