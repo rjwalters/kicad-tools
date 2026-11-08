@@ -9990,6 +9990,12 @@ def _add_export_parser(subparsers) -> None:
         help="Skip KiCad project ZIP creation",
     )
     export_parser.add_argument(
+        "--no-ampacity-rules",
+        dest="export_no_ampacity_rules",
+        action="store_true",
+        help="Do not emit ampacity track_width floors into the sibling .kicad_dru",
+    )
+    export_parser.add_argument(
         "--auto-lcsc",
         dest="export_auto_lcsc",
         action="store_true",

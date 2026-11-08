@@ -367,6 +367,7 @@ def generate_dru(
     rules: DesignRules,
     manufacturer_name: str = "",
     net_classes: Sequence[NetClassRouting] | None = None,
+    max_ampacity_width_mm: float | None = None,
 ) -> str:
     """
     Generate KiCad .kicad_dru file content from a DesignRules instance.
@@ -604,6 +605,14 @@ def generate_dru(
                 else 0.0
             )
 
+            # #8612: a minimum wider than the board can never be met; skip it.
+            skip_external = (
+                max_ampacity_width_mm is not None and external_width_mm > max_ampacity_width_mm
+            )
+            skip_internal = (
+                max_ampacity_width_mm is not None and internal_width_mm > max_ampacity_width_mm
+            )
+
             # Per-net targets are scoped to their nets (#8527); a class-wide
             # target keeps the ``A.NetClass`` scope.
             net_scope = tuple(getattr(nc, "net_scope", ()) or ())
@@ -616,13 +625,14 @@ def generate_dru(
                 label = nc.name
 
             # External copper: front and back layers.
-            lines.append(
-                f'(rule "Ampacity Min Width ({label}, external){label_suffix}"\n'
-                f"  (condition \"{scope_cond} && A.Type == 'track'"
-                f" && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')\")\n"
-                f"  (constraint track_width (min {external_width_mm:.4f}mm)))"
-            )
-            if not has_inner:
+            if not skip_external:
+                lines.append(
+                    f'(rule "Ampacity Min Width ({label}, external){label_suffix}"\n'
+                    f"  (condition \"{scope_cond} && A.Type == 'track'"
+                    f" && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')\")\n"
+                    f"  (constraint track_width (min {external_width_mm:.4f}mm)))"
+                )
+            if not has_inner or skip_internal:
                 continue
             # Internal copper: any track that is not on an external layer.
             lines.append(

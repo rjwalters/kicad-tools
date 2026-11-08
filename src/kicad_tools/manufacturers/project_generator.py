@@ -1154,6 +1154,7 @@ def generate_project_dru(
     manufacturer_id: str = "",
     net_classes: Sequence[NetClassRouting] | None = None,
     preserve_board_rules: str | None = None,
+    max_ampacity_width_mm: float | None = None,
 ) -> str:
     """Render the factory-floor ``.kicad_dru`` text, honouring project minima.
 
@@ -1241,7 +1242,12 @@ def generate_project_dru(
             )
 
     return (
-        generate_dru(dru_rules, manufacturer_name=manufacturer_id, net_classes=net_classes)
+        generate_dru(
+            dru_rules,
+            manufacturer_name=manufacturer_id,
+            net_classes=net_classes,
+            max_ampacity_width_mm=max_ampacity_width_mm,
+        )
         + preserved_clearances
     )
 
@@ -1456,6 +1462,7 @@ def write_drc_constraints(
     router_coupled_pairs: Iterable[tuple[str, str]] | None = None,
     router_pair_gaps: Iterable[tuple[str, str, float]] | None = None,
     router_pair_limits: Iterable[PairLimits] | None = None,
+    max_ampacity_width_mm: float | None = None,
     _board_path: str | Path | None = None,
 ) -> list[Path]:
     """Emit DRC-constraint sources next to a routed ``.kicad_pcb``.
@@ -1606,6 +1613,7 @@ def write_drc_constraints(
                 router_coupled_pairs=router_coupled_pairs,
                 router_pair_gaps=router_pair_gaps,
                 router_pair_limits=router_pair_limits,
+                max_ampacity_width_mm=max_ampacity_width_mm,
                 _board_path=pcb_path,
             )
             for result in rendered:
@@ -1706,6 +1714,7 @@ def write_drc_constraints(
                 manufacturer_id=manufacturer_id,
                 net_classes=net_classes,
                 preserve_board_rules=preserve_board_rules,
+                max_ampacity_width_mm=max_ampacity_width_mm,
             ),
             path=dru_path,
         )
