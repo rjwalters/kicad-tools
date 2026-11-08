@@ -163,7 +163,7 @@ native = [
 ]
 # CUDA GPU acceleration (NVIDIA GPUs on Linux/Windows)
 cuda = [
-    "cupy-cuda12x>=13.0",
+    "cupy-cuda12x>=13.0; sys_platform != 'darwin'",
 ]
 # Metal GPU acceleration (Apple Silicon Macs)
 metal = [
@@ -216,7 +216,7 @@ all = [
     "fastmcp>=4,<5",
     "pydantic>=2.0",
     "jsonschema>=4.20",
-    "cupy-cuda12x>=13.0",
+    "cupy-cuda12x>=13.0; sys_platform != 'darwin'",
     "mlx>=0.5",
     "matplotlib>=3.5",
     "ax-platform>=0.4.0",

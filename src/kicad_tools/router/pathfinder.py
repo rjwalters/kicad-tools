@@ -265,6 +265,8 @@ class Router:
                               When False, routes use only orthogonal (Manhattan) moves.
         """
         self.grid = grid
+        # Issue #8609: pure-Python A* must run on NumPy arrays, never MLX/CuPy.
+        grid.ensure_numpy_arrays()
         self.rules = rules
         from .mfr_limits import get_mfr_limits
 

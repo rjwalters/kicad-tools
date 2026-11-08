@@ -23,6 +23,15 @@ new git worktrees (`.loom/worktrees/issue-N/`) need this step explicitly.
 The C++ backend gives a 10-100x speedup for the A* loop, so a missing
 extension is the most likely cause of multi-minute-per-net routing.
 
+### Check the acceleration backend before timing routes
+
+On Apple Silicon, an installed `mlx` (the `metal` extra) used to make the
+pure-Python A* fallback ~10-12x slower (Issue #8609). The pure-Python router
+now forces NumPy grid arrays, but still confirm what is active before
+benchmarking: `uv pip list | grep -i -E 'mlx|cupy'`, or the
+`Grid using ... backend` log line from `RoutingGrid._select_backend`.
+`uv sync --all-extras` now resolves on macOS (`cupy-cuda12x` is skipped there).
+
 ### Rebuilding after editing C++ sources
 
 `kct build-native` now detects staleness automatically: it compares the

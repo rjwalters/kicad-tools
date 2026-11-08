@@ -1896,6 +1896,25 @@ class RoutingGrid:
         # derived bitmap must recompute.
         self.bump_occupancy_generation()
 
+    def ensure_numpy_arrays(self) -> None:
+        """Unconditionally move every grid array to host NumPy (Issue #8609).
+
+        The pure-Python A* does per-cell scalar indexing, which is ~10x slower
+        on MLX/CuPy arrays than on NumPy.  Unlike :meth:`sync_to_cpu` this does
+        not depend on ``_gpu_dirty``.  Idempotent; a no-op on a CPU grid.
+        """
+        if self._backend is np and self._backend_type == BackendType.CPU:
+            return
+        logger.info(
+            "Grid arrays moved from %s to NumPy for the pure-Python router",
+            self._backend_type.value,
+        )
+        self._gpu_dirty = True
+        self.sync_to_cpu()
+        # Stop sync_to_gpu from migrating the arrays back.
+        self._cpu_dirty = False
+        self._config = None
+
     def sync_to_gpu(self) -> None:
         """Transfer CPU arrays to GPU for bulk operations.
 
