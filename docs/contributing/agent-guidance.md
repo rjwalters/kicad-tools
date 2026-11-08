@@ -66,8 +66,9 @@ extension is the most likely cause of multi-minute-per-net routing.
 ### Check the acceleration backend before timing routes
 
 When a `RoutingGrid` is built with a `PerformanceConfig` on a GPU backend
-(MLX/CuPy), the pure-Python A* does per-cell scalar indexing that is ~30x
-slower than on NumPy (Issue #8609, measured on an MLX grid). `Router` now
+(MLX/CuPy), the pure-Python A* does per-cell scalar indexing that is
+slower than on NumPy (Issue #8609; the slowdown is unmeasured here -- #8609
+reports 10-12x on the default path, which this guard does not touch). `Router` now
 forces NumPy grid arrays as a defensive guard. The default `kct route` path
 builds the grid without a `config`, so it is NumPy regardless of installed
 extras; the original ~1,650 s vs ~140 s report is **not** explained by this

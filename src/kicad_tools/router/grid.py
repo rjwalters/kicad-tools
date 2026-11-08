@@ -1910,9 +1910,10 @@ class RoutingGrid:
     def ensure_numpy_arrays(self) -> None:
         """Unconditionally move every grid array to host NumPy (Issue #8609).
 
-        The pure-Python A* does per-cell scalar indexing, which is ~10x slower
-        on MLX/CuPy arrays than on NumPy.  Unlike :meth:`sync_to_cpu` this does
-        not depend on ``_gpu_dirty``.  Idempotent; a no-op on a CPU grid.
+        The pure-Python A* does per-cell scalar indexing, which is slower
+        on MLX/CuPy arrays than on NumPy (magnitude unmeasured; Issue #8609).
+        Unlike :meth:`sync_to_cpu` this does not depend on ``_gpu_dirty``.
+        Idempotent; a no-op on a CPU grid.
         """
         # Decide from the actual array types, not ``_backend_type``: the type
         # tag can disagree with the arrays (Issue #8609).
