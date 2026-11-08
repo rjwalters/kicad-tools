@@ -445,13 +445,19 @@ def _apply_waivers(
         targets = [v for v in adapters if v.key in wanted]
         missing = [k for k in wanted if not any(v.key == k for v in targets)]
         if missing:
+            listed = ", ".join(repr(k) for k in missing)
+            if not targets:
+                print(
+                    f"Error: --waive names no current finding for key(s): {listed}"
+                    ". Copy the 'key' field from `kct detect-mistakes --format json`.",
+                    file=sys.stderr,
+                )
+                return MistakeWaiverResult(), 1
             print(
-                "Error: --waive names no current finding for key(s): "
-                + ", ".join(repr(k) for k in missing)
-                + ". Copy the 'key' field from `kct detect-mistakes --format json`.",
+                f"WARNING: --waive names no current finding for key(s): {listed}"
+                " (skipped; the other key(s) are still recorded).",
                 file=sys.stderr,
             )
-            return MistakeWaiverResult(), 1
         waive_path = (
             path if path is not None else pcb_path.parent / f"{pcb_path.stem}.kct-waivers.json"
         )

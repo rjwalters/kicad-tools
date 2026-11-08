@@ -2504,13 +2504,19 @@ def main(argv: list[str] | None = None) -> int:
         ]
         missing = [k for k in wanted if not any(v.key == k for v in targets)]
         if missing:
+            listed = ", ".join(repr(k) for k in missing)
+            if not targets:
+                print(
+                    f"Error: --waive names no current finding for key(s): {listed}"
+                    ". Copy the 'key' field from `kct check --format json`.",
+                    file=sys.stderr,
+                )
+                return 1
             print(
-                "Error: --waive names no current finding for key(s): "
-                + ", ".join(repr(k) for k in missing)
-                + ". Copy the 'key' field from `kct check --format json`.",
+                f"WARNING: --waive names no current finding for key(s): {listed}"
+                " (skipped; the other key(s) are still recorded).",
                 file=sys.stderr,
             )
-            return 1
         waive_path = (
             gw_path
             if gw_path is not None
@@ -3800,6 +3806,9 @@ def output_table(
         print(f"  Infos:      {info_count}")
     if waived_count > 0:
         print(f"  Waived:     {waived_count}")
+    orphan_count = _orphan_waiver_count(results)
+    if orphan_count > 0:
+        print(f"  Orphan waivers: {orphan_count} (match no current finding)")
     if results.suppressed_count > 0:
         print(f"  Suppressed: {results.suppressed_count} (standard library footprints)")
 
@@ -4107,6 +4116,19 @@ def _warn_attach_zone_suppressed(results: DRCResults) -> None:
     )
 
 
+def _orphan_waiver_count(results) -> int:
+    """Waiver entries that matched no current finding (Issue #8614).
+
+    Counts the ``waiver_unused`` advisories ``apply_waivers`` appended.
+    Orphans never fail the gate.
+    """
+    from kicad_tools.validate.rules.waivers import WAIVER_UNUSED_RULE_ID
+
+    return sum(
+        1 for v in results.violations if getattr(v, "rule_id", None) == WAIVER_UNUSED_RULE_ID
+    )
+
+
 def output_json(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -4177,6 +4199,7 @@ def output_json(
     summary_data["stale_waivers"] = sum(
         1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
     )
+    summary_data["orphan_waivers"] = _orphan_waiver_count(results)
     if coverage is not None:
         summary_data.update(_coverage_summary(coverage))
     # Issue #8131: gates can assert the attach-zone exemption was applied.
@@ -4235,6 +4258,7 @@ def output_sarif(
         "stale_waivers": sum(
             1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
         ),
+        "orphan_waivers": _orphan_waiver_count(results),
         "rules_checked": results.rules_checked,
     }
     if coverage is not None:
@@ -4304,6 +4328,7 @@ def write_json_report(
     summary_data["stale_waivers"] = sum(
         1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
     )
+    summary_data["orphan_waivers"] = _orphan_waiver_count(results)
     if coverage is not None:
         summary_data.update(_coverage_summary(coverage))
     # Issue #8262: parity with ``output_json`` -- gates reading the ``--output``
