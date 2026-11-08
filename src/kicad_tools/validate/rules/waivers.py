@@ -842,9 +842,9 @@ def write_keyed_waivers(
         raw_entries = list(existing.get("waivers", []))
 
     old_by_key: dict[str, dict] = {}
-    for e in raw_entries:
-        if isinstance(e, dict) and isinstance(e.get("key"), str):
-            old_by_key.setdefault(e["key"], e)
+    for raw_entry in raw_entries:
+        if isinstance(raw_entry, dict) and isinstance(raw_entry.get("key"), str):
+            old_by_key.setdefault(raw_entry["key"], raw_entry)
 
     def _digest(h: Any) -> str:
         return str(h).split(":", 1)[-1]
