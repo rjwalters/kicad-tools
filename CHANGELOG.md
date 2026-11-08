@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.1] - 2026-11-08
+
+### Fixed
+
+- **Post-negotiation sweep stops at its bound inside pad-escape and sub-grid
+  retries** (Issue #8414). A stranded wide power net whose edges fail on pin
+  access no longer runs pad-escape generation, the sub-grid retry or the
+  via/trace conflict resolver on an already-spent per-net or whole-sweep
+  budget: each step checks the remaining budget before it starts, escape
+  generation stops between pads, nested retries get the remainder, and the
+  rescue DRC pre-check stops at the sweep deadline (rolling the rescue back).
+  The sweep's timing line now says what it enforces, and a net that runs more
+  than 1 s past its per-net bound is named with where the time went.
+  Unbudgeted / deterministic-budget runs are unchanged.
+
 ## [0.28.0] - 2026-11-07
 
 ### Upgrade notes / behaviour changes
@@ -15397,6 +15412,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.28.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.28.1
 [0.28.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.28.0
 [0.27.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.27.0
 [0.26.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.26.0
