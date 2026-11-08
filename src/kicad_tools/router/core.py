@@ -17463,13 +17463,16 @@ class Autorouter:
     def _failure_neighbourhood_print(
         self, failed_net: int, net_routes: dict[int, list[Route]]
     ) -> tuple | None:
-        """Exact geometry of the foreign copper near ``failed_net`` (#8486).
+        """Coarse identity of the foreign copper near ``failed_net`` (#8486).
 
-        Every other net's segment and via whose extent meets the bounding box
-        of ``failed_net``'s terminals grown by
-        :attr:`FAILURE_NEIGHBOURHOOD_MARGIN_MM`, as a sorted tuple.  Any rip,
-        re-route or nudge of copper in that window changes it, so a memo keyed
-        on it is never reused across a change that could open a path there.
+        The set of ``(net, layer)`` pairs of every other net's segments, and
+        ``(net, "via")`` for its vias, whose extent meets the bounding box of
+        ``failed_net``'s terminals grown by
+        :attr:`FAILURE_NEIGHBOURHOOD_MARGIN_MM`, as a sorted tuple.  Nudging
+        copper of nets already in the window leaves it unchanged (so the memo
+        survives a re-route pass); a foreign net entering or leaving the
+        window, or changing layers, changes it.  The memo built on it is
+        re-probed every ``KNOWN_FAILURE_REPROBE_EVERY`` iterations regardless.
         ``None`` when the net has no terminals.
         """
         keys = self.nets.get(int(failed_net)) or []
@@ -17481,7 +17484,7 @@ class Autorouter:
         x1 = max(p.x + p.width / 2 for p in pads) + m
         y0 = min(p.y - p.height / 2 for p in pads) - m
         y1 = max(p.y + p.height / 2 for p in pads) + m
-        items: list[tuple] = []
+        items: set[tuple] = set()
         for net, routes in net_routes.items():
             if net == failed_net or not routes:
                 continue
@@ -17494,11 +17497,11 @@ class Autorouter:
                         and min(s.y1, s.y2) - h <= y1
                         and max(s.y1, s.y2) + h >= y0
                     ):
-                        items.append((net, "s", str(s.layer), s.x1, s.y1, s.x2, s.y2, s.width))
+                        items.add((net, str(s.layer)))
                 for v in route.vias:
                     h = v.diameter / 2
                     if v.x - h <= x1 and v.x + h >= x0 and v.y - h <= y1 and v.y + h >= y0:
-                        items.append((net, "v", str(v.layers), v.x, v.y, v.diameter, 0.0, 0.0))
+                        items.add((net, "via"))
         return tuple(sorted(items))
 
     def _route_net_known_failure_aware(
@@ -17556,7 +17559,7 @@ class Autorouter:
         name = self.net_names.get(failed_net, f"Net_{failed_net}")
         signature = self._relief_witness_signature(failed_net, net_routes)
         known_futile = failed_net in ripup_guard.futile_rescue
-        if ripup_guard.repeats_futile_rescue(failed_net, signature):
+        if ripup_guard.repeats_futile_rescue(failed_net, signature, iteration):
             skips = ripup_guard.futile_rescue_skips
             skips[failed_net] = skips.get(failed_net, 0) + 1
             if skips[failed_net] == 1:
@@ -17582,7 +17585,9 @@ class Autorouter:
             ripup_guard.forget_failure(failed_net)
         else:
             ripup_guard.note_futile_rescue(
-                failed_net, self._relief_witness_signature(failed_net, net_routes)
+                failed_net,
+                self._relief_witness_signature(failed_net, net_routes),
+                iteration,
             )
         if known_futile:
             ripup_guard.add_known_fail_seconds(iteration, time.time() - t0)

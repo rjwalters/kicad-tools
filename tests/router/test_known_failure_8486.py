@@ -62,17 +62,21 @@ def test_backoff_resets_on_route_fast_failure_gap_or_missing_signature():
     assert 7 not in g.capped_streak
     for it in (4, 5):
         _fail_capped(g, it, 30.0)
-    # A fast, proven failure is not a budget failure.
+    # A fast failure keeps the streak (#8486 sub-cap back-off) ...
     g.begin_iteration(6, {7: SEAL})
     assert g.search_cap(7, 6, 30.0) == 15.0
     g.note_search(7, 6, 15.0, 0.4, routed=False)
+    assert g.capped_streak[7][2] == 3
+    # ... but a missing signature, or a gap, restarts it.
+    g.begin_iteration(7, {7: None})
+    g.note_search(7, 7, 30.0, 0.4, routed=False)
     assert 7 not in g.capped_streak
     # A gap (not searched in iteration N-1) restarts the count.
-    for it in (7, 8):
+    for it in (8, 9):
         _fail_capped(g, it, 30.0)
-    assert _fail_capped(g, 10, 30.0) == 30.0
+    assert _fail_capped(g, 11, 30.0) == 30.0
     # No signature (no terminals, error) never backs off.
-    for it in (11, 12, 13):
+    for it in (12, 13, 14):
         assert _fail_capped(g, it, 30.0, sig=None) == 30.0
 
 
@@ -214,3 +218,83 @@ def test_skipped_rescue_does_not_spend_relief_attempts():
             assert _memoized(router, neg, net_routes, pads_by_net, g, [], it) is False
     assert g.relief_attempts.get(VICTIM, 0) == 1
     assert g.futile_rescue_skips == {VICTIM: 2}
+
+
+# --- sub-cap back-off and coarse copper key (issue #8486, re-scoped) -----------
+
+
+def _fail_for(g: RipupCycleGuard, it: int, cap: float, took: float, sig=SEAL) -> float | None:
+    g.begin_iteration(it, {7: sig})
+    used = g.search_cap(7, it, cap)
+    g.note_search(7, it, used, took, routed=False)
+    return used
+
+
+def test_sub_cap_failure_backs_off_bounded_by_its_own_time():
+    g = RipupCycleGuard()
+    caps = [_fail_for(g, it, 30.0, 12.0) for it in (1, 2, 3, 4)]
+    # Never raised above the cap; bounded by the last failing time (12 s) once
+    # the streak is established, then halving, floored at 5 s.
+    assert caps == [30.0, 30.0, 12.0, 7.5]
+    # Floor: a 1 s failure never cuts a search below the floor.
+    g2 = RipupCycleGuard()
+    caps = [_fail_for(g2, it, 30.0, 1.0) for it in (1, 2, 3)]
+    assert caps == [30.0, 30.0, KNOWN_FAILURE_BACKOFF_FLOOR_S]
+    # A smaller cap is never raised.
+    g3 = RipupCycleGuard()
+    assert [_fail_for(g3, it, 3.0, 1.0) for it in (1, 2, 3)] == [3.0, 3.0, 3.0]
+
+
+def test_sub_cap_streak_resets_on_route_or_signature_change_and_report_counts_it():
+    g = RipupCycleGuard()
+    for it in (1, 2):
+        _fail_for(g, it, 30.0, 12.0)
+    assert _fail_for(g, 3, 30.0, 12.0, sig=OTHER) == 30.0
+    for it in (4, 5):
+        _fail_for(g, it, 30.0, 12.0, sig=OTHER)
+    g.begin_iteration(6, {7: OTHER})
+    g.note_search(7, 6, g.search_cap(7, 6, 30.0), 2.0, routed=True)
+    assert 7 not in g.capped_streak and 7 not in g.last_fail_s
+    assert "search(es) backed off" in g.known_failure_line()
+    assert f"{len(g.backoffs)} search(es) backed off" in g.known_failure_line() and g.backoffs
+
+
+def test_coarse_copper_rescue_memo_is_reprobed_every_k_iterations():
+    from kicad_tools.router.access_ripup import KNOWN_FAILURE_REPROBE_EVERY
+
+    COPPER = ("copper", ((2, "F.Cu"),))
+    g = RipupCycleGuard()
+    g.note_futile_rescue(7, COPPER, 2)
+    hits = [
+        g.repeats_futile_rescue(7, COPPER, it) for it in range(3, 3 + KNOWN_FAILURE_REPROBE_EVERY)
+    ]
+    assert hits == [True, True, False]  # iteration 2 + K re-probes
+    # A seal signature is exact and never expires.
+    g.note_futile_rescue(7, SEAL, 2)
+    assert g.repeats_futile_rescue(7, SEAL, 50)
+
+
+def test_copper_key_survives_nudges_but_not_a_new_foreign_net():
+    from kicad_tools.router.layers import Layer
+    from kicad_tools.router.primitives import Route, Segment
+
+    router, _neg, net_routes, _pads = _fixture()
+
+    def seg(net, y, x2):
+        return Route(
+            net=net,
+            net_name=f"N{net}",
+            segments=[Segment(x1=8.0, y1=y, x2=x2, y2=y, width=0.2, layer=Layer.F_CU, net=net)],
+        )
+
+    # Victim terminals sit at y=7; the 3 mm window spans y~3.75..10.25.
+    base = dict(net_routes)
+    base[2], base[3] = [seg(2, 8.0, 30.0)], [seg(3, 11.0, 30.0)]  # 3 is outside
+    key = router._failure_neighbourhood_print(VICTIM, base)
+    assert key is not None
+    nudged = dict(base)
+    nudged[2] = [seg(2, 8.4, 28.0)]  # same net, same layer, moved
+    assert router._failure_neighbourhood_print(VICTIM, nudged) == key
+    entered = dict(base)
+    entered[3] = [seg(3, 9.0, 30.0)]  # net 3 enters the window
+    assert router._failure_neighbourhood_print(VICTIM, entered) != key
