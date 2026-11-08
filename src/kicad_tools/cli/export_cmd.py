@@ -140,6 +140,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip KiCad project ZIP creation",
     )
     parser.add_argument(
+        "--no-ampacity-rules",
+        action="store_true",
+        help="Do not emit ampacity track_width floors into the sibling .kicad_dru",
+    )
+    parser.add_argument(
         "--keep-versions",
         action="store_true",
         help="Preserve versioned vN/ report directories (default: flat report/ directory)",
@@ -471,6 +476,7 @@ def run_export(args: argparse.Namespace) -> int:
         include_gerbers=not args.no_gerbers,
         include_report=not args.no_report,
         include_project_zip=not args.no_project_zip,
+        emit_ampacity_rules=not getattr(args, "no_ampacity_rules", False),
         auto_lcsc=args.auto_lcsc and not args.no_auto_lcsc,
         no_spec=getattr(args, "no_spec", False),
         spec_path=spec_path,
