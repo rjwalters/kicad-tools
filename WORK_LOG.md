@@ -14,6 +14,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-09
+
+- **PR #8611**: fix(router): force NumPy grid arrays for pure-Python A*; platform-mark cupy
+- **Issue #8609** (closed): Routing ~10-12x slower on Apple Silicon with the metal (mlx) extra; uv sync --all-extras fails on macOS
+
 ### 2026-11-08
 
 - **PR #8618**: fix(router): charge HV mask setup to the Python fallback's budget; O(N) exact dilation
