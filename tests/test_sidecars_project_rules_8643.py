@@ -73,3 +73,76 @@ def test_output_json_always_has_project_rules(capsys):
 
     output_json([], DRCResults(), Path("b.kicad_pcb"), "jlcpcb", 2)
     assert json.loads(capsys.readouterr().out)["project_rules"] == []
+
+
+_CHECK_PCB = """(kicad_pcb (version 20240108) (generator "test_fixture")
+  (general (thickness 1.6))
+  (paper "A4")
+  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))
+)
+"""
+
+
+def _check_board(tmp_path: Path, *, stock: bool) -> Path:
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(_CHECK_PCB)
+    if stock:
+        shutil.copy(FIXTURE, pcb.with_suffix(".kicad_pro"))
+    else:
+        data = json.loads(FIXTURE.read_text())
+        data["board"]["design_settings"]["rules"]["min_clearance"] = 0.127
+        pcb.with_suffix(".kicad_pro").write_text(json.dumps(data))
+    return pcb
+
+
+def test_check_cmd_warns_and_reports_stock_default(tmp_path, capsys):
+    from kicad_tools.cli.check_cmd import main
+
+    pcb = _check_board(tmp_path, stock=True)
+    main([str(pcb), "--only", "single_pad_net", "--format", "json"])
+    captured = capsys.readouterr()
+    assert "WARNING: project_default:" in captured.err
+    codes = [f["code"] for f in json.loads(captured.out)["project_rules"]]
+    assert codes == ["project_default"]
+
+
+def test_check_cmd_clean_project_has_no_warning(tmp_path, capsys):
+    from kicad_tools.cli.check_cmd import main
+
+    pcb = _check_board(tmp_path, stock=False)
+    main([str(pcb), "--only", "single_pad_net", "--format", "json"])
+    captured = capsys.readouterr()
+    assert "WARNING: project_" not in captured.err
+    assert json.loads(captured.out)["project_rules"] == []
+
+
+def _readiness_report(pcb: Path) -> dict:
+    from kicad_tools.cli.readiness_cmd import (
+        CheckOutcome,
+        EngineFingerprint,
+        ReadinessOptions,
+        build_report,
+    )
+
+    options = ReadinessOptions(
+        board_dir=pcb.parent,
+        pcb=pcb,
+        schematic=None,
+        project=pcb.with_suffix(".kicad_pro"),
+        manufacturer="jlcpcb",
+        mode="pcb_only",
+        output_dir=pcb.parent / "manufacturing",
+        evidence_dir=pcb.parent / "readiness",
+    )
+    checks = [CheckOutcome(name="kct_check", status="passed", detail="ok")]
+    return build_report(options, checks, {}, EngineFingerprint(kicad_tools_version="test"))
+
+
+def test_readiness_report_records_stock_default_warning(tmp_path):
+    report = _readiness_report(_check_board(tmp_path, stock=True))
+    assert [w["code"] for w in report["warnings"]] == ["project_default"]
+
+
+def test_readiness_report_clean_project_has_no_warnings_key(tmp_path):
+    report = _readiness_report(_check_board(tmp_path, stock=False))
+    assert "warnings" not in report
