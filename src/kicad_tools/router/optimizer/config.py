@@ -86,6 +86,15 @@ class OptimizationConfig:
     clearance error count or ``None`` if unavailable.  Set only when a project
     ``.kicad_dru`` exists, which the in-process referee cannot read."""
 
+    output_verifiers: dict[str, Callable[[str], dict[str, int] | None]] = field(
+        default_factory=dict
+    )
+    """Whole-board output verifiers (Issue #8632).  Each maps board text to
+    ``{problem key: count}`` (e.g. net name -> unconnected items, or a creepage
+    pair key -> 1), or ``None`` when the checker cannot run.  After the DRC
+    phase, any key whose count exceeds the input board's is attributed to the
+    changed nets and those nets are rolled back."""
+
 
 @dataclass
 class NetOptimizationStats:
@@ -143,6 +152,11 @@ class OptimizationStats:
     # where some independent changed regions were safe and kept.
     nets_connectivity_partial: int = 0
     connectivity_partial_nets: list[str] = field(default_factory=list)
+    # Issue #8632: verifier name -> nets rolled back because the whole-board
+    # check (opens / creepage) regressed.
+    output_verify_rolled_back: dict[str, list[str]] = field(default_factory=dict)
+    # Issue #8632: verifier name -> "ran" | "unchanged" | "unavailable".
+    output_checks: dict[str, str] = field(default_factory=dict)
     # Issue #7065: one row per optimized net, built after any DRC rollback.
     per_net: list[NetOptimizationStats] = field(default_factory=list)
 

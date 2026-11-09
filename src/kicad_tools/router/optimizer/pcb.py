@@ -1047,6 +1047,91 @@ def _arbitrate_changed_nets(
     return kept
 
 
+def _verify_outputs(
+    pcb_text: str,
+    segments_by_net: dict[str, list[Segment]],
+    optimized_segments: dict[str, list[Segment]],
+    verifiers: dict[str, Callable[[str], dict[str, int] | None]],
+    stats: OptimizationStats,
+    rolled_back_nets: set[str],
+    net_violations: dict[str, dict[str, int]],
+) -> None:
+    """Roll back nets whose rewrite regresses a whole-board check (Issue #8632).
+
+    Each verifier returns ``{problem key: count}`` for a board text.  A key
+    whose count exceeds the input board's is a regression; nets are reverted
+    (those named in a regressed key first) until none remain, falling back to
+    admitting changed nets one at a time.  A verifier that cannot run is
+    recorded as ``unavailable`` -- never a silent pass.
+    """
+
+    def excess_of(counts: dict[str, int], base: dict[str, int]) -> dict[str, int]:
+        return {k: n - base.get(k, 0) for k, n in counts.items() if n > base.get(k, 0)}
+
+    def text_of(segs: dict[str, list[Segment]]) -> str:
+        return replace_segments(pcb_text, segments_by_net, segs, scratch=True)
+
+    for name, verify in verifiers.items():
+        changed = [n for n in optimized_segments if optimized_segments[n] != segments_by_net[n]]
+        if not changed:
+            stats.output_checks[name] = "unchanged"
+            continue
+        base = verify(pcb_text)
+        cur = verify(text_of(optimized_segments)) if base is not None else None
+        if base is None or cur is None:
+            stats.output_checks[name] = "unavailable"
+            continue
+        stats.output_checks[name] = "ran"
+        excess = excess_of(cur, base)
+        if not excess:
+            continue
+
+        reverted: list[str] = []
+        final = dict(optimized_segments)
+        mentioned = [n for n in changed if any(n in k for k in excess)]
+        for net in mentioned + [n for n in changed if n not in mentioned]:
+            if not excess:
+                break
+            trial = dict(final)
+            trial[net] = segments_by_net[net]
+            t = verify(text_of(trial))
+            if t is None:
+                continue
+            t_excess = excess_of(t, base)
+            if sum(t_excess.values()) < sum(excess.values()):
+                final = trial
+                reverted.append(net)
+                net_violations.setdefault(net, {}).update(
+                    {f"{name}:{k}": n for k, n in excess.items()}
+                )
+                excess = t_excess
+
+        if excess:
+            # Interacting nets: rebuild from the input, admitting one changed
+            # net at a time and keeping it only while the board stays clean.
+            reverted = []
+            final = {n: segments_by_net[n] for n in optimized_segments}
+            for net in changed:
+                trial = dict(final)
+                trial[net] = optimized_segments[net]
+                t = verify(text_of(trial))
+                t_excess = excess_of(t, base) if t is not None else {"unverifiable": 1}
+                if t_excess:
+                    reverted.append(net)
+                    net_violations.setdefault(net, {}).update(
+                        {f"{name}:{k}": n for k, n in t_excess.items()}
+                    )
+                else:
+                    final = trial
+
+        optimized_segments.update(final)
+        for net in reverted:
+            if net not in rolled_back_nets:
+                stats.nets_rolled_back += 1
+            rolled_back_nets.add(net)
+        stats.output_verify_rolled_back[name] = list(reverted)
+
+
 def optimize_pcb(
     pcb_path: str,
     output_path: str | None,
@@ -1379,6 +1464,18 @@ def optimize_pcb(
             optimized_segments = final_segments
 
         stats.drc_errors_after = full_errors
+
+    # Issue #8632: whole-board opens / creepage re-audit of the final result.
+    if config.output_verifiers:
+        _verify_outputs(
+            pcb_text,
+            segments_by_net,
+            optimized_segments,
+            config.output_verifiers,
+            stats,
+            rolled_back_nets,
+            net_violations,
+        )
 
     # Recalculate after stats (may have changed due to rollbacks)
     stats.segments_after = 0
