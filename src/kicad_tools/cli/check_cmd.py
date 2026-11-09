@@ -2697,6 +2697,14 @@ def main(argv: list[str] | None = None) -> int:
     if not getattr(args, "refill_zones", False):
         _warn_stale_zone_fills(results.violations, pcb_path)
 
+    # Issue #8643: missing / stock-default project rules mean kicad-cli-style
+    # DRC ran on KiCad defaults.  Advisory only; surfaced in the JSON too.
+    from kicad_tools.sidecars import project_rules_findings
+
+    project_rules = project_rules_findings(pcb_path)
+    for finding in project_rules:
+        print(f"WARNING: {finding['code']}: {finding['message']}", file=sys.stderr)
+
     # Issue #3750 / #7260: the DRC sub-check, the meta-check rollup (ERC +
     # LVS + manifest; skipped under --drc-only to preserve the legacy
     # stdout/exit-code contract) and the verdict/exit code are computed by
@@ -2764,6 +2772,7 @@ def main(argv: list[str] | None = None) -> int:
             verdict=verdict,
             exit_code=exit_code,
             scope=scope_record,
+            project_rules=project_rules,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -4142,8 +4151,12 @@ def output_json(
     verdict: str | None = None,
     exit_code: int | None = None,
     scope: dict | None = None,
+    project_rules: list[dict] | None = None,
 ) -> None:
     """Output violations as JSON.
+
+    Issue #8643: ``project_rules`` (``sidecars.project_rules_findings``) is
+    always emitted as a top-level list, empty when clean.
 
     Issue #3750: when ``meta`` is provided (default mode), the envelope
     grows a top-level ``meta_checks`` field.  Legacy consumers that read
@@ -4234,6 +4247,7 @@ def output_json(
     # Issue #8016: additive; omitted without --bbox/--refs/--nets.
     if scope is not None:
         data["scope"] = scope
+    data["project_rules"] = list(project_rules or [])
     print(json.dumps(data, indent=2))
 
 
