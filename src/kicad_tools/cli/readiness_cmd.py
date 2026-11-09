@@ -3150,6 +3150,16 @@ def build_report(
     if options.known_issues:
         report["known_issues"] = [dict(entry) for entry in options.known_issues]
 
+    # Issue #8643: a stock-default .kicad_pro means DRC ran on KiCad defaults.
+    # Recorded as a warning only; the missing-project refusal is in resolve_options.
+    from kicad_tools.sidecars import project_rules_findings
+
+    default_rules = [
+        f for f in project_rules_findings(options.pcb) if f["code"] == "project_default"
+    ]
+    if default_rules:
+        report["warnings"] = default_rules
+
     evidence = {check.name: check.evidence for check in checks if check.evidence}
     if evidence:
         report["evidence"] = evidence
