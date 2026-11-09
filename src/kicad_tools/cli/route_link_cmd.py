@@ -333,7 +333,7 @@ def _authored_floors(args: argparse.Namespace) -> dict[str, float]:
     Cached on ``args``.  A missing project yields ``{}``; an unreadable or
     unsupported one raises :class:`LinkSpecError` (never silently ignored).
     """
-    cached = getattr(args, "_authored_clearances", None)
+    cached: dict[str, float] | None = getattr(args, "_authored_clearances", None)
     if cached is not None:
         return cached
     pcb_path = getattr(args, "pcb", None)
