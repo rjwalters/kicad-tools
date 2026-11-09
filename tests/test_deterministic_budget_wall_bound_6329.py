@@ -75,7 +75,11 @@ def test_wall_clock_stop_is_recorded() -> None:
     router = Router(_grid(), _rules())
     assert router.route(*_pads(), per_net_timeout=1e-9) is None
     assert router.last_route_deadline_hit is True
-    assert router.last_route_deadline_iterations > 0
+    # A budget this small (1e-9 s) is already spent by the time the shared
+    # setup/search deadline (#8645) is checked during blocked-mask dilation,
+    # so the stop is a *setup* stop (#8414): deadline_hit is True but no A*
+    # iteration ran. ``> 0`` only holds for a budget that survives setup.
+    assert router.last_route_deadline_iterations == 0
     # A wall-clock stop is not a drain, so not an unreachability proof.
     assert router.last_route_exhausted is False
 
