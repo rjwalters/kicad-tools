@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-09
 
+- **PR #8648**: feat: warn on missing or stock-default DRC project rules
+- **PR #8642**: fix: report undetermined stack_source when board lacks stackup
+- **Issue #8643** (closed): Warn when a board is checked without its paired .kicad_pro/.kicad_dru (kicad-cli silently uses default rules)
+- **Issue #8639** (closed): optimize-traces: drop dead _infer_board_stack and restore 'undetermined' stack_source
 - **PR #8636**: feat: run dedupe, prune and optimize-traces in tapeout cleanup with trace-quality gate
 - **Issue #8633** (closed): tapeout/readiness: make trace optimization a standard step (dedupe → prune → optimize-traces) and gate redundant_copper_* instead of reporting it as advisory
 - **PR #8631**: fix: place-silk-refs avoids NPTH holes and prefers own-courtyard association
