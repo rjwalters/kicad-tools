@@ -76,6 +76,46 @@ if TYPE_CHECKING:
 # Floating-point tolerance, matching ``validate.rules.silkscreen``.
 _EPSILON_MM = 1e-4
 
+#: A reference should sit at least this much closer (mm) to its own courtyard
+#: than to any other part's, so a reader attributes it to the right part
+#: (Issue #8628; the value the reporter's post-pass used).
+ASSOCIATION_MARGIN_MM = 0.4
+
+#: Extra spacing (mm) the planner adds to pad/silk clearance because the shared
+#: text box (``_text_bbox_geometry``) under-sizes KiCad's real stroke-font
+#: extents. Measured against ``kicad-cli pcb drc`` on a probe board (10.0.x,
+#: 1 mm / 0.15 mm text beside a 1 mm pad, no clearance): "C22" and "LED4" both
+#: needed 0.225 mm more gap than the box model, independent of text length.
+#: Planner-only; ``kct check`` semantics are unchanged (Issue #8628).
+KICAD_TEXT_EXTENT_SLACK_MM = 0.225
+
+
+def _iter_npth_apertures(pcb: PCB, mask_clearance_mm: float):
+    """Yield ``(side, geom, label)`` for every non-plated hole pad.
+
+    ``_iter_pad_apertures`` skips NPTH pads (no copper, so silk over them is
+    not ``silk_over_copper``), but kicad-cli still flags silk over the hole,
+    so the placer treats them as obstacles on both sides (Issue #8628).
+    """
+    from shapely.affinity import rotate  # type: ignore[import-untyped]
+    from shapely.geometry import box  # type: ignore[import-untyped]
+
+    for footprint in pcb.footprints:
+        transform = _fp_transform(footprint)
+        for pad in footprint.pads:
+            if pad.type != "np_thru_hole":
+                continue
+            cx, cy = transform(pad.position)
+            w = max(pad.size[0], pad.drill) + 2.0 * mask_clearance_mm
+            h = max(pad.size[1], pad.drill) + 2.0 * mask_clearance_mm
+            geom = box(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
+            rotation = getattr(pad, "rotation", 0.0) or 0.0
+            if rotation % 360.0:
+                geom = rotate(geom, -rotation, origin=(cx, cy))
+            label = f"{footprint.reference} NPTH {pad.number}"
+            for side in ("F", "B"):
+                yield side, geom, label
+
 
 def _find_all_footprints(doc: SExp) -> list[SExp]:
     """Return every footprint node in *doc*, in document order.
@@ -506,6 +546,12 @@ class RefPlacement:
     #: Footprint-local coordinates to write into the ``(at ...)`` node.
     #: Populated only for ``status == "moved"``.
     new_local_position: tuple[float, float] | None = None
+    #: Own-vs-nearest-other courtyard margin (mm) of the final position, or
+    #: ``None`` when the part has no courtyard. Positive = nearer its own part.
+    association_margin_mm: float | None = None
+    #: True when no clear candidate reached ``ASSOCIATION_MARGIN_MM`` and the
+    #: best-margin clear candidate was used instead (Issue #8628).
+    low_association: bool = False
 
     @property
     def moved(self) -> bool:
@@ -521,6 +567,8 @@ class RefPlacement:
             "new_rotation_deg": self.new_rotation,
             "status": self.status,
             "reason": self.reason,
+            "association_margin_mm": self.association_margin_mm,
+            "low_association": self.low_association,
         }
 
 
@@ -809,7 +857,7 @@ class SilkRefPlacer:
             raise ValueError("search exceeds 4096 rings; increase step_mm or reduce max_offset_mm")
 
         require_shapely("silk reference placement")
-        from shapely.geometry import MultiLineString, Polygon  # type: ignore[import-untyped]
+        from shapely.geometry import MultiLineString, Polygon
 
         pcb = self.pcb
         # Reference strings identify both move targets and own-component
@@ -831,6 +879,8 @@ class SilkRefPlacer:
         for aperture_side, geom, label in _iter_pad_apertures(pcb, mask_clearance_mm):
             apertures[aperture_side].append((geom, label))
         for aperture_side, geom, label in _iter_via_apertures(pcb, mask_clearance_mm):
+            apertures[aperture_side].append((geom, label))
+        for aperture_side, geom, label in _iter_npth_apertures(pcb, mask_clearance_mm):
             apertures[aperture_side].append((geom, label))
 
         static_silk: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
@@ -918,7 +968,7 @@ class SilkRefPlacer:
                     outline=outline,
                     board_material=board_material,
                     outline_error=outline_error,
-                    clearance_mm=clearance_mm,
+                    clearance_mm=clearance_mm + KICAD_TEXT_EXTENT_SLACK_MM,
                     edge_clearance_mm=edge_clearance_mm,
                 )
 
@@ -931,34 +981,47 @@ class SilkRefPlacer:
             )
             ordered = [original_center, *candidates]
 
+            own_poly_now = own_courtyard.get((id(footprint), side))
+            other_courtyards = [g for g, owner in combined_courtyards if owner != ref]
+
+            def margin_of(geom: Any, own_poly: Any = own_poly_now, others: list = other_courtyards):
+                if own_poly is None or not others:
+                    return None
+                return min(g.distance(geom) for g in others) - own_poly.distance(geom)
+
             chosen_point: tuple[float, float] | None = None
             chosen_rotation = old_rotation
             chosen_geom = None
+            chosen_margin: float | None = None
             last_reason = ""
             for point in ordered:
-                geom = _oriented_text_geometry(
-                    ref_text.text, ref_text.font_size, ref_text.font_thickness, point, old_rotation
-                )
-                ok, why = clears(geom)
-                if ok:
-                    chosen_point, chosen_geom = point, geom
-                    break
-                last_reason = why
-
+                trials = [(old_rotation, 0)]
                 if allow_rotate:
-                    geom_r = _oriented_text_geometry(
+                    trials.append((old_rotation + 90.0, 1))
+                for rotation, _ in trials:
+                    geom = _oriented_text_geometry(
                         ref_text.text,
                         ref_text.font_size,
                         ref_text.font_thickness,
                         point,
-                        old_rotation + 90.0,
+                        rotation,
                     )
-                    ok_r, why_r = clears(geom_r)
-                    if ok_r:
-                        chosen_point, chosen_geom = point, geom_r
-                        chosen_rotation = old_rotation + 90.0
+                    ok, why = clears(geom)
+                    if not ok:
+                        last_reason = why
+                        continue
+                    margin = margin_of(geom)
+                    if chosen_geom is None or (
+                        margin is not None
+                        and (chosen_margin is None or margin > chosen_margin + _EPSILON_MM)
+                    ):
+                        chosen_point, chosen_geom = point, geom
+                        chosen_rotation, chosen_margin = rotation, margin
+                    if margin is None or margin >= ASSOCIATION_MARGIN_MM:
                         break
-                    last_reason = why_r
+                else:
+                    continue
+                break
 
             if chosen_point is None:
                 # No candidate cleared every constraint -- leave untouched
@@ -982,6 +1045,13 @@ class SilkRefPlacer:
                 continue
 
             dynamic[side].append((chosen_geom, ref))
+            low_assoc = chosen_margin is not None and chosen_margin < ASSOCIATION_MARGIN_MM
+            assoc_reason = (
+                f"low association: {chosen_margin:.2f} mm nearer own courtyard "
+                f"than the nearest other (< {ASSOCIATION_MARGIN_MM} mm)"
+                if low_assoc
+                else ""
+            )
 
             moved = (
                 abs(chosen_point[0] - original_center[0]) > _EPSILON_MM
@@ -999,7 +1069,10 @@ class SilkRefPlacer:
                         old_rotation=old_rotation,
                         new_rotation=chosen_rotation,
                         status="moved",
+                        reason=assoc_reason,
                         new_local_position=local,
+                        association_margin_mm=chosen_margin,
+                        low_association=low_assoc,
                     )
                 )
             else:
@@ -1012,6 +1085,9 @@ class SilkRefPlacer:
                         old_rotation=old_rotation,
                         new_rotation=old_rotation,
                         status="unchanged",
+                        reason=assoc_reason,
+                        association_margin_mm=chosen_margin,
+                        low_association=low_assoc,
                     )
                 )
 
