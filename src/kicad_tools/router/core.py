@@ -17531,9 +17531,13 @@ class Autorouter:
         t0 = time.time()
         routes = self._route_net_negotiated(net, present_factor, per_net_timeout=used)
         # Issue #8644: a deadline stop with zero A* expansions ended in setup.
+        # The flags live on the Python ``Router``; ``CppPathfinder`` owns none
+        # and runs mask setup in its ``_py_router`` fallback, so read from there.
         search = getattr(self, "router", None)
+        search = getattr(search, "_py_router", None) or search
         setup_stopped = bool(
-            getattr(search, "last_route_deadline_hit", False)
+            not routes
+            and getattr(search, "last_route_deadline_hit", False)
             and getattr(search, "last_route_deadline_iterations", 1) == 0
         )
         guard.note_search(

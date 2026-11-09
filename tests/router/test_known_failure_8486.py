@@ -356,3 +356,25 @@ def test_reroute_wrapper_reports_a_setup_stop_to_the_guard():
             g.begin_iteration(it, {VICTIM: SEAL})
             router._route_net_known_failure_aware(VICTIM, 1.0, 30.0, g, it)
     assert g.setup_floor_s[VICTIM] > KNOWN_FAILURE_BACKOFF_FLOOR_S
+
+
+def test_reroute_wrapper_reads_setup_stop_from_cpp_backend_py_router():
+    """CppPathfinder-shaped stub: the flags exist only on ``_py_router``."""
+    router, _neg, _net_routes, _pads = _fixture()
+    g = RipupCycleGuard()
+    py_router = SimpleNamespace(last_route_deadline_hit=True, last_route_deadline_iterations=0)
+    router.router = SimpleNamespace(_py_router=py_router)
+    clock = [0.0]
+
+    def fake_route(net, pf, per_net_timeout=None):
+        clock[0] += per_net_timeout or 0.0
+        return []
+
+    with (
+        patch.object(router, "_route_net_negotiated", side_effect=fake_route),
+        patch("kicad_tools.router.core.time", SimpleNamespace(time=lambda: clock[0])),
+    ):
+        for it in (1, 2, 3, 4):
+            g.begin_iteration(it, {VICTIM: SEAL})
+            router._route_net_known_failure_aware(VICTIM, 1.0, 30.0, g, it)
+    assert g.setup_floor_s[VICTIM] > KNOWN_FAILURE_BACKOFF_FLOOR_S
