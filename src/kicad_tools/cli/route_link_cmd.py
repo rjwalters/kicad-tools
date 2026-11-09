@@ -327,6 +327,31 @@ def _rules_from_args(args: argparse.Namespace, pcb: Any) -> Any:
     return replace(base, clearance_by_net=_parse_net_clearances(args.net_clearance, names))
 
 
+def _authored_floors(args: argparse.Namespace) -> dict[str, float]:
+    """``{net name: authored netclass clearance}`` from the board's ``.kicad_pro`` (#8650).
+
+    Cached on ``args``.  A missing project yields ``{}``; an unreadable or
+    unsupported one raises :class:`LinkSpecError` (never silently ignored).
+    """
+    cached = getattr(args, "_authored_clearances", None)
+    if cached is not None:
+        return cached
+    pcb_path = getattr(args, "pcb", None)
+    if not pcb_path:
+        return {}
+    from kicad_tools.core.project_clearance import ProjectClearanceError
+    from kicad_tools.router.io import _authored_net_clearances
+
+    pcb = getattr(args, "_pcb_for_floors", None)
+    names = {n.name: num for num, n in pcb.nets.items() if getattr(n, "name", None)} if pcb else {}
+    try:
+        found = _authored_net_clearances(pcb_path, None, names)
+    except ProjectClearanceError as exc:
+        raise LinkSpecError(f"project netclass clearances unusable: {exc}") from exc
+    args._authored_clearances = found
+    return found
+
+
 def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpec) -> Any:
     """``base`` plus this link's voltage-map-derived and ``--net-clearance`` floors.
 
@@ -336,7 +361,9 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
     """
     required = getattr(args, "_pairwise_required", None)
     voltages = getattr(args, "_pairwise_voltages", None)
-    if voltages is None and not spec.net_clearance:
+    args._pcb_for_floors = pcb
+    authored = _authored_floors(args)
+    if voltages is None and not spec.net_clearance and not authored:
         return base
     names = {net.name: num for num, net in pcb.nets.items() if getattr(net, "name", None)}
     floors: dict[int, float] = dict(base.clearance_by_net or {})
@@ -378,6 +405,17 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
                     ) from exc
             if mm:
                 raise_floor(num, float(mm))
+    # Issue #8650: KiCad uses max(own class, neighbour class) per pair.
+    authored_nums: set[int] = set()
+    if authored:
+        own = authored.get(spec.net, 0.0)
+        for name, num in names.items():
+            if name == spec.net:
+                continue
+            mm = max(own, authored.get(name, 0.0))
+            if mm > 0.0:
+                raise_floor(num, mm)
+                authored_nums.add(num)
     for num, mm in _parse_net_clearances(spec.net_clearance, names).items():
         raise_floor(num, mm)
     relax: frozenset[int] = frozenset()
@@ -387,8 +425,10 @@ def _rules_for_link(args: argparse.Namespace, pcb: Any, base: Any, spec: LinkSpe
         # census waives them; an explicit --net-clearance floor never relaxes.
         from kicad_tools.router.pairwise_clearance import build_attach_zones
 
-        explicit = set(base.clearance_by_net or {}) | set(
-            _parse_net_clearances(spec.net_clearance, names)
+        explicit = (
+            set(base.clearance_by_net or {})
+            | set(_parse_net_clearances(spec.net_clearance, names))
+            | authored_nums
         )
         relax = frozenset(n for n in floors if n not in explicit)
         attach_zones = build_attach_zones(pcb.footprints)
@@ -714,15 +754,56 @@ def _commit_links(
 
     Returns ``(written path | None, refusal message | None)``.
     """
+    created = out_path != pcb_path and not out_path.exists()
+    if out_path != pcb_path:
+        out_path.write_bytes(pcb_path.read_bytes())
+    staged = _stage_project_files(pcb_path, out_path)
+    try:
+        return _commit_links_gated(
+            args, links, pcb, model, rules, origin, net_ids, pcb_path, out_path, entries, created
+        )
+    finally:
+        for f in staged:
+            f.unlink(missing_ok=True)
+
+
+def _stage_project_files(pcb_path: Path, out_path: Path) -> list[Path]:
+    """Copy ``.kicad_pro``/``.kicad_dru`` beside ``out_path`` for the gate DRC (#8650).
+
+    kicad-cli reads project rules from the checked file's siblings; without
+    them an ``-o`` elsewhere is checked against default rules.  Returns the
+    files created (to be removed afterwards); existing files are left alone.
+    """
+    staged: list[Path] = []
+    if out_path.with_suffix("") == pcb_path.with_suffix(""):
+        return staged
+    for suffix in (".kicad_pro", ".kicad_dru"):
+        src, dst = pcb_path.with_suffix(suffix), out_path.with_suffix(suffix)
+        if src.is_file() and not dst.exists():
+            dst.write_bytes(src.read_bytes())
+            staged.append(dst)
+    return staged
+
+
+def _commit_links_gated(
+    args: argparse.Namespace,
+    links: list[LinkSpec],
+    pcb: Any,
+    model: Any,
+    rules: Any,
+    origin: tuple[float, float],
+    net_ids: dict[str, int],
+    pcb_path: Path,
+    out_path: Path,
+    entries: list[dict[str, Any]],
+    created: bool,
+) -> tuple[str | None, str | None]:
     from kicad_tools.router.link_router import (
         append_link_routes,
         collapse_link_route,
         route_clears_floors,
     )
 
-    created = out_path != pcb_path and not out_path.exists()
-    if out_path != pcb_path:
-        out_path.write_bytes(pcb_path.read_bytes())
     try:
         base_drc, base_census = _gate_state(out_path, args)
     except Exception as exc:  # the gate cannot run: refuse, leave nothing behind
