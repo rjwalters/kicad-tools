@@ -153,26 +153,6 @@ def _make_kicad_cli_arbiter(rules_from: Path):
     return arbiter
 
 
-def _infer_board_stack(pcb_path: Path) -> tuple[int | None, float | None]:
-    """Copper layer count and outer copper weight (oz) from the board (Issue #8632).
-
-    Either element is ``None`` when the board does not declare it.  Outer
-    copper weight comes from the stackup ``F.Cu`` thickness (35 um per oz).
-    """
-    import re
-
-    try:
-        text = pcb_path.read_text()
-    except OSError:
-        return None, None
-    layers = len(set(re.findall(r'\(\d+\s+"([^"]+\.Cu)"\s+\w+', text))) or None
-    oz = None
-    m = re.search(r'\(layer\s+"F\.Cu"[^()]*(?:\([^()]*\)[^()]*)*?\(thickness\s+([\d.]+)\)', text)
-    if m:
-        oz = round(float(m.group(1)) / 0.035 * 2) / 2 or None
-    return layers, oz
-
-
 def _make_opens_verifier(rules_from: Path):
     """Board-text -> ``{net: unconnected items}`` via kicad-cli (Issue #8632).
 
@@ -598,26 +578,35 @@ def _make_grid_synced_optimize_fn(router, optimizer):
 _MM_PER_OZ = 0.035
 
 
-def resolve_board_stackup(
+def resolve_board_stackup_with_source(
     pcb_path: Path | str, project: Path | str | None = None
-) -> tuple[int, float]:
-    """Return ``(copper_layers, outer_copper_oz)`` for ``pcb_path`` (Issue #8633).
+) -> tuple[int, float, dict[str, str]]:
+    """Return ``(copper_layers, outer_copper_oz, sources)`` for ``pcb_path``.
 
     Layers come from the board's copper layer table.  Weight comes from the
     project's ``meta.copper_oz`` (written by ``kct init``), then the stackup's
     outer copper thickness, then 1.0.  Anything unreadable falls back to the
     historical ``2`` layers / ``1.0`` oz rather than failing the caller.
+
+    ``sources`` maps ``layers`` / ``copper_oz`` to ``"board"`` when the board
+    (or its project) supplied the value and ``"default (undetermined)"`` when
+    the fallback was used (Issue #8639).
     """
+    undetermined = "default (undetermined)"
     layers, copper_oz = 2, 1.0
+    sources = {"layers": undetermined, "copper_oz": undetermined}
     pcb_path = Path(pcb_path)
     try:
         from kicad_tools.schema.pcb import PCB
 
         pcb = PCB.load(str(pcb_path))
-        layers = len(pcb.copper_layers) or 2
+        if len(pcb.copper_layers):
+            layers = len(pcb.copper_layers)
+            sources["layers"] = "board"
         for layer in pcb.setup.stackup if pcb.setup is not None else []:
             if layer.type == "copper" and layer.thickness > 0:
                 copper_oz = round(layer.thickness / _MM_PER_OZ, 2)
+                sources["copper_oz"] = "board"
                 break
     except Exception:
         pass
@@ -630,8 +619,17 @@ def resolve_board_stackup(
             meta = get_manufacturer_metadata(load_project(pro))
             if meta.get("copper_oz"):
                 copper_oz = float(meta["copper_oz"])
+                sources["copper_oz"] = "board"
     except Exception:
         pass
+    return layers, copper_oz, sources
+
+
+def resolve_board_stackup(
+    pcb_path: Path | str, project: Path | str | None = None
+) -> tuple[int, float]:
+    """Return ``(copper_layers, outer_copper_oz)`` for ``pcb_path`` (Issue #8633)."""
+    layers, copper_oz, _ = resolve_board_stackup_with_source(pcb_path, project)
     return layers, copper_oz
 
 
@@ -886,11 +884,15 @@ Examples:
         "copper_oz": "flag" if args.copper is not None else "board",
     }
     if args.layers is None or args.copper is None:
-        board_layers, board_copper = resolve_board_stackup(pcb_path, args.project)
+        board_layers, board_copper, board_sources = resolve_board_stackup_with_source(
+            pcb_path, args.project
+        )
         if args.layers is None:
             args.layers = board_layers
+            args._stack_source["layers"] = board_sources["layers"]
         if args.copper is None:
             args.copper = board_copper
+            args._stack_source["copper_oz"] = board_sources["copper_oz"]
 
     # Validate manufacturer ID if provided
     if args.mfr:
