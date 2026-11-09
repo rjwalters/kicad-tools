@@ -50,6 +50,9 @@ def run_readiness_command(args) -> int:
     if ack:
         sub_argv.extend(["--ack-warnings", ack])
 
+    for item in getattr(args, "readiness_ack_trace_quality", None) or []:
+        sub_argv.extend(["--ack-trace-quality", item])
+
     for spec in getattr(args, "readiness_known_issue", None) or []:
         sub_argv.extend(["--known-issue", spec])
 

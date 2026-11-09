@@ -127,6 +127,18 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
     }
 )
 
+#: Rule-id prefixes/names for avoidable copper (tapeout trace-quality gate,
+#: Issue #8633).  These stay advisory in ``known_warnings.NON_GATING_RULE_PREFIXES``
+#: (the generic strict gate is unchanged); the readiness gate refuses a
+#: nonzero count after cleanup unless acknowledged with a reason.
+TRACE_QUALITY_PREFIXES: tuple[str, ...] = ("redundant_copper", "via_dangling")
+
+
+def is_trace_quality_rule(rule: str) -> bool:
+    """True for ``redundant_copper_*`` and ``via_dangling``."""
+    return any(rule == p or rule.startswith(p + "_") for p in TRACE_QUALITY_PREFIXES)
+
+
 #: Values that look like a part number but carry no procurement identity.
 #: An assembly BOM containing any of these is not orderable.
 PLACEHOLDER_PART_IDS = frozenset(
@@ -852,6 +864,8 @@ class ReadinessOptions:
     # in by the run and rendered into README.txt / the report.
     skip_cleanup: bool = False
     cleanup_record: dict[str, Any] | None = None
+    # Trace-quality acknowledgements (Issue #8633): ``rule_id -> reason``.
+    ack_trace_quality: dict[str, str] = field(default_factory=dict)
 
     @property
     def root(self) -> Path:
@@ -1002,6 +1016,13 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
     ack = frozenset(rule.strip() for rule in (args.ack_warnings or "").split(",") if rule.strip())
 
+    ack_trace: dict[str, str] = {}
+    for item in getattr(args, "ack_trace_quality", None) or []:
+        rule, _, reason = item.partition("=")
+        if not rule.strip() or not reason.strip():
+            return None, f"--ack-trace-quality needs RULE=REASON with a non-empty reason: {item!r}"
+        ack_trace[rule.strip()] = reason.strip()
+
     checked_at = getattr(args, "checked_at", None)
     try:
         known_issues = _resolve_known_issues(board_dir, args, checked_at)
@@ -1037,6 +1058,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             project_root=project_root,
             checked_at=checked_at,
             skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
+            ack_trace_quality=ack_trace,
         ),
         None,
     )
@@ -1838,6 +1860,25 @@ def _gate_warning_review(
             ),
             counts,
         )
+    trace_open = sorted(
+        rule
+        for rule, count in counts.items()
+        if count and is_trace_quality_rule(rule) and not options.ack_trace_quality.get(rule)
+    )
+    if trace_open:
+        named = ", ".join(f"{rule}={counts[rule]}" for rule in trace_open)
+        return (
+            CheckOutcome(
+                name="warning_review",
+                status=FAILED,
+                detail=f"Trace-quality warnings remain after cleanup: {named}. Table: {table}.",
+                blockers=[
+                    f"Trace-quality warnings remain after cleanup ({named}); fix the copper "
+                    "or acknowledge each rule with --ack-trace-quality RULE=REASON."
+                ],
+            ),
+            counts,
+        )
     acked = sorted(options.ack_warnings & set(counts))
     suffix = f" Acknowledged: {', '.join(acked)}." if acked else ""
     return (
@@ -2068,6 +2109,8 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
             "board": {"name": options.pcb.stem, "pcb_file": options.pcb.name},
             "warning_counts_by_rule": dict(sorted(warning_counts.items())),
             "acknowledged_warning_rules": sorted(options.ack_warnings),
+            "acknowledged_trace_quality": dict(sorted(options.ack_trace_quality.items())),
+            "copper_cleanup": options.cleanup_record,
         }
     )
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -2301,11 +2344,76 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     return problems
 
 
-def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
-    """Run (generate) or count (verify) the exact-duplicate copper cleanup.
+def _cleanup_prune_step(options: ReadinessOptions) -> dict[str, Any]:
+    """``kct pcb prune`` step: DRC-verified, applied only when verified."""
+    from kicad_tools.pcb_prune import prune_board
 
-    Must run before any hashing/refill so the DRC cross-gate judges the
-    cleaned board (Issue #8218).  A skip is recorded, never silent.
+    pruned, result = prune_board(options.pcb, project=options.project)
+    if result.accepted and not result.drc_verified:
+        return {"status": "not-applied", "detail": result.drc_note, "segments_removed": 0}
+    if result.accepted:
+        pruned.save(str(options.pcb))
+    return {
+        "status": "applied",
+        "segments_removed": result.stats.get("segments_removed", 0),
+        "ends_snapped": result.stats.get("ends_snapped", 0),
+    }
+
+
+def _cleanup_optimize_step(options: ReadinessOptions) -> dict[str, Any]:
+    """``kct optimize-traces --drc-aware`` step (layers/copper read from the board)."""
+    import contextlib
+    import io
+
+    from kicad_tools.cli import optimize_cmd
+
+    argv = [
+        str(options.pcb),
+        "--drc-aware",
+        "--mfr",
+        options.manufacturer,
+        "--format",
+        "json",
+    ]
+    if options.project is not None:
+        argv += ["--project", str(options.project)]
+    if options.hv_voltage_map is not None:
+        argv += ["--voltage-map", str(options.hv_voltage_map)]
+        if options.hv_standard:
+            argv += ["--creepage-standard", options.hv_standard]
+        if options.hv_pollution_degree is not None:
+            argv += ["--pollution-degree", str(options.hv_pollution_degree)]
+        argv += ["--material-group", options.hv_material_group]
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = optimize_cmd.main(argv)
+    try:
+        doc = json.loads(out.getvalue())
+    except ValueError:
+        doc = {}
+    if rc != 0:
+        detail = doc.get("error") or err.getvalue().strip() or f"exit {rc}"
+        return {"status": "failed", "detail": str(detail)}
+    stats = doc.get("stats", {}) if isinstance(doc, dict) else {}
+    return {
+        "status": "applied",
+        "segments_before": stats.get("segments_before", 0),
+        "segments_after": stats.get("segments_after", 0),
+        "corners_before": stats.get("corners_before", 0),
+        "corners_after": stats.get("corners_after", 0),
+        "layers": doc.get("layers") if isinstance(doc, dict) else None,
+        "copper_oz": doc.get("copper_oz") if isinstance(doc, dict) else None,
+    }
+
+
+def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
+    """Run (generate) or count (verify) the copper cleanup.
+
+    ``dedupe -> prune -> optimize-traces --drc-aware`` (Issue #8633, extending
+    the #8218 dedupe step).  Must run before any hashing/refill so the DRC
+    cross-gate judges the cleaned board.  A skip is recorded, never silent, and
+    each step's counts land in ``steps``.  ``--drc-aware`` is verified only by
+    the kicad-cli refill DRC and creepage census the later gates run (#8632).
     """
     if options.skip_cleanup:
         return {"copper_cleanup": "skipped"}
@@ -2321,11 +2429,17 @@ def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
         }
     stats = pcb.dedupe_copper()
     removed = {"segments": stats["segments"], "vias": stats["vias"]}
-    if options.operation == "generate":
-        if stats["segments"] or stats["vias"]:
-            pcb.save(str(options.pcb))
-        return {"copper_cleanup": "applied", "removed": removed}
-    return {"copper_cleanup": "verify-count-only", "removed": removed}
+    if options.operation != "generate":
+        return {"copper_cleanup": "verify-count-only", "removed": removed}
+    if stats["segments"] or stats["vias"]:
+        pcb.save(str(options.pcb))
+    steps: dict[str, Any] = {"dedupe": {"status": "applied", **removed}}
+    for name, step in (("prune", _cleanup_prune_step), ("optimize_traces", _cleanup_optimize_step)):
+        try:
+            steps[name] = step(options)
+        except Exception as exc:  # recorded; the trace-quality gate still judges the board
+            steps[name] = {"status": "failed", "detail": str(exc)}
+    return {"copper_cleanup": "applied", "removed": removed, "steps": steps}
 
 
 def _write_readme(
@@ -2387,6 +2501,12 @@ def _write_readme(
             f"  ACCEPTED RISK: {rule} ({warning_counts[rule]} warning(s)) "
             "explicitly acknowledged via --ack-warnings."
         )
+    for rule, reason in sorted(options.ack_trace_quality.items()):
+        if warning_counts.get(rule):
+            lines.append(
+                f"  ACCEPTED RISK: {rule} ({warning_counts[rule]} warning(s)) trace quality "
+                f"acknowledged: {reason}"
+            )
     record = options.cleanup_record
     if record is not None:
         lines.extend(["", "Copper cleanup", "--------------"])
@@ -2398,6 +2518,11 @@ def _write_readme(
                 f"  copper_cleanup: {record['copper_cleanup']}; exact-duplicate copper "
                 f"removed: {removed['segments']} segment(s), {removed['vias']} via(s)"
             )
+            for name, step in record.get("steps", {}).items():
+                detail = ", ".join(f"{k}={v}" for k, v in step.items() if k != "status")
+                lines.append(
+                    f"  step {name}: {step.get('status')}" + (f" ({detail})" if detail else "")
+                )
     lines.extend(["", "Accepted-risk waivers", "---------------------"])
     if acked:
         lines.append(f"  see the {len(acked)} line(s) above")
@@ -3618,6 +3743,18 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Comma-separated rule_ids whose assembly-affecting warnings are "
             "explicitly accepted; each becomes an accepted-risk line in README.txt"
+        ),
+    )
+    parser.add_argument(
+        "--ack-trace-quality",
+        dest="ack_trace_quality",
+        action="append",
+        default=[],
+        metavar="RULE=REASON",
+        help=(
+            "Accept a nonzero redundant_copper_* / via_dangling count remaining after "
+            "cleanup; the reason is mandatory and is recorded in README.txt and the "
+            "manifest.  Repeatable"
         ),
     )
     parser.add_argument(

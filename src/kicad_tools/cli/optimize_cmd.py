@@ -594,6 +594,47 @@ def _make_grid_synced_optimize_fn(router, optimizer):
     return optimize, commit
 
 
+#: One ounce of copper is 0.035 mm (35 um) thick.
+_MM_PER_OZ = 0.035
+
+
+def resolve_board_stackup(
+    pcb_path: Path | str, project: Path | str | None = None
+) -> tuple[int, float]:
+    """Return ``(copper_layers, outer_copper_oz)`` for ``pcb_path`` (Issue #8633).
+
+    Layers come from the board's copper layer table.  Weight comes from the
+    project's ``meta.copper_oz`` (written by ``kct init``), then the stackup's
+    outer copper thickness, then 1.0.  Anything unreadable falls back to the
+    historical ``2`` layers / ``1.0`` oz rather than failing the caller.
+    """
+    layers, copper_oz = 2, 1.0
+    pcb_path = Path(pcb_path)
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+        layers = len(pcb.copper_layers) or 2
+        for layer in pcb.setup.stackup if pcb.setup is not None else []:
+            if layer.type == "copper" and layer.thickness > 0:
+                copper_oz = round(layer.thickness / _MM_PER_OZ, 2)
+                break
+    except Exception:
+        pass
+    try:
+        from kicad_tools.core.project_file import get_manufacturer_metadata, load_project
+
+        base = Path(project) if project else pcb_path
+        pro = base.with_suffix(".kicad_pro")
+        if pro.exists():
+            meta = get_manufacturer_metadata(load_project(pro))
+            if meta.get("copper_oz"):
+                copper_oz = float(meta["copper_oz"])
+    except Exception:
+        pass
+    return layers, copper_oz
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main entry point for trace optimization CLI.
 
@@ -757,13 +798,15 @@ Examples:
         "--layers",
         type=int,
         default=None,
-        help="Number of copper layers for DRC checks (default: read from the board, else 2)",
+        help="Number of copper layers for DRC checks (default: counted from the "
+        "board; 2 if it cannot be read)",
     )
     parser.add_argument(
         "--copper",
         type=float,
         default=None,
-        help="Copper weight in oz for DRC checks (default: read from the board stackup, else 1.0)",
+        help="Copper weight in oz for DRC checks (default: the project's "
+        "meta.copper_oz, else the board stackup's outer copper, else 1.0)",
     )
 
     # HV creepage inputs (Issue #8300): same flags/defaults as ``kct route``.
@@ -835,6 +878,20 @@ Examples:
     if not pcb_path.exists():
         return _fail(as_json, str(pcb_path), f"PCB file not found: {pcb_path}")
 
+    # Issue #8633: unset --layers/--copper come from the board, not a 2-layer
+    # 1 oz default.  Explicit flags still win.
+    # Issue #8632: record where each value came from for the report.
+    args._stack_source = {
+        "layers": "flag" if args.layers is not None else "board",
+        "copper_oz": "flag" if args.copper is not None else "board",
+    }
+    if args.layers is None or args.copper is None:
+        board_layers, board_copper = resolve_board_stackup(pcb_path, args.project)
+        if args.layers is None:
+            args.layers = board_layers
+        if args.copper is None:
+            args.copper = board_copper
+
     # Validate manufacturer ID if provided
     if args.mfr:
         from kicad_tools.manufacturers import get_manufacturer_ids
@@ -885,21 +942,6 @@ Examples:
     # JSON mode owns stdout: the banner, the spinner and the results table are
     # all suppressed so exactly one document is printed.
     quiet = args.quiet or as_json
-
-    # Issue #8632: take layer count / copper weight from the board rather than
-    # silently assuming 2 layers / 1 oz; record where each value came from.
-    inferred_layers, inferred_oz = _infer_board_stack(pcb_path)
-    args._stack_source = {}
-    if args.layers is None:
-        args.layers = inferred_layers if inferred_layers else 2
-        args._stack_source["layers"] = "board" if inferred_layers else "default (undetermined)"
-    else:
-        args._stack_source["layers"] = "flag"
-    if args.copper is None:
-        args.copper = inferred_oz if inferred_oz else 1.0
-        args._stack_source["copper_oz"] = "board" if inferred_oz else "default (undetermined)"
-    else:
-        args._stack_source["copper_oz"] = "flag"
 
     # Configure optimizer
     config = OptimizationConfig(
