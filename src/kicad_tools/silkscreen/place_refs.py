@@ -97,8 +97,8 @@ def _iter_npth_apertures(pcb: PCB, mask_clearance_mm: float):
     not ``silk_over_copper``), but kicad-cli still flags silk over the hole,
     so the placer treats them as obstacles on both sides (Issue #8628).
     """
-    from shapely.affinity import rotate
-    from shapely.geometry import box
+    from shapely.affinity import rotate  # type: ignore[import-untyped]
+    from shapely.geometry import box  # type: ignore[import-untyped]
 
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
@@ -857,7 +857,7 @@ class SilkRefPlacer:
             raise ValueError("search exceeds 4096 rings; increase step_mm or reduce max_offset_mm")
 
         require_shapely("silk reference placement")
-        from shapely.geometry import MultiLineString, Polygon  # type: ignore[import-untyped]
+        from shapely.geometry import MultiLineString, Polygon
 
         pcb = self.pcb
         # Reference strings identify both move targets and own-component
