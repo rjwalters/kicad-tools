@@ -487,7 +487,7 @@ def resolve_board_stackup(
 
         pcb = PCB.load(str(pcb_path))
         layers = len(pcb.copper_layers) or 2
-        for layer in pcb.setup.stackup:
+        for layer in pcb.setup.stackup if pcb.setup is not None else []:
             if layer.type == "copper" and layer.thickness > 0:
                 copper_oz = round(layer.thickness / _MM_PER_OZ, 2)
                 break

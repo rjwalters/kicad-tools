@@ -7289,6 +7289,18 @@ def _add_readiness_parser(subparsers) -> None:
         ),
     )
     rd_parser.add_argument(
+        "--ack-trace-quality",
+        dest="readiness_ack_trace_quality",
+        action="append",
+        default=[],
+        metavar="RULE=REASON",
+        help=(
+            "Accept a nonzero redundant_copper_* / via_dangling count remaining after "
+            "cleanup; the reason is mandatory and is recorded in README.txt and the "
+            "manifest.  Repeatable"
+        ),
+    )
+    rd_parser.add_argument(
         "--known-issue",
         dest="readiness_known_issue",
         action="append",
