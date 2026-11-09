@@ -34,6 +34,7 @@ import base64
 import logging
 import math
 import threading
+import time
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
@@ -1075,6 +1076,16 @@ class _GridView:
 
     def __getitem__(self, layer: int) -> _LayerView:
         return _LayerView(self._grid, layer)
+
+
+class SetupDeadlineExpired(Exception):
+    """A per-call wall budget ran out while building pre-search masks.
+
+    Issue #8414 / #8645: raised (never returned) so a cut-short mask build is
+    never mistaken for a complete one. ``Router._route_impl`` catches it and
+    reports a deadline stop. It is re-exported from ``pathfinder`` as
+    ``_SetupDeadlineExpired``.
+    """
 
 
 class RoutingGrid:
@@ -7803,6 +7814,7 @@ class RoutingGrid:
         partner_radius: int | None = None,
         partner_active: bool | None = None,
         relief_mode: bool = False,
+        deadline: float | None = None,
     ) -> np.ndarray:
         """Pre-compute an expanded blocked bitmap for trace-width clearance.
 
@@ -7850,6 +7862,12 @@ class RoutingGrid:
                          penalty; net-0 statics and foreign obstacles stay
                          hard.  Mirrors ``Pathfinder::relief_mode_`` in the
                          C++ backend.
+
+            deadline: Issue #8645 -- optional ``time.monotonic()`` deadline,
+                      checked before each dilation. On expiry raises
+                      :class:`SetupDeadlineExpired` instead of returning a
+                      partial mask. A single dilation is not preempted.
+                      ``None`` (default) never checks.
 
         Returns:
             Boolean NumPy array of shape ``(num_layers, rows, cols)`` where
@@ -7908,10 +7926,16 @@ class RoutingGrid:
             partner_mask = base_blocked & (self._net == partner_net)
             other_mask = base_blocked & ~partner_mask
 
+            if deadline is not None and time.monotonic() >= deadline:
+                raise SetupDeadlineExpired
             other_expanded = self._dilate_blocked(other_mask, radius)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise SetupDeadlineExpired
             partner_expanded = self._dilate_blocked(partner_mask, partner_radius)
             return other_expanded | partner_expanded
 
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SetupDeadlineExpired
         return self._dilate_blocked(base_blocked, radius)
 
     def _dilate_blocked(self, base_blocked: np.ndarray, radius: int) -> np.ndarray:
