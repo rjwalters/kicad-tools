@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-09
 
+- **PR #8636**: feat: run dedupe, prune and optimize-traces in tapeout cleanup with trace-quality gate
+- **Issue #8633** (closed): tapeout/readiness: make trace optimization a standard step (dedupe → prune → optimize-traces) and gate redundant_copper_* instead of reporting it as advisory
+- **PR #8631**: fix: place-silk-refs avoids NPTH holes and prefers own-courtyard association
+- **Issue #8628** (closed): place-silk-refs: kicad-cli still finds silk issues at default clearance, and labels end up nearer another part than their own
 - **PR #8635**: fix: roll back optimize-traces nets that open connectivity or regress creepage
 - **Issue #8632** (closed): optimize-traces --drc-aware: reports 0 DRC errors but disconnects a mains net and introduces a creepage violation (caught by kicad-cli and kct creepage)
 - **PR #8625**: chore(deps): bump astro from 7.4.1 to 7.4.2 in /site
