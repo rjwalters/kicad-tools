@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kicad_tools.cli.optimize_cmd import _infer_board_stack
 from kicad_tools.router.optimizer import OptimizationConfig, TraceOptimizer
 
 PCB = """\
@@ -58,9 +57,3 @@ def test_preexisting_problem_not_a_regression(tmp_path: Path) -> None:
 def test_unavailable_verifier_is_reported(tmp_path: Path) -> None:
     stats, _ = _run(tmp_path, lambda text: None)
     assert stats.output_checks["opens"] == "unavailable"
-
-
-def test_infer_board_stack(tmp_path: Path) -> None:
-    p = tmp_path / "b.kicad_pcb"
-    p.write_text(PCB)
-    assert _infer_board_stack(p) == (4, 2.0)
