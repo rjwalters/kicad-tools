@@ -1982,3 +1982,31 @@ def test_optimize_stackup_defaults_from_board_and_project(tmp_path):
     assert resolve_board_stackup(pcb) == (2, 1.0)  # unreadable: historical defaults
     (tmp_path / "b.kicad_pro").write_text('{"meta": {"copper_oz": 2.0}}')
     assert resolve_board_stackup(pcb) == (2, 2.0)
+
+
+def test_optimize_stackup_reports_provenance(tmp_path):
+    from kicad_tools.cli.optimize_cmd import resolve_board_stackup_with_source
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("not a pcb")
+    layers, oz, src = resolve_board_stackup_with_source(pcb)
+    assert (layers, oz) == (2, 1.0)
+    assert src == {"layers": "default (undetermined)", "copper_oz": "default (undetermined)"}
+    # Project metadata supplies weight only; layers stay undetermined.
+    (tmp_path / "b.kicad_pro").write_text('{"meta": {"copper_oz": 2.0}}')
+    _, oz, src = resolve_board_stackup_with_source(pcb)
+    assert oz == 2.0
+    assert src == {"layers": "default (undetermined)", "copper_oz": "board"}
+
+
+def test_optimize_stackup_readable_board_reports_board(tmp_path):
+    from kicad_tools.cli.optimize_cmd import resolve_board_stackup_with_source
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(
+        '(kicad_pcb (version 20240108) (generator "t") '
+        '(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)))'
+    )
+    layers, _, src = resolve_board_stackup_with_source(pcb)
+    assert layers == 2
+    assert src["layers"] == "board"
