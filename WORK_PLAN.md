@@ -38,19 +38,16 @@ Issues currently being built (`loom:building`).
 
 - **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs
-- **#8639**: optimize-traces: drop dead _infer_board_stack and restore 'undetermined' stack_source
-- **#8643**: Warn when a board is checked without its paired .kicad_pro/.kicad_dru (kicad-cli silently uses default rules)
 - **#8644**: route: HV mask setup may consume the #8486 5 s back-off floor, so backed-off HV nets never reach the A* search
 - **#8645**: route: HV mask setup runs on a 1x deadline before the 3x escape hint, and compute_expanded_blocked ignores the deadline
+- **#8650**: route-link ignores project netclass clearances (only --clearance / --net-clearance / voltage-map floors); per-link DRC gate doesn't catch it
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8642**: fix: report undetermined stack_source when board lacks stackup
-- **#8646**: fix: raise back-off floor above HV mask setup time so backed-off nets reach A*
 - **#8647**: fix: share setup/search deadline budget and bound blocked-mask dilation
-- **#8648**: feat: warn on missing or stock-default DRC project rules
+- **#8651**: fix: route-link honours project netclass clearances
 
 ## Approved (Awaiting Merge)
 
@@ -77,10 +74,10 @@ Issues carrying `loom:curated`.
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
-- **#8639**: optimize-traces: drop dead _infer_board_stack and restore 'undetermined' stack_source *(curated)*
-- **#8643**: Warn when a board is checked without its paired .kicad_pro/.kicad_dru (kicad-cli silently uses default rules) *(curated)*
 - **#8644**: route: HV mask setup may consume the #8486 5 s back-off floor, so backed-off HV nets never reach the A* search *(curated)*
 - **#8645**: route: HV mask setup runs on a 1x deadline before the 3x escape hint, and compute_expanded_blocked ignores the deadline *(curated)*
+- **#8650**: route-link ignores project netclass clearances (only --clearance / --net-clearance / voltage-map floors); per-link DRC gate doesn't catch it *(curated)*
+- **#8652**: test: cover kct check stderr warning and readiness 'warnings' wiring for project_rules (follow-up to #8648) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -100,8 +97,8 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 6 |
-| PRs awaiting review | 4 |
+| In Progress (`loom:building`) | 5 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 2 |
 | Curated | 18 |
 | Architect / Hermit proposals | 0 |
