@@ -30,23 +30,21 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#8633**: tapeout/readiness: make trace optimization a standard step (dedupe → prune → optimize-traces) and gate redundant_copper_* instead of reporting it as advisory
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
 - **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
-- **#8628**: place-silk-refs: kicad-cli still finds silk issues at default clearance, and labels end up nearer another part than their own
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs
-- **#8632**: optimize-traces --drc-aware: reports 0 DRC errors but disconnects a mains net and introduces a creepage violation (caught by kicad-cli and kct creepage)
+- **#8633**: tapeout/readiness: make trace optimization a standard step (dedupe → prune → optimize-traces) and gate redundant_copper_* instead of reporting it as advisory
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8630**: fix: model JLC option groups as chips and explain CDP attach with no open tab
-- **#8631**: fix: place-silk-refs avoids NPTH holes and prefers own-courtyard association
+- **#8636**: feat: run dedupe, prune and optimize-traces in tapeout cleanup with trace-quality gate
 
 ## Approved (Awaiting Merge)
 
@@ -72,9 +70,7 @@ Issues carrying `loom:curated`.
 - **#8602**: Board 07: DRC-verified prune and re-derive authored escapes so validate.py passes (part of #8399) *(curated)*
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
-- **#8628**: place-silk-refs: kicad-cli still finds silk issues at default clearance, and labels end up nearer another part than their own *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
-- **#8632**: optimize-traces --drc-aware: reports 0 DRC errors but disconnects a mains net and introduces a creepage violation (caught by kicad-cli and kct creepage) *(curated)*
 - **#8633**: tapeout/readiness: make trace optimization a standard step (dedupe → prune → optimize-traces) and gate redundant_copper_* instead of reporting it as advisory *(curated)*
 
 ## Proposed (Architect / Hermit)
@@ -94,11 +90,11 @@ _None._
 | Operator merge-risk holds | 2 |
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 4 |
-| PRs awaiting review | 2 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 3 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 2 |
-| Curated | 17 |
+| Curated | 15 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
