@@ -67,6 +67,7 @@ Issues carrying `loom:curated`.
 - **#8602**: Board 07: DRC-verified prune and re-derive authored escapes so validate.py passes (part of #8399) *(curated)*
 - **#8609**: Routing ~10-12x slower on Apple Silicon with the metal (mlx) extra; uv sync --all-extras fails on macOS *(curated)*
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
+- **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -89,7 +90,7 @@ _None._
 | In Progress (`loom:building`) | 2 |
 | PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 13 |
+| Curated | 14 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
