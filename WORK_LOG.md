@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-09
 
+- **PR #8625**: chore(deps): bump astro from 7.4.1 to 7.4.2 in /site
+- **PR #8624**: chore(deps): bump the uv-minor-patch group across 1 directory with 3 updates
 - **PR #8611**: fix(router): force NumPy grid arrays for pure-Python A*; platform-mark cupy
 - **Issue #8609** (closed): Routing ~10-12x slower on Apple Silicon with the metal (mlx) extra; uv sync --all-extras fails on macOS
 

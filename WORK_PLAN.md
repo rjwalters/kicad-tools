@@ -11,7 +11,8 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-_None._
+- **#8623**: chore(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
+- **#8626**: chore(deps): bump astral-sh/setup-uv from 10.3.0 to 10.3.2 in the github-actions group across 1 directory
 
 ## Very Important
 
@@ -36,19 +37,19 @@ _None._
 Issues currently being built (`loom:building`).
 
 - **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
-- **#8609**: Routing ~10-12x slower on Apple Silicon with the metal (mlx) extra; uv sync --all-extras fails on macOS
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8611**: fix(router): force NumPy grid arrays for pure-Python A*; platform-mark cupy
+_None._
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#8623**: chore(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
+- **#8626**: chore(deps): bump astral-sh/setup-uv from 10.3.0 to 10.3.2 in the github-actions group across 1 directory
 
 ## Proposed
 
@@ -65,7 +66,6 @@ Issues carrying `loom:curated`.
 - **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step *(curated)*
 - **#8577**: route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class (fails kicad-cli DRC) *(curated)*
 - **#8602**: Board 07: DRC-verified prune and re-derive authored escapes so validate.py passes (part of #8399) *(curated)*
-- **#8609**: Routing ~10-12x slower on Apple Silicon with the metal (mlx) extra; uv sync --all-extras fails on macOS *(curated)*
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 
@@ -83,14 +83,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 0 |
+| Operator merge-risk holds | 2 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 1 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 14 |
+| In Progress (`loom:building`) | 1 |
+| PRs awaiting review | 0 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 13 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
