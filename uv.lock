@@ -2884,7 +2884,7 @@ all = [
     { name = "botorch", version = "0.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "cairosvg" },
     { name = "cmaes" },
-    { name = "cupy-cuda12x" },
+    { name = "cupy-cuda12x", marker = "sys_platform != 'darwin'" },
     { name = "fastmcp" },
     { name = "jinja2" },
     { name = "jsonschema" },
@@ -2911,7 +2911,7 @@ bayesian = [
     { name = "botorch", version = "0.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 cuda = [
-    { name = "cupy-cuda12x" },
+    { name = "cupy-cuda12x", marker = "sys_platform != 'darwin'" },
 ]
 datasheet = [
     { name = "markitdown" },
@@ -3026,8 +3026,8 @@ requires-dist = [
     { name = "cmaes", marker = "extra == 'dev'", specifier = ">=0.12.0" },
     { name = "cmaes", marker = "extra == 'placement'", specifier = ">=0.12.0" },
     { name = "cmake", marker = "extra == 'native'", specifier = ">=3.15" },
-    { name = "cupy-cuda12x", marker = "extra == 'all'", specifier = ">=13.0" },
-    { name = "cupy-cuda12x", marker = "extra == 'cuda'", specifier = ">=13.0" },
+    { name = "cupy-cuda12x", marker = "sys_platform != 'darwin' and extra == 'all'", specifier = ">=13.0" },
+    { name = "cupy-cuda12x", marker = "sys_platform != 'darwin' and extra == 'cuda'", specifier = ">=13.0" },
     { name = "fastmcp", marker = "extra == 'all'", specifier = ">=4,<5" },
     { name = "fastmcp", marker = "extra == 'dev'", specifier = ">=4,<5" },
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=4,<5" },

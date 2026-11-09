@@ -23,6 +23,20 @@ new git worktrees (`.loom/worktrees/issue-N/`) need this step explicitly.
 The C++ backend gives a 10-100x speedup for the A* loop, so a missing
 extension is the most likely cause of multi-minute-per-net routing.
 
+### Check the acceleration backend before timing routes
+
+When a `RoutingGrid` is built with a `PerformanceConfig` on a GPU backend
+(MLX/CuPy), the pure-Python A* does per-cell scalar indexing that is
+slower than on NumPy (Issue #8609; the slowdown is unmeasured here -- #8609
+reports 10-12x on the default path, which this guard does not touch). `Router` now
+forces NumPy grid arrays as a defensive guard. The default `kct route` path
+builds the grid without a `config`, so it is NumPy regardless of installed
+extras; the original ~1,650 s vs ~140 s report is **not** explained by this
+and its real cause is unconfirmed. When benchmarking, check what is active:
+`uv pip list | grep -i -E 'mlx|cupy'`, and the `Grid using ... backend` log
+line from `RoutingGrid._select_backend`.
+`uv sync --all-extras` now resolves on macOS (`cupy-cuda12x` is skipped there).
+
 ### Rebuilding after editing C++ sources
 
 `kct build-native` now detects staleness automatically: it compares the

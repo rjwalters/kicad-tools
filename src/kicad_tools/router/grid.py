@@ -1472,8 +1472,15 @@ class RoutingGrid:
         # Try to get GPU backend
         try:
             backend = get_backend(config=self._config)
-            # Determine backend type from the module
-            if hasattr(backend, "cuda"):
+            # Determine backend type.  ``get_backend()`` returns an
+            # ``ArrayBackend`` that carries its own ``backend_type``; the
+            # attribute probes below only cover raw module-style backends.
+            # (Issue #8609: probing alone misclassified an MLX ArrayBackend
+            # as CPU, so the grid held MLX arrays while reporting ``cpu``.)
+            reported = getattr(backend, "backend_type", None)
+            if isinstance(reported, BackendType):
+                backend_type = reported
+            elif hasattr(backend, "cuda"):
                 backend_type = BackendType.CUDA
             elif hasattr(backend, "_mx"):  # MLXBackend wrapper
                 backend_type = BackendType.METAL
@@ -1863,20 +1870,8 @@ class RoutingGrid:
         self._via_rtree_count = 0
         self.bump_occupancy_generation()  # Issue #4794 (planes replaced)
 
-    def sync_to_cpu(self) -> None:
-        """Transfer GPU arrays to CPU for A* operations.
-
-        Call this before performing A* pathfinding or other operations
-        that require random cell access. The transfer is skipped if
-        arrays are already on CPU or if GPU hasn't been modified.
-        """
-        if self._backend_type == BackendType.CPU:
-            return
-
-        if not self._gpu_dirty:
-            return
-
-        logger.debug("Syncing grid arrays from GPU to CPU")
+    def _convert_arrays_to_numpy(self) -> None:
+        """Convert every grid array to host NumPy and mark the grid CPU-resident."""
         self._blocked = to_numpy(self._blocked)
         self._net = to_numpy(self._net)
         self._usage_count = to_numpy(self._usage_count)
@@ -1895,6 +1890,43 @@ class RoutingGrid:
         # different array objects (host copies) -- any cache holding a
         # derived bitmap must recompute.
         self.bump_occupancy_generation()
+
+    def sync_to_cpu(self) -> None:
+        """Transfer GPU arrays to CPU for A* operations.
+
+        Call this before performing A* pathfinding or other operations
+        that require random cell access. The transfer is skipped if
+        arrays are already on CPU or if GPU hasn't been modified.
+        """
+        if self._backend_type == BackendType.CPU:
+            return
+
+        if not self._gpu_dirty:
+            return
+
+        logger.debug("Syncing grid arrays from GPU to CPU")
+        self._convert_arrays_to_numpy()
+
+    def ensure_numpy_arrays(self) -> None:
+        """Unconditionally move every grid array to host NumPy (Issue #8609).
+
+        The pure-Python A* does per-cell scalar indexing, which is slower
+        on MLX/CuPy arrays than on NumPy (magnitude unmeasured; Issue #8609).
+        Unlike :meth:`sync_to_cpu` this does not depend on ``_gpu_dirty``.
+        Idempotent; a no-op on a CPU grid.
+        """
+        # Decide from the actual array types, not ``_backend_type``: the type
+        # tag can disagree with the arrays (Issue #8609).
+        if self._backend is np and isinstance(self._blocked, np.ndarray):
+            return
+        logger.info(
+            "Grid arrays moved from %s to NumPy for the pure-Python router",
+            self._backend_type.value,
+        )
+        self._convert_arrays_to_numpy()
+        # Stop sync_to_gpu from migrating the arrays back.
+        self._cpu_dirty = False
+        self._config = None
 
     def sync_to_gpu(self) -> None:
         """Transfer CPU arrays to GPU for bulk operations.
