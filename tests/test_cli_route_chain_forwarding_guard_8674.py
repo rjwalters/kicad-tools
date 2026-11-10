@@ -177,8 +177,7 @@ REFUSES_CHAIN_WHEN_GOVERNED = {
 # the rules it places copper under; the pass runs with the option's default
 # whatever the outer run was given.  Issue #8694 reviewed the clearance/layer,
 # pour, post-route and coupled-routing families above; what remains is the
-# search/budget/bus flags and --length-match-groups (needs the net-class map to
-# know which open nets it governs; follow-up).  Moving an entry out of this
+# search/budget/bus flags (--length-match-groups is now forwarded).  Moving an entry out of this
 # group means forwarding it AND checking that the lattice completion honours
 # it; do not move one to another group to make this test pass.
 NOT_FORWARDED_UNREVIEWED = {
@@ -194,7 +193,6 @@ NOT_FORWARDED_UNREVIEWED = {
     "--diffpair-per-pair-timeout",
     "--length-match-diffpairs",
     "--tighten-diffpair-gap",
-    "--length-match-groups",
     "--bus-routing",
     "--bus-mode",
     "--bus-spacing",
@@ -248,6 +246,7 @@ EXCLUDED = frozenset().union(*EXCLUSION_GROUPS.values())
 # A regression that stops forwarding one fails here even if somebody also adds
 # it to an exclusion group.
 MUST_FORWARD = {
+    "--length-match-groups",  # Issue #8694
     "--layers",
     "--voltage-map",
     "--creepage-standard",
