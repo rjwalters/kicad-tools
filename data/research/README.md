@@ -13,7 +13,7 @@ one:
 | **`data/research/`** (this directory) | The committed artifacts: datasets, caches, fitted models, plots, weight files. |
 | `docs/research/` | The write-ups: method, results, caveats, and the decision each study drove. |
 
-Four independent datasets live here. They share nothing but a parent directory.
+Five independent datasets live here. They share nothing but a parent directory.
 
 | Dataset | Issue | Question | Write-up |
 |---|---|---|---|
@@ -22,6 +22,7 @@ Four independent datasets live here. They share nothing but a parent directory.
 | [`placement_score/`](placement_score/) | #5948, #6233 | Do pre-route placement signals (RUDY, HPWL, the `optimize-placement` cost) pick the more routable of two same-board placements? | [`docs/research/placement_score_calibration.md`](../../docs/research/placement_score_calibration.md) |
 | [`expand_route_shrink/`](expand_route_shrink/) | #6310 | Does board 03's rigid 1.5x route survive one shrink back to 1x, keeping `USB_D+`, with repair limited to trace ends at pads? | [`docs/research/expand-route-shrink-experiment.md`](../../docs/research/expand-route-shrink-experiment.md) § "The one shrink" |
 | [`expand_route_shrink/`](expand_route_shrink/) | #6312 | Does spreading board 05's placement, with decoupling held rigid to its IC, let the shipped router finish more nets than at 1x? | [`docs/research/expand-route-shrink-experiment.md`](../../docs/research/expand-route-shrink-experiment.md) § "Rigid mode on the partial boards" |
+| [`diffpair_bench/`](diffpair_bench/) | #6442 | Are router-produced diff-pair results (boards 03 and 06, `lattice` and `grid` engines) reproducible, pair for pair, from run to run and commit to commit? Written and read by `scripts/research/diffpair_bench.py`. | [`docs/research/diffpair-bench-phase0.md`](../../docs/research/diffpair-bench-phase0.md) |
 
 Interactive companions for both live in [`notebooks/`](../../notebooks/).
 
