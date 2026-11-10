@@ -62,7 +62,7 @@ from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
-from kicad_tools.geometry.courtyard import _fp_transform
+from kicad_tools.geometry.courtyard import _courtyard_polygon, _fp_transform
 from kicad_tools.geometry.package_body import footprint_side, package_body_polygon
 
 from ..violations import DRCResults, DRCViolation
@@ -361,7 +361,7 @@ class Pin1MarkerRule(DRCRule):
         body, _source = package_body_polygon(footprint)
 
         own_silk = list(self._silk_geometries(footprint, []))
-        radius = self._effective_radius(pin1, body)
+        radius = self._effective_radius(pin1, body, footprint)
         near_board_silk = [g for g in board_silk if g.distance(pin1) <= radius]
 
         candidates = 0
@@ -401,7 +401,7 @@ class Pin1MarkerRule(DRCRule):
                 if self._is_visible(component, all_pads, body):
                     return None
 
-        return self._make_violation(footprint, pin1, obscured=candidates > 0)
+        return self._make_violation(footprint, pin1, radius, obscured=candidates > 0)
 
     def marker_graphic_indices(self, footprint: Footprint, graphics: list[Any]) -> set[int]:
         """Return indices into ``graphics`` that this rule accepts as pin-1 marks.
@@ -438,7 +438,7 @@ class Pin1MarkerRule(DRCRule):
         all_pads = unary_union(pin1_geoms + other_geoms)
         body, _source = package_body_polygon(footprint)
 
-        radius = self._effective_radius(pin1, body)
+        radius = self._effective_radius(pin1, body, footprint)
 
         side = footprint_side(footprint)
         transform = _fp_transform(footprint)
@@ -475,17 +475,27 @@ class Pin1MarkerRule(DRCRule):
                     accepted.update(i for i, g in indexed if g.intersects(component))
         return accepted
 
-    def _effective_radius(self, pin1: Any, body: Any | None) -> float:
+    def _effective_radius(self, pin1: Any, body: Any | None, footprint: Footprint) -> float:
         """Search radius for one footprint: ``search_radius_mm`` is a floor.
 
         Modules whose body overhangs pad 1 (AC/DC bricks, relays) put the
         library mark at the body edge, further from the pad than the fixed
         radius.  Widen the radius to reach the body outline (plus a small
         margin) so such a mark is found; ordinary parts are unaffected.
+
+        The stock HLK-PMxx footprint puts the mark ~1.1 mm *outside* its Fab
+        body (beside the silk outline, inside the courtyard), so the courtyard
+        outline is also taken into account (#8731).
         """
-        if body is None or body.is_empty:
-            return self.search_radius_mm
-        return max(self.search_radius_mm, float(pin1.distance(body.boundary)) + 0.1)
+        reach = 0.0
+        outlines = [body]
+        from shapely.geometry import Polygon
+
+        outlines.append(_courtyard_polygon(footprint, footprint_side(footprint), Polygon))
+        for outline in outlines:
+            if outline is not None and not outline.is_empty:
+                reach = max(reach, float(pin1.distance(outline.boundary)) + 0.1)
+        return max(self.search_radius_mm, reach)
 
     @staticmethod
     def _is_visible(geom: Any, all_pads: Any, body: Any | None) -> bool:
@@ -536,7 +546,9 @@ class Pin1MarkerRule(DRCRule):
                 yield geom
         yield from board_silk
 
-    def _make_violation(self, footprint: Footprint, pin1: Any, *, obscured: bool) -> DRCViolation:
+    def _make_violation(
+        self, footprint: Footprint, pin1: Any, radius: float, *, obscured: bool
+    ) -> DRCViolation:
         centroid = pin1.centroid
         ref = footprint.reference
         if obscured:
@@ -547,10 +559,7 @@ class Pin1MarkerRule(DRCRule):
             )
         else:
             rule_id = PIN1_MARKER_MISSING_RULE_ID
-            detail = (
-                f"has no silkscreen pin-1 / polarity marker within "
-                f"{self.search_radius_mm:g}mm of pad 1"
-            )
+            detail = f"has no silkscreen pin-1 / polarity marker within {radius:.3g}mm of pad 1"
         return DRCViolation(
             rule_id=rule_id,
             severity=self.severity,
@@ -560,6 +569,6 @@ class Pin1MarkerRule(DRCRule):
             ),
             location=(round(centroid.x, 3), round(centroid.y, 3)),
             layer=footprint.layer,
-            required_value=self.search_radius_mm,
+            required_value=radius,
             items=(ref,),
         )

@@ -382,6 +382,8 @@ class DRCChecker:
         "check_footprint_placement",
         "check_netlist",
         "check_pin1_markers",
+        "check_fiducials",
+        "check_board_id",
         "check_single_pad_nets",
         "check_pad_grid_alignment",
         "check_thermal_asymmetry",
@@ -545,6 +547,9 @@ class DRCChecker:
         # Manufacturing bucket.
         "pin1_marker_missing": CATEGORY_ADVISORY,
         "pin1_marker_obscured": CATEGORY_ADVISORY,
+        # Assembly-prep advisories (Issue #8532); explicit like pin1 above.
+        "fiducials_missing": CATEGORY_ADVISORY,
+        "board_id_missing": CATEGORY_ADVISORY,
         "silk_over_copper": CATEGORY_ADVISORY,
         "silk_edge_clearance": CATEGORY_ADVISORY,
         # Coverage advisory for silk primitives the geometry model does not
@@ -1574,6 +1579,18 @@ class DRCChecker:
 
         rule = Pin1MarkerRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_fiducials(self) -> DRCResults:
+        """Warn when a populated side has fewer than 3 global fiducials (``fiducials_missing``)."""
+        from .rules.fiducials import FiducialsRule
+
+        return self._absolutize(FiducialsRule().check(self.pcb, self.design_rules))
+
+    def check_board_id(self) -> DRCResults:
+        """Warn when no silkscreen text names the board revision (``board_id_missing``)."""
+        from .rules.board_id import BoardIdRule
+
+        return self._absolutize(BoardIdRule().check(self.pcb, self.design_rules))
 
     def check_mask_to_copper(self) -> DRCResults:
         """Run the explicitly requested native, immutable-source exposure check."""

@@ -122,27 +122,98 @@ def refresh_router_class_floors(router: Any) -> bool:
     identity-keyed authored index cache is invalidated.  The native grid
     re-syncs on its next ``sync_authored_floors`` call (keyed on contents).
 
+    Issue #8577: names resolve through the loader's full ``board_net_ids``
+    map, not only ``router.net_names``.  ``net_names`` is filled from routable
+    pads, so a net the run SKIPS -- every net whose copper ``--preserve-existing``
+    keeps -- is absent from it, and its kept copper got no class floor: new
+    Signal copper was held to its own clearance against a preserved Analog
+    track.  Those nets' pads are neutralised to net 0, so their item-level
+    floor (``Pad.authored_clearance``) is re-derived here as well, as
+    ``max(designer floor, current class floor)`` -- the value the loader
+    gives a neutralised pad.
+
     Returns ``True`` when the floors changed.
     """
     rules = getattr(router, "rules", None)
     if not isinstance(rules, DesignRules):
         return False
     net_names = getattr(router, "net_names", None) or {}
-    ids_by_name = {name: net_id for net_id, name in net_names.items() if net_id}
+    ids_by_name = {
+        str(name): int(net_id)
+        for name, net_id in (getattr(router, "board_net_ids", None) or {}).items()
+        if net_id
+    }
+    ids_by_name.update({name: net_id for net_id, name in net_names.items() if net_id})
     authored = getattr(router, "_authored_net_clearance_floors", None)
     floors: dict[int, float] = dict(
         authored if authored is not None else rules.net_clearance_floors
     )
-    for name, value in class_clearances_by_name(
-        router.net_class_map, clearance_base(rules)
-    ).items():
+    class_by_name = class_clearances_by_name(router.net_class_map, clearance_base(rules))
+    for name, value in class_by_name.items():
         net_id = ids_by_name.get(name)
         if net_id:
             floors[net_id] = max(floors.get(net_id, 0.0), value)
+    pads_changed = _refresh_neutral_pad_floors(router, rules, class_by_name)
     if floors == rules.net_clearance_floors:
-        return False
+        return pads_changed
     rules.net_clearance_floors = floors
     grid_rules = getattr(getattr(router, "grid", None), "rules", None)
     if isinstance(grid_rules, DesignRules) and grid_rules is not rules:
         grid_rules.net_clearance_floors = dict(floors)
     return True
+
+
+def _refresh_neutral_pad_floors(
+    router: Any, rules: DesignRules, class_by_name: Mapping[str, float]
+) -> bool:
+    """Re-derive the item floor of every neutralised (net 0) pad (Issue #8577).
+
+    A skipped net's pads are obstacles under net 0, so no net-keyed floor can
+    reach them; the loader carries their class on the pad itself
+    (:func:`merge_named_floors`).  A class map merged after loading must do
+    the same.  The value is ``max(designer floor, class floor)`` by the pad's
+    retained net name.  Without a designer snapshot (rules built outside the
+    loader) a pad floor is only ever raised, never lowered.
+
+    Bumps ``grid._authored_pad_floor_version`` and drops the Python index
+    cache when a pad changed, so both the Python authored index and the native
+    ``sync_authored_floors`` key pick the new floors up.
+
+    Returns ``True`` when any pad floor changed.
+    """
+    grid = getattr(router, "grid", None)
+    pads = list(getattr(grid, "_pads", None) or ())
+    seen = {id(p) for p in pads}
+    for pad in (getattr(router, "pads", None) or {}).values():
+        if id(pad) not in seen:
+            seen.add(id(pad))
+            pads.append(pad)
+    # ``designer_clearance_floors is None``: rules built outside the loader,
+    # where every floor counts as designer-authored (#6449) -- raise only.
+    designer = (
+        rules.designer_clearance_floors_by_name
+        if rules.designer_clearance_floors is not None
+        else None
+    )
+    changed = False
+    for pad in pads:
+        if getattr(pad, "net", 0) != 0:
+            continue
+        name = getattr(pad, "net_name", "") or ""
+        if not name:
+            continue
+        current = float(getattr(pad, "authored_clearance", 0.0) or 0.0)
+        target = class_by_name.get(name, 0.0)
+        if designer is not None:
+            target = max(target, float(designer.get(name, 0.0) or 0.0))
+        else:
+            target = max(target, current)
+        if abs(target - current) > _EPS:
+            pad.authored_clearance = target
+            changed = True
+    if changed and grid is not None:
+        if any(float(getattr(p, "authored_clearance", 0.0) or 0.0) > 0.0 for p in pads):
+            grid._authored_item_floors = True
+        grid._authored_index_cache = None
+        grid._authored_pad_floor_version = getattr(grid, "_authored_pad_floor_version", 0) + 1
+    return changed

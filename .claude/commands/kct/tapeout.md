@@ -25,6 +25,8 @@ uv run kct build-native
 
 `uv sync` does **not** build the native extension. A fresh checkout or git worktree needs this step explicitly.
 
+If the local KiCad is not the pinned release, `kct readiness` refuses before any gate; run it with `KCT_KICAD_DOCKER=1` to use the pinned image.
+
 `kicad-cli` is required by both the mandatory DRC cross-gate (Gate 2, delegated) and the drawing-export gates (Gates 5–6), and `jq` by the pre-gates and Gate 4b. The venv does not provide `kicad-cli`, and a stock macOS install is not on `PATH`, so resolve it the way `kct` does — with the `find_kicad_cli()` one-liner from `{{skill:manufacturing-readiness}}` Gate 2 (it checks `PATH`, then the macOS app bundle, Homebrew and the Linux and Windows default install paths; `kct doctor` prints the path it found). Only an empty result means it is missing; then `tapeout` **refuses** (see Refusal conditions) — there is no partial-package fallback.
 
 ## Model selection
@@ -39,7 +41,7 @@ Model resolves through the harness's normal precedence chain (explicit dispatch 
 
 **Arguments**: `$ARGUMENTS`
 
-`$ARGUMENTS` is `<board-path> [--mfr <tier>] [--assembly | --pcb-only] [--output <dir>] [--ack-warnings <rule,...>] [--skip-cleanup]`.
+`$ARGUMENTS` is `<board-path> [--mfr <tier>] [--assembly | --pcb-only] [--output <dir>] [--ack-warnings <rule,...>] [--skip-cleanup] [--skip-fiducials] [--skip-board-info]`.
 
 | Token | Meaning |
 |-------|---------|
@@ -49,6 +51,7 @@ Model resolves through the harness's normal precedence chain (explicit dispatch 
 | `--pcb-only` | Produce a **bare-board package**: gerbers + drill only. **Skips BOM and CPL entirely** (Gate 4 and the CPL half of Gate 3 are not run). Use when you are ordering the PCB alone and sourcing/assembling parts yourself. |
 | `--output <dir>` | Where the bundle is written. Optional; defaults to `<pcb-dir>/manufacturing/` (the `kct export` default). |
 | `--skip-cleanup` | **Optional.** Skip Gate 0 (copper cleanup). The skip is **recorded**: Gate 7 writes `copper_cleanup: skipped` to `README.txt` and Gate 8 to the manifest. Without this flag Gate 0 always runs. |
+| `--skip-fiducials` / `--skip-board-info` | **Optional.** Skip Gate 0b (adding global fiducials / the board-ID silkscreen text). Each skip is **recorded**: Gate 7 writes `fiducials: skipped (--skip-fiducials)` / `board_info: skipped (--skip-board-info)` to `README.txt` and Gate 8 to the manifest. Without them Gate 0b always runs. |
 | `--ack-warnings <rule,...>` | **Optional.** Explicitly acknowledge nonzero **assembly-affecting** warning counts for the named rules (comma-separated `rule_id`s, e.g. `--ack-warnings silk_over_copper,silk_edge_clearance`). Each acknowledged rule becomes a per-rule accepted-risk line in `README.txt` (Gate 7). Without an acknowledgement covering **every** assembly-affecting rule that has a nonzero warning count, Gate 4b **refuses** the tapeout. This is a *skill* argument (an acknowledgement ritual), not a `kct check` CLI flag. |
 
 **`--assembly` and `--pcb-only` are mutually exclusive.** If both are passed, refuse. **If neither is passed, default to `--assembly`** — the safe default is the *complete* package; a caller who wants the reduced bare-board package must ask for it explicitly.
@@ -80,6 +83,11 @@ If the resolved tier is not in that set, stop and ask — do not silently fall b
 Before Gate 1, run, in order and in place: `kct pcb dedupe <pcb>` (#8218), `kct pcb prune <pcb>` (DRC-verified; #8216 landed), then `kct optimize-traces <pcb> --drc-aware --mfr <tier>` (add `--voltage-map <file>` when the board has one). Layers and copper weight come from the board stackup / `.kicad_pro` `meta.copper_oz` unless `--layers` / `--copper` are passed (#8633). It must precede Gate 1 so the `--refill-zones` cross-gate (Gate 2) judges the **cleaned** board, and nothing is hashed or exported from the uncleaned one. `--drc-aware` is **not self-verifying** (#8632 is open): Gate 2's refill DRC (unconnected items) and the `kct creepage` census are what catch a regression, so keep this ordering. Record each step's counts for Gate 7/8 (`0` is valid; README.txt and the manifest `copper_cleanup.steps`). `kct readiness --generate` performs the same three steps (`--skip-cleanup` skips all three and is recorded).
 
 **Trace-quality gate (part of Gate 4b):** after cleanup, any nonzero `redundant_copper_*` or `via_dangling` count in Gate 1's per-rule table **refuses** tapeout unless each rule is acknowledged with a reason (`kct readiness --ack-trace-quality RULE=REASON`, repeatable). The acknowledgement and reason are listed in README.txt and recorded in the manifest. These rules stay advisory for the generic strict gate (`NON_GATING_RULE_PREFIXES` is unchanged).
+
+
+### Gate 0b — fiducials and board ID (always runs unless skipped)
+
+After Gate 0 and before Gate 1, run `kct pcb add-fiducials <pcb> --sides populated` and `kct pcb add-board-info <pcb> --auto` (issue #8532) so the checks judge the finished board. Both are idempotent. `kct check` reports what remains missing as `fiducials_missing` (fewer than 3 global fiducials on a populated side) and `board_id_missing` (no silkscreen text naming the revision); both are **assembly-affecting** warnings, so Gate 4b refuses `--assembly` unless they are zero or acknowledged via `--ack-warnings`. `kct readiness --generate` performs the same step (`--skip-fiducials` / `--skip-board-info` to opt out); `--verify` never regenerates or mutates the board.
 
 ### Pre-gates (Gates 1–3): delegate to `{{skill:manufacturing-readiness}}`, do not re-describe
 
@@ -141,6 +149,7 @@ The distinction is load-bearing: **matcher-broken → refuse the whole tapeout**
    - `silkscreen_line_width` — the compared floor comes from the manufacturer profile, so every warning is a hard fab-constraint violation, not a preference
    - `silk_edge_clearance`
    - `silk_overlap`
+   - `silk_ref_obscured` — mirrors `ASSEMBLY_AFFECTING_RULES` (`kct readiness` refuses it without an ack)
    - `thermal_asymmetry` — a 2-pad passive with one solid and one relieved terminal (tombstoning) or a PTH pin solid on 2+ layers (barrel fill) is an assembly defect; `kct zones relieve` is the fixer (Issue #8659)
 
 3. **Require explicit acknowledgement of any nonzero count in that set.** A nonzero assembly-affecting warning count is acceptable **only** when explicitly acknowledged: the caller passed `--ack-warnings` naming that exact rule, or a human-authored accepted-risk decision exists and you record it as one accepted-risk line **per rule** in `README.txt` (Gate 7). Silence is not acknowledgement, and a passing Gate 1 exit code is not acknowledgement. **Unacknowledged assembly-affecting warnings ⇒ TAPEOUT REFUSED** — never exit 0, never write the final manifest. Warnings outside the assembly-affecting set appear in the table but do not require acknowledgement.
@@ -193,6 +202,7 @@ Write `<dir>/README.txt` enumerating **every** deliverable in the bundle so a hu
 - **Hand-solder / THT items** (carried from the CPL's THT-exclusion note) — parts the assembler will *not* place and someone must hand-solder.
 - The **per-rule warning table** from Gate 4b (rule → warning count; not an aggregate total), and **one acknowledgement line per assembly-affecting rule with a nonzero count** — naming the rule, the count, and why the risk is accepted (from `--ack-warnings` or the recorded accepted-risk decision). If every assembly-affecting count is zero, state that explicitly.
 - A **Copper cleanup** line from Gate 0: segments/vias removed, or `copper_cleanup: skipped` when `--skip-cleanup` was passed.
+- An **Assembly prep** line per step from Gate 0b: `applied`, or `fiducials: skipped (--skip-fiducials)` / `board_info: skipped (--skip-board-info)` when opted out.
 - Any **accepted-risk notes** carried forward from sign-off docs (e.g. a documented DRC waiver). Waived findings in Gate 1's report (`"status": "waived"`) are listed one per line with their `key`, `waiver_reason` and reviewer from the board's `<board>.kct-waivers.json`. If none, say "no accepted-risk waivers."
 
 **Gate condition:** `README.txt` exists, names the board file, the tier, and the mode, **and** contains the per-rule warning table plus one acknowledgement line per assembly-affecting rule with a nonzero count (or the explicit statement that all assembly-affecting counts are zero).
@@ -256,7 +266,7 @@ Refuse the tapeout, loudly, when any of these hold:
 - **Gate 1's rule is false on a `meta_checks` sub-check** — any `meta_checks` sub-check other than Manifest is `NOT RUN` (e.g. ERC/LVS with no schematic found), `meta_checks.lvs` is vacuous, or `--allow-incomplete` / `--drc-only` was used. `summary.passed` can be `true` in exactly these cases, so it is not the signal; apply the manufacturing-readiness Gate 1 rule rather than restating it.
 - **A blocking check's coverage is `unknown`** — "unknown is not pass" (issue #5946). Gate 1's report carries a `coverage` map (one entry per check: `checked`, `skipped:<reason>` or `unknown:<reason>`, plus `blocking`), and `summary.coverage_blocking_unknown` lists every blocking check that could not evaluate the board (e.g. `segment_zone` with `zone_fills_absent`, `diffpair_length_skew` with `needs_input:net_class_map`, `courtyard_overlap` with `no_courtyard_geometry (N of M footprints)`). Zero findings from such a check is not a pass: refuse, quote the names and reasons, and say which input to supply (refill zones, pass the net-class map, fix the `.kicad_pro`, give each footprint named by a `courtyard_missing` warning an `F.CrtYd` outline or, for a part with no body, set `(attr ... allow_missing_courtyard)`). `kct readiness` enforces the same rule in its `kct_check` gate.
 - **A stale evidence-bound waiver** — `summary.stale_waivers` is nonzero, or any finding carries `"waiver_status": "stale"`. The geometry or nets under a reviewed waiver changed, so the finding is active again; it must be re-reviewed (and re-waived with `kct check --waive <key> --waive-reason ... --waive-reviewer ...` only if still intentional), never carried forward as accepted risk.
-- **Unacknowledged assembly-affecting warnings (Gate 4b)** — any rule in the assembly-affecting set (`silk_over_copper`, `silkscreen_line_width`, `silk_edge_clearance`, `silk_overlap`, `thermal_asymmetry`, `courtyard_missing`, at minimum) has a nonzero warning count with no matching `--ack-warnings` entry or per-rule accepted-risk line. Quote the per-rule warning table in the refusal. "0 errors" is not "fit to fabricate" — these two claims must never be conflated by this skill.
+- **Unacknowledged assembly-affecting warnings (Gate 4b)** — any rule in the assembly-affecting set (`silk_over_copper`, `silkscreen_line_width`, `silk_edge_clearance`, `silk_overlap`, `silk_ref_obscured`, `thermal_asymmetry`, `courtyard_missing`, at minimum) has a nonzero warning count with no matching `--ack-warnings` entry or per-rule accepted-risk line. Quote the per-rule warning table in the refusal. "0 errors" is not "fit to fabricate" — these two claims must never be conflated by this skill.
 - **`--assembly` with unresolved BOM lines** — one or more components have no fab-orderable part number (human selection required). Surface the unresolved report; do not ship an incomplete assembly order.
 - **LCSC part/package check failed or unverified (Gate 4, `--assembly`)** — the manifest's `bom_lcsc_values` preflight entry is `FAIL`, is missing, or is `WARN` with `unverified` lines not covered by a declared spec exemption, or reports an `exempt ref carries a verifiable LCSC part` conflict (issues #8113, #8261). Quote the offending `details` lines.
 

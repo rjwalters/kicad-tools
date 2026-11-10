@@ -100,6 +100,8 @@ PUBLIC_EXPORTS = {
         "DiffPairUncoupledLengthRule": ".diffpair_uncoupled_length",
         "DimensionRules": ".dimensions",
         "EdgeClearanceRule": ".edge",
+        "BoardIdRule": ".board_id",
+        "FiducialsRule": ".fiducials",
         "ImpedanceRule": ".impedance",
         "NetImpedanceSpec": ".impedance",
         "MatchGroupLengthSkewRule": ".match_group_length_skew",

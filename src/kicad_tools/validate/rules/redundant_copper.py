@@ -180,7 +180,7 @@ class RedundantCopperRule(DRCRule):
                             message=(
                                 f"Track segment lies within the copper of a longer "
                                 f"segment: [{label}] on {seg.layer} "
-                                f"(`kct pcb prune` removes it when connectivity allows)"
+                                f"(`kct pcb prune` removes this when safe)"
                             ),
                             location=seg.start,
                             layer=seg.layer,
