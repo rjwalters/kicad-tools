@@ -889,6 +889,10 @@ class ReadinessOptions:
     # Seed BOM whose verified LCSC numbers ``generate`` merges (Issue #8762),
     # the same merge as ``kct export --merge-lcsc-from``.
     merge_lcsc_from: Path | None = None
+    # The ``.kct`` spec resolved from the ORIGINAL board before staging (#8727);
+    # the staged candidate cannot see a spec above ``board_dir``.
+    bom_spec_file: Path | None = None
+    bom_spec_error: str | None = None
 
     @property
     def root(self) -> Path:
@@ -2334,12 +2338,15 @@ def _project_dependencies(
     root = pcb.parent
     boundary = (limit or root).resolve()
     real_root = root.resolve()
+    # Only this board's own project files (stem of the PCB); sibling revisions
+    # and KiCad ``*_backup_*`` schematics are not its dependencies (#8727).
+    # Schematics arrive through ``_schematic_hierarchy``.
     files = {
         p
         for p in root.iterdir()
         if p.is_file()
         and (
-            p.suffix in {".kicad_pro", ".kicad_dru", ".kicad_sch"}
+            (p.suffix in {".kicad_pro", ".kicad_dru"} and p.stem == pcb.stem)
             or p.name in {"fp-lib-table", "sym-lib-table"}
         )
     }
@@ -2961,6 +2968,31 @@ def _read_csv_rows(path: Path) -> tuple[list[str], list[list[str]]]:
     return rows[0], rows[1:]
 
 
+def _declared_bom_exemptions(
+    options: ReadinessOptions,
+) -> tuple[dict[str, tuple[str, str]], str | None]:
+    """Refs the ``.kct`` spec declares deliberately non-LCSC (#8261, #8727).
+
+    Reads the spec resolved from the original board (``options.bom_spec_file``),
+    never from the staged candidate.  Returns ``(exemptions, note)``; *note* says
+    why none apply (no spec / load failure) so a miss is never silent.
+    """
+    if options.bom_spec_error:
+        return {}, options.bom_spec_error
+    spec_file = options.bom_spec_file
+    if spec_file is None:
+        return {}, f"no .kct spec found above {options.board_dir}; exemptions not applied"
+    try:
+        from kicad_tools.export.bom_spec_overlay import declared_exemptions
+        from kicad_tools.spec.parser import load_spec
+
+        entries = load_spec(spec_file).bom_entries
+        return (declared_exemptions(entries) if entries else {}), None
+    except Exception as exc:
+        logger.warning("Spec exemption lookup failed for %s: %s", spec_file, exc)
+        return {}, f"spec {spec_file} failed to load ({exc}); exemptions not applied"
+
+
 def _gate_bom(
     options: ReadinessOptions,
     engines: Engines,
@@ -3004,6 +3036,9 @@ def _gate_bom(
         None,
     )
 
+    declared, spec_note = _declared_bom_exemptions(options)
+    exempt_seen: dict[str, tuple[str, str]] = {}
+    exempt_lines = 0
     unresolved: list[str] = []
     for index, row in enumerate(rows):
         value = row[part_index].strip() if part_index < len(row) else ""
@@ -3013,9 +3048,15 @@ def _gate_bom(
                 if designator_index is not None and designator_index < len(row)
                 else f"row {index + 2}"
             )
+            refs = [r for r in re.split(r"[,\s]+", label) if r]
+            if declared and refs and all(r in declared for r in refs):
+                # Every ref on this line is a declared, deliberate non-LCSC part (#8727).
+                exempt_seen.update({r: declared[r] for r in refs})
+                exempt_lines += 1
+                continue
             unresolved.append(label or f"row {index + 2}")
 
-    if rows and len(unresolved) == len(rows):
+    if rows and len(unresolved) + exempt_lines == len(rows) and len(rows) > 1 + exempt_lines:
         return CheckOutcome(
             name="bom",
             status=FAILED,
@@ -3035,12 +3076,15 @@ def _gate_bom(
             hint = (
                 " No --merge-lcsc-from source was supplied, so no existing BOM was merged (#8762)."
             )
+        note = f" ({spec_note})" if spec_note else ""
+        if spec_note:
+            logger.warning("bom gate: %s", spec_note)
         return CheckOutcome(
             name="bom",
             status=FAILED,
-            detail=f"{len(unresolved)} BOM line(s) lack a procurement identifier: {shown}.",
+            detail=f"{len(unresolved)} BOM line(s) lack a procurement identifier: {shown}{note}.",
             blockers=[
-                f"{len(unresolved)} BOM line(s) require human part selection: {shown}.{hint}"
+                f"{len(unresolved)} BOM line(s) require human part selection: {shown}{note}.{hint}"
             ],
         )
 
@@ -3232,6 +3276,15 @@ def _gate_bom(
         detail=(
             f"{len(rows)} BOM line(s) carry procurement identifiers; part check "
             f"{part_status}: {part_message}{warn_details}; {tht_note}"
+            + (
+                f" {len(exempt_seen)} declared exempt (spec {options.bom_spec_file}): "
+                + "; ".join(
+                    f"{ref} ({cat}: {why})" for ref, (cat, why) in sorted(exempt_seen.items())
+                )
+                + "."
+                if exempt_seen
+                else ""
+            )
         ),
     )
 
@@ -3608,11 +3661,22 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
         options = replace(options, checked_at=_iso_now())
     original = options.board_dir.resolve()
     project_root = options.root
+    spec_file: Path | None = None
+    try:
+        from kicad_tools.export.bom_spec_overlay import find_spec_file
+
+        spec_file = find_spec_file(options.pcb.parent)
+    except Exception as exc:  # reported by the bom gate, never silent (#8727)
+        options = replace(options, bom_spec_error=f"spec lookup failed: {exc}")
+    if spec_file is not None:
+        options = replace(options, bom_spec_file=spec_file.resolve())
     try:
         externals = _external_dependencies(options)
     except (OSError, ValueError) as exc:
         return _preflight_failure(options, original, exc)
     external_before = {p: _sha256_file(p) for p in externals}
+    if spec_file is not None and not spec_file.resolve().is_relative_to(original):
+        external_before[spec_file.resolve()] = _sha256_file(spec_file.resolve())
     before = _snapshot_inventory(original)
     diagnostic_name = (
         "readiness-verification" if options.operation == "verify" else "readiness-attempt"
@@ -3633,6 +3697,22 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
             target = candidate_root / source.relative_to(project_root)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
+
+        # A spec above ``board_dir`` is not in the copied tree.  Mirror it so the
+        # exporter's own spec lookup (bom_lcsc_values preflight, overlay) sees the
+        # same spec the bom gate uses (#8727).  Outside the project root it goes in the
+        # temp directory: an ancestor of the candidate, but not part of it (the
+        # candidate root IS the candidate when no project root is given).
+        if options.bom_spec_file is not None and not options.bom_spec_file.is_relative_to(original):
+            spec = options.bom_spec_file
+            spec_target = (
+                candidate_root / spec.relative_to(project_root)
+                if spec.is_relative_to(project_root)
+                else Path(temporary) / spec.name
+            )
+            spec_target.parent.mkdir(parents=True, exist_ok=True)
+            if not spec_target.exists():
+                shutil.copy2(spec, spec_target)
 
         def remap(path: Path | None) -> Path | None:
             if path is None:

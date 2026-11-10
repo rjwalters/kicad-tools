@@ -2219,3 +2219,169 @@ def test_baseline_counts_use_baseline_report_when_findings_resolved(tmp_path, ca
     readme = (board / "output" / "manufacturing" / "README.txt").read_text()
     assert "silk_over_copper: +2 (14 -> 16)" in readme
     assert "silk_over_copper: +2 (14 -> 16)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Issue #8727: declared BOM exemptions; sibling revisions are not dependencies
+# ---------------------------------------------------------------------------
+
+_EXEMPT_SPEC = (
+    "kct_version: '1.0'\nproject:\n  name: t\n"
+    "requirements:\n  manufacturing:\n    target_fab: jlcpcb\n"
+    "bom_entries:\n- ref: D1\n  part: X\n  exempt: consigned\n  exempt_reason: owner supplies\n"
+)
+
+
+def test_declared_bom_exemption_is_honoured_and_listed(tmp_path):
+    board = make_board(tmp_path)
+    (board / "project.kct").write_text(_EXEMPT_SPEC)
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert check_status(report, "bom") == "passed"
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "1 declared exempt" in detail and "D1 (consigned: owner supplies)" in detail
+    assert code == 0
+
+
+def test_exemption_does_not_cover_other_blank_rows(tmp_path):
+    board = make_board(tmp_path)
+    (board / "project.kct").write_text(_EXEMPT_SPEC)
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "TBD", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert check_status(report, "bom") == "failed"
+    blocker = " ".join(report["blockers"])
+    assert "U1" in blocker and "D1" not in blocker
+
+
+def _spec_above_board(tmp_path: Path) -> Path:
+    """The reporter's layout: ``project.kct`` one level above ``board_dir``."""
+    board = make_board(tmp_path)
+    (board / "project.kct").unlink()
+    (tmp_path / "project.kct").write_text(_EXEMPT_SPEC)
+    return board
+
+
+def test_exemption_from_spec_above_board_dir_generate_8727(tmp_path):
+    board = _spec_above_board(tmp_path)
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert check_status(report, "bom") == "passed", report.get("blockers")
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "D1 (consigned: owner supplies)" in detail
+    assert str(tmp_path / "project.kct") in detail
+    assert code == 0
+
+
+def test_exemption_from_spec_above_board_dir_verify_8727(tmp_path):
+    board = _spec_above_board(tmp_path)
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+    assert run(board, fake)[0] == 0
+
+    _code, report = _verify_report(board, FakeEngines(board, part_numbers=fake.part_numbers))
+
+    assert check_status(report, "bom") == "passed", report.get("blockers")
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "D1 (consigned: owner supplies)" in detail
+
+
+def test_missing_spec_is_reported_not_silent_8727(tmp_path):
+    board = make_board(tmp_path)
+    (board / "project.kct").unlink()
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert check_status(report, "bom") == "failed"
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "D1" in detail and "no .kct spec found" in detail and "exemptions not applied" in detail
+
+
+def test_unloadable_spec_is_reported_not_silent_8727(tmp_path):
+    board = make_board(tmp_path)
+    (board / "project.kct").write_text("::: not a spec :::\n  - [\n")
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "failed to load" in detail and "exemptions not applied" in detail
+
+
+def test_real_project_zip_carries_local_footprint_library_and_skips_siblings_8727(tmp_path):
+    """The real exporter zip (not the fake bundler) satisfies readiness provenance."""
+    from kicad_tools.cli.readiness_cmd import ReadinessOptions
+    from kicad_tools.export.manufacturing import _create_project_zip
+
+    board = make_board(tmp_path)
+    output = board / "output"
+    pcb = output / PCB_NAME
+    (output / "mylib.pretty").mkdir()
+    (output / "mylib.pretty" / "FP1.kicad_mod").write_text("(footprint FP1)\n")
+    (output / "fp-lib-table").write_text(
+        '(fp_lib_table (lib (name "mylib")(type "KiCad")'
+        '(uri "${KIPRJMOD}/mylib.pretty")(options "")(descr "")))\n'
+    )
+    for name in ("demo_v25", "demo_v26"):
+        (output / f"{name}.kicad_pro").write_text('{"board": {}}\n')
+        (output / f"{name}.kicad_dru").write_text("(version 1)\n")
+    (output / "demo_backup_2026-01-01.kicad_sch").write_text("(kicad_sch old)\n")
+
+    manufacturing = output / "manufacturing"
+    manufacturing.mkdir()
+    _create_project_zip(pcb, manufacturing)
+    with zipfile.ZipFile(manufacturing / "kicad_project.zip") as zf:
+        names = set(zf.namelist())
+    assert {"fp-lib-table", "mylib.pretty/FP1.kicad_mod"} <= names
+
+    options = ReadinessOptions(
+        board_dir=board,
+        pcb=pcb,
+        schematic=output / SCH_NAME,
+        project=output / PRO_NAME,
+        manufacturer="jlcpcb",
+        mode="pcb_only",
+        output_dir=manufacturing,
+        evidence_dir=output / "readiness",
+    )
+    assert readiness_cmd._verify_project_provenance(options) == []
+    required = {p.name for p in readiness_cmd._required_sources(options)}
+    assert not required & {"demo_v25.kicad_pro", "demo_v26.kicad_dru"}
+    assert "demo_backup_2026-01-01.kicad_sch" not in required
+
+
+def test_project_zip_with_unresolved_project_path_8727(tmp_path, monkeypatch):
+    """A relative or symlinked PCB path must not break table-derived members."""
+    from kicad_tools.export.manufacturing import _create_project_zip
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "mylib.pretty").mkdir()
+    (real / "mylib.pretty" / "FP1.kicad_mod").write_text("(footprint FP1)\n")
+    (real / "fp-lib-table").write_text(
+        '(fp_lib_table (lib (name "mylib")(type "KiCad")'
+        '(uri "${KIPRJMOD}/mylib.pretty")(options "")(descr "")))\n'
+    )
+    (real / "demo.kicad_pcb").write_text("(kicad_pcb)\n")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    for pcb in (link / "demo.kicad_pcb", None):
+        if pcb is None:
+            monkeypatch.chdir(tmp_path)
+            pcb = Path("real") / "demo.kicad_pcb"
+        archive = _create_project_zip(pcb, out)
+        with zipfile.ZipFile(archive) as zf:
+            names = zf.namelist()
+        assert len(names) == len(set(names))
+        assert {"fp-lib-table", "mylib.pretty/FP1.kicad_mod", "demo.kicad_pcb"} <= set(names)
