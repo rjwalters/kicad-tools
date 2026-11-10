@@ -7460,6 +7460,16 @@ def _add_readiness_parser(subparsers) -> None:
         ),
     )
     rd_parser.add_argument(
+        "--merge-lcsc-from",
+        dest="readiness_merge_lcsc_from",
+        metavar="PATH",
+        default=None,
+        help=(
+            "With --generate: merge verified LCSC numbers from a previous BOM CSV, "
+            "as `kct export --merge-lcsc-from` does; the source is recorded in the report"
+        ),
+    )
+    rd_parser.add_argument(
         "--checked-at",
         dest="readiness_checked_at",
         metavar="ISO",

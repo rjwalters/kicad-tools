@@ -2385,3 +2385,21 @@ def test_project_zip_with_unresolved_project_path_8727(tmp_path, monkeypatch):
             names = zf.namelist()
         assert len(names) == len(set(names))
         assert {"fp-lib-table", "mylib.pretty/FP1.kicad_mod", "demo.kicad_pcb"} <= set(names)
+
+
+def test_outer_kct_readiness_forwards_merge_lcsc_from_8762(tmp_path):
+    """``kct readiness --generate --merge-lcsc-from`` reaches the inner parser."""
+    from unittest.mock import patch
+
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+
+    seed = tmp_path / "bom_jlcpcb.csv"
+    seed.write_text("Comment,Designator,Footprint,LCSC\n")
+    args = create_parser().parse_args(
+        ["readiness", str(tmp_path), "--generate", "--merge-lcsc-from", str(seed)]
+    )
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner:
+        assert run_readiness_command(args) == 0
+    sub_argv = inner.call_args[0][0]
+    assert sub_argv[sub_argv.index("--merge-lcsc-from") + 1] == str(seed)
