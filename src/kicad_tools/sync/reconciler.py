@@ -29,10 +29,13 @@ import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.cost.suggest import parse_component_value
 from kicad_tools.schema.bom import extract_bom
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import Segment, Via
 
 # Relative tolerance for comparing parsed passive magnitudes.  Mirrors
 # ``kicad_tools.export.lcsc_value_check.VALUE_REL_TOLERANCE`` so both consumers
@@ -684,9 +687,9 @@ class Reconciler:
 
         def net_of(obj) -> str:
             if obj.net_name:
-                return obj.net_name
+                return str(obj.net_name)
             net = pcb._nets.get(obj.net_number)
-            return net.name if net else ""
+            return str(net.name) if net else ""
 
         def near(a, b) -> bool:
             return math.hypot(a[0] - b[0], a[1] - b[1]) < tol
@@ -962,8 +965,8 @@ class Reconciler:
 
         # Remove stranded copper while nets still hold their old values (#8705)
         if has_stranded_to_remove:
-            to_remove_segs = []
-            to_remove_vias = []
+            to_remove_segs: list[Segment] = []
+            to_remove_vias: list[Via] = []
             for obj, info in self._collect_stranded(pcb, pad_net_mismatches):
                 locked = info["locked"] == "true"
                 if locked:
