@@ -485,7 +485,7 @@ class Pin1MarkerRule(DRCRule):
         """
         if body is None or body.is_empty:
             return self.search_radius_mm
-        return max(self.search_radius_mm, pin1.distance(body.boundary) + 0.1)
+        return max(self.search_radius_mm, float(pin1.distance(body.boundary)) + 0.1)
 
     @staticmethod
     def _is_visible(geom: Any, all_pads: Any, body: Any | None) -> bool:
