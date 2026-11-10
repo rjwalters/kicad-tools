@@ -143,7 +143,7 @@ class FakeEngines:
     def kct_check(self, pcb: Path, mfr: str, report_path: Path, extra) -> EngineRun:
         self.calls.append("kct_check")
         violations = [
-            {"rule_id": rule, "severity": "warning", "message": rule}
+            {"rule_id": rule, "key": rule, "severity": "warning", "message": rule}
             for rule, count in self.warnings.items()
             for _ in range(count)
         ]
@@ -2120,3 +2120,22 @@ def test_optimize_stackup_readable_board_reports_board(tmp_path):
     layers, _, src = resolve_board_stackup_with_source(pcb)
     assert layers == 2
     assert src["layers"] == "board"
+
+
+def test_baseline_counts_use_baseline_report_when_findings_resolved(tmp_path, capsys):
+    """Issue #8673: previous count comes from the baseline, not current - introduced."""
+    board = make_board(tmp_path)
+    prev = _make_baseline(tmp_path)
+    # Baseline: 14 silk_over_copper + 3 trace_width_advisory (resolved in new run).
+    # Current: 16 silk_over_copper -> true transition is 14 -> 16.
+    fake = _baseline_engines(
+        board,
+        {"silk_over_copper": 16},
+        {"silk_over_copper": 14, "trace_width_advisory": 3},
+    )
+
+    run(board, fake, "--baseline", str(prev), "--ack-warnings", "silk_over_copper")
+
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "silk_over_copper: +2 (14 -> 16)" in readme
+    assert "silk_over_copper: +2 (14 -> 16)" in capsys.readouterr().out
