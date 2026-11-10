@@ -299,6 +299,12 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # breakdown.  Tool-side rule addition, not a board regression.
     "redundant_copper_detour",
     "redundant_copper_duplicate",
+    # Issue #8665 / #8736: the new advisory ``redundant_copper_covered`` rule
+    # flags segments covered by a longer collinear segment (52 warnings on the
+    # committed routing).  WARNING severity, so the 0-error ceiling
+    # (MAX_COMMITTED_DRC_ERRORS) is unchanged.  Tool-side rule addition, not a
+    # board regression; cleanup is via ``kct pcb prune``.
+    "redundant_copper_covered",
     # Issue #8435 (PR #8444) / #8503: the new advisory ``pour_slot`` rule flags
     # parallel different-net tracks too close for the zone fill between them
     # (39 distinct pairs on the committed routing once duplicate segment copies
