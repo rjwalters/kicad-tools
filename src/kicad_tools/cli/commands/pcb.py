@@ -813,6 +813,11 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             "segments_removed": len(p.remove),
             "vias_removed": len(p.remove_vias),
             "ends_snapped": len(p.snaps),
+            "stubs_added": [
+                {"layer": layer, "start": list(a), "end": list(b), "width": w}
+                for layer, a, b, w in p.stubs
+            ],
+            **({"reject_reason": p.reject_reason} if p.reject_reason else {}),
         }
 
     changed = (
@@ -848,9 +853,16 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             print(f"  Vias removed:     {res.stats['vias_removed']:,}")
         print(f"  Ends snapped:     {res.stats['ends_snapped']:,}")
         for n in result["nets"]:
-            print(f"    {n['net']}: -{n['segments_removed']} seg, {n['ends_snapped']} snapped")
+            stub_note = f", +{len(n['stubs_added'])} stub" if n["stubs_added"] else ""
+            print(
+                f"    {n['net']}: -{n['segments_removed']} seg, "
+                f"{n['ends_snapped']} snapped{stub_note}"
+            )
+            for st in n["stubs_added"]:
+                print(f"      stub {st['layer']} {st['start']} -> {st['end']} w={st['width']}")
         for n in result["rejected_by_drc"]:
-            print(f"    {n['net']}: kept (edit would add DRC violations)")
+            why = n.get("reject_reason") or "edit would add DRC violations"
+            print(f"    {n['net']}: kept ({why})")
         for n in result["region_skipped"]:
             print(f"    {n['net']}: region_skipped (edits extend outside --region)")
         for u in res.uncut_loops:

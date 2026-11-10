@@ -66,6 +66,7 @@ still sees after pruning is reported with the audit's witness, so prune and
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import Counter, defaultdict
 from collections.abc import Collection, Mapping, Sequence
@@ -77,6 +78,8 @@ from kicad_tools.schema.pcb import PCB, Pad, Segment, _mm_atom
 
 if TYPE_CHECKING:
     from kicad_tools.router.current_paths import CurrentPathSpec
+
+logger = logging.getLogger(__name__)
 
 #: End-to-centre distance (mm) at/below which an end counts as centred.
 _MICRO_BRIDGE = 0.01  # mm: a member this short is a bridge, not a step
@@ -905,6 +908,8 @@ class NetPlan:
     #: The container keeps its start, ends at the first split point and a new
     #: same-width, same-layer segment is added for every further piece.
     splits: list[tuple[int, tuple[float, float]]] = field(default_factory=list)
+    #: why the plan was rejected by the current-path audit gate (issue #8687)
+    reject_reason: str = ""
 
     @property
     def empty(self) -> bool:
@@ -2438,6 +2443,12 @@ def prune_board(
     elif verify_drc:
         note = "nothing to verify"
 
+    # Issue #8687: never trade a resolved declared-current net for an ambiguous one.
+    gate_specs = _gate_specs(Path(pcb_path), current_paths)
+    if gate_specs and accepted:
+        accepted, audit_rejected = _audit_gate(Path(pcb_path), accepted, gate_specs)
+        rejected = [*rejected, *audit_rejected]
+
     stats = {"segments_removed": 0, "ends_snapped": 0}
     if apply and accepted:
         stats = apply_plans(pcb, accepted)
@@ -2458,6 +2469,76 @@ def prune_board(
     return pcb, PruneResult(
         plans, accepted, rejected, drc_verified, note, stats, uncut, region_skipped
     )
+
+
+def _gate_specs(
+    pcb_path: Path, current_paths: Sequence[CurrentPathSpec] | None
+) -> Sequence[CurrentPathSpec]:
+    """Specs for the audit gate: explicit ones, else the board's sidecar (#8687).
+
+    Discovery only feeds the gate; an unreadable sidecar warns and disables it.
+    """
+    if current_paths:
+        return current_paths
+    from kicad_tools.router.current_paths import (
+        discover_current_paths_sidecar,
+        load_current_path_specs,
+    )
+
+    sidecar = discover_current_paths_sidecar(pcb_path)
+    if sidecar is None:
+        return ()
+    try:
+        return load_current_path_specs(sidecar)
+    except Exception as e:  # noqa: BLE001 - a bad sidecar must not fail prune
+        logger.warning("ignoring unreadable current-path sidecar %s: %s", sidecar, e)
+        return ()
+
+
+def _audit_gate(
+    pcb_path: Path,
+    accepted: list[NetPlan],
+    specs: Sequence[CurrentPathSpec],
+) -> tuple[list[NetPlan], list[NetPlan]]:
+    """Split ``accepted`` into (kept, rejected) by the current-path audit (#8687).
+
+    A plan on a spec net is rejected when applying it turns a net the audit
+    resolves today ambiguous (e.g. a grid stub parallel to the pad/via copper
+    it is anchored to).  Nets without a spec are never touched.
+    """
+    from kicad_tools.router.current_paths import STATUS_RESOLVED, resolve_current_path
+
+    by_net: dict[str, list[CurrentPathSpec]] = {}
+    for spec in specs:
+        by_net.setdefault(spec.net_name, []).append(spec)
+    if not any(p.net_name in by_net for p in accepted):
+        return accepted, []
+    base = PCB.load(pcb_path)
+    kept: list[NetPlan] = []
+    rejected: list[NetPlan] = []
+    for plan in accepted:
+        resolved = [
+            sp
+            for sp in by_net.get(plan.net_name, [])
+            if resolve_current_path(base, sp).status == STATUS_RESOLVED
+        ]
+        if not resolved:
+            kept.append(plan)
+            continue
+        trial = PCB.load(pcb_path)
+        apply_plans(trial, [plan])
+        broken = [
+            sp for sp in resolved if resolve_current_path(trial, sp).status != STATUS_RESOLVED
+        ]
+        if broken:
+            plan.reject_reason = (
+                f"current-path audit: net {plan.net_name} would turn from resolved to "
+                f"{resolve_current_path(trial, broken[0]).status}"
+            )
+            rejected.append(plan)
+        else:
+            kept.append(plan)
+    return kept, rejected
 
 
 def cleanup_copper(routed: Path | str, max_passes: int = 10) -> dict[str, int]:
