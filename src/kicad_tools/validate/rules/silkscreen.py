@@ -950,7 +950,9 @@ def _iter_silk_elements(
         if side is None or text.hidden:
             continue
         center = to_board(text.position)
-        geom = _text_bbox_geometry(text.text, text.font_size, text.font_thickness, center)
+        geom = _text_bbox_geometry(
+            text.text, text.font_size, text.font_thickness, center, text.rotation
+        )
         if geom is None:
             continue
         label = text.text[:20] if text.text else "gr_text"
@@ -1429,7 +1431,9 @@ def _iter_board_frame_texts(
         if _silk_side(text.layer) is None or text.hidden:
             continue
         center = (text.position[0] - ox, text.position[1] - oy)
-        geom = _text_bbox_geometry(text.text, text.font_size, text.font_thickness, center)
+        geom = _text_bbox_geometry(
+            text.text, text.font_size, text.font_thickness, center, text.rotation
+        )
         if geom is None:
             continue
         label = text.text[:20] if text.text else "gr_text"
