@@ -5894,6 +5894,7 @@ def _write_drc_constraint_sidecars(
     net_class_map: dict | None = None,
     coupled_pairs: list[tuple[str, str]] | None = None,
     pair_gaps: list[tuple[str, str, float]] | None = None,
+    edge_clearance: float | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -5950,6 +5951,10 @@ def _write_drc_constraint_sidecars(
             it (:func:`_router_pair_gaps`, Issue #6443).  Each pair KiCad
             recognises by name gets a native ``diff_pair_gap`` rule.
             ``None`` keeps whatever an earlier route wrote.
+        edge_clearance: Copper-to-edge clearance (mm) the route kept tracks
+            and vias at (Issue #8674).  Written as a track/via-scoped
+            ``edge_clearance`` rule so kicad-cli DRC flags a violation of it
+            without also constraining pads and pours.  ``None`` writes none.
     """
     try:
         from kicad_tools.manufacturers import (
@@ -5999,6 +6004,7 @@ def _write_drc_constraint_sidecars(
                 if pair_gaps is not None
                 else None
             ),
+            route_edge_clearance_mm=edge_clearance,
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -6144,6 +6150,7 @@ def run_post_route_drc(
     router: object | None = None,
     time_left: float | None = None,
     drc_cost_estimate: float = 0.0,
+    edge_clearance: float | None = None,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -6332,6 +6339,7 @@ def run_post_route_drc(
         net_class_map=_effective_class_map or None,
         coupled_pairs=_coupled_pairs,
         pair_gaps=_router_pair_gaps(_coupled_pairs, _effective_class_map or None, router),
+        edge_clearance=edge_clearance,
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
@@ -7735,6 +7743,7 @@ def _fill_zones_after_route(
                 net_class_map=class_map,
                 coupled_pairs=coupled_pairs,
                 pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
+                edge_clearance=getattr(args, "edge_clearance", None),
             )
             # Issue #7026: the selective fill stages the sibling ``.kicad_dru``,
             # so write the native zone-clearance block first, as the full-fill
@@ -7823,6 +7832,7 @@ def _fill_zones_after_route(
             net_class_map=class_map,
             coupled_pairs=coupled_pairs,
             pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
+            edge_clearance=getattr(args, "edge_clearance", None),
         )
 
     # Issue #7026: a recipe that fills under ``native_clearance=True`` ships a
@@ -13584,6 +13594,8 @@ def route_with_layer_escalation(
             # floor was resolved from (--copper > board stackup > 1oz), so
             # the sidecars and this DRC agree with `kct check --copper`.
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+            # Issue #8674: the route's edge clearance, as a track/via DRU rule.
+            edge_clearance=getattr(args, "edge_clearance", None),
             # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
@@ -14562,6 +14574,8 @@ def route_with_rule_relaxation(
             # floor was resolved from (--copper > board stackup > 1oz), so
             # the sidecars and this DRC agree with `kct check --copper`.
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+            # Issue #8674: the route's edge clearance, as a track/via DRU rule.
+            edge_clearance=getattr(args, "edge_clearance", None),
             # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
@@ -17101,6 +17115,8 @@ def route_with_combined_escalation(
             # floor was resolved from (--copper > board stackup > 1oz), so
             # the sidecars and this DRC agree with `kct check --copper`.
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+            # Issue #8674: the route's edge clearance, as a track/via DRU rule.
+            edge_clearance=getattr(args, "edge_clearance", None),
             # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
@@ -25215,6 +25231,8 @@ def _run_main_impl(args, parser, argv) -> int:
             # floor was resolved from (--copper > board stackup > 1oz), so
             # the sidecars and this DRC agree with `kct check --copper`.
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+            # Issue #8674: the route's edge clearance, as a track/via DRU rule.
+            edge_clearance=getattr(args, "edge_clearance", None),
             # Issue #2652, Epic #2556 Phase 2.5b: see other call sites.
             net_class_map=getattr(router, "net_class_map", None),
             # Issue #4178: forward --strict-drc (see other call sites).
