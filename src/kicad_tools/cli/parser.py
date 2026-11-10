@@ -2529,10 +2529,14 @@ def _add_pcb_parser(subparsers) -> None:
         "spaced keeps the old row of anchors every --spacing mm. Anchors are "
         "sized to the wire gauge, respect the annular-ring floor and are "
         "same-net (no shorts); a candidate that would collide with a DIFFERENT "
-        "net is refused and reported, not placed. LIMITATION until #8743: the "
-        "anchors are still plain vias that inherit the board's via tenting, and "
-        "no solder-mask opening is emitted along the run, so the trace is not "
-        "yet exposed for soldering. NOTE: existing zone pours must be refilled "
+        "net is refused and reported, not placed. In ends mode the solder mask is "
+        "also opened (#8743) along each fully anchored leg, anchor to anchor: a "
+        "gr_line on the leg's own side's mask layer (F.Cu -> F.Mask, B.Cu -> "
+        "B.Mask), as wide as the trace unless --mask-width is given; the "
+        "anchors are written with per-via tenting off (rings open on both "
+        "sides). With --voltage-map an opening that would break the pairwise "
+        "creepage requirement is refused and reported (no partial opening). "
+        "NOTE: existing zone pours must be refilled "
         "afterward (e.g. `kicad-cli pcb drc --refill-zones`) so the pours knock "
         "out around the anchors. In-place by default; use -o to write elsewhere.",
     )
@@ -2569,6 +2573,24 @@ def _add_pcb_parser(subparsers) -> None:
         "the leg ends on (default: 1.0); a leg that bends near its end moves "
         "the anchor further inward. A leg too short for two anchors at this "
         "offset is reported too_short and gets none.",
+    )
+    pcb_reinforce.add_argument(
+        "--mask-opening",
+        dest="mask_opening",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Open the solder mask along each fully anchored leg and write the "
+        "anchors with tenting off (Issue #8743). Default: on in ends mode, off "
+        "in spaced mode; --no-mask-opening disables it.",
+    )
+    pcb_reinforce.add_argument(
+        "--mask-width",
+        dest="mask_width",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Solder-mask opening width in mm (default: the leg's trace width; "
+        "e.g. 1.3 for a 16 AWG wire).",
     )
     pcb_reinforce.add_argument(
         "--spacing",

@@ -353,10 +353,25 @@ get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
 `full|partial|unanchored|too_short|unhandled`, `reason`, `paths`,
 `polyline`) to the existing keys; coordinates are sheet-absolute.
 
-Current limitation: until #8743 the anchors are plain same-net vias that
-inherit the board's via tenting, and no solder-mask opening is emitted along
-the run, so the trace is not yet exposed for soldering. Refill zone pours
-afterwards (`kicad-cli pcb drc --refill-zones`).
+**Solder-mask opening (#8743).** In `ends` mode (default; `--no-mask-opening`
+disables it, `--mask-opening` enables it in `spaced` mode) every fully
+anchored leg gets a solder-mask opening along the run from anchor to anchor:
+one board-level `gr_line` per straight piece on the leg's own side's mask
+layer (`F.Cu` leg -> `F.Mask`, `B.Cu` leg -> `B.Mask`), as wide as the trace
+or `--mask-width MM` (e.g. `1.3` for a 16 AWG wire). The anchors are written
+with per-via tenting off (`tenting front/back no`), so both rings are mask-open
+whatever the board-level via tenting is. Re-running does not duplicate
+openings (deduped on layer + endpoints). Legs that are not fully anchored, or
+on an inner layer, get no opening. With `--voltage-map` the exposed run is
+modelled as copper of half-width `max(opening width, wire diameter)/2`; if it
+would sit closer to other-net copper than `max(class floor, creepage @ |dV|)`
+the opening is refused (rule `mask_opening_voltage_map_pairwise`, or
+`mask_opening_clearance` when a class/DRU floor governs), reported, and no
+graphic is written for that leg. `--dry-run` writes nothing. `--format json`
+adds `mask_opening`, `mask_width_mm`, `openings` (`layer`, `start`, `end`,
+`width_mm`, `existing`), `refused_openings` and per-leg `mask_status` /
+`mask_reason`. Refill zone pours afterwards
+(`kicad-cli pcb drc --refill-zones`).
 
 ---
 

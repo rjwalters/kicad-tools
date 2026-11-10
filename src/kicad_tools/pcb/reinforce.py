@@ -74,6 +74,7 @@ from kicad_tools.physics.wire_gauge import (
     DEFAULT_WIRE_GAUGE_AWG,
     anchor_drill_for_awg,
     anchor_pad_for_drill,
+    bare_copper_diameter_mm,
 )
 from kicad_tools.router.board_clearance_rules import BoardClearanceRules
 from kicad_tools.router.current_paths import (
@@ -169,6 +170,24 @@ RULE_DRU_CONDITIONAL = "dru_conditional"
 #: for another leg (centre-to-centre below one anchor pad; Issue #8742).
 RULE_ANCHOR_SPACING = "anchor_spacing"
 
+#: Mask opening refused because the exposed run would sit closer to other-net
+#: copper than the ``--voltage-map`` pairwise creepage requirement (#8743).
+RULE_MASK_OPENING_PAIRWISE = "mask_opening_voltage_map_pairwise"
+#: Same, when a class floor / custom DRU rule (not the voltage map) governs.
+RULE_MASK_OPENING_CLEARANCE = "mask_opening_clearance"
+
+#: Copper layer -> the solder-mask layer on the same side (#8743).
+MASK_LAYER_FOR_COPPER = {"F.Cu": "F.Mask", "B.Cu": "B.Mask"}
+
+#: Leg ``mask_status`` values (#8743).
+MASK_OPENED = "opened"
+MASK_REFUSED = "refused"
+MASK_SKIPPED = "skipped"
+
+# Sample spacing (mm) when testing an exposed run against other-net copper;
+# also capped at the exposed half-width so the disc chain leaves no gap.
+_MASK_SAMPLE_STEP_MM = 0.25
+
 _RULE_EPS = 1e-9
 
 
@@ -236,6 +255,40 @@ class LegSummary:
     #: Names of the declared current paths covering this leg (empty without
     #: ``current_paths``).
     paths: list[str] = field(default_factory=list)
+    #: Solder-mask opening outcome (#8743): ``opened`` / ``refused`` /
+    #: ``skipped`` (empty when mask openings are off or the leg was not
+    #: fully anchored) and why when not ``opened``.
+    mask_status: str = ""
+    mask_reason: str = ""
+
+
+@dataclass
+class MaskOpening:
+    """One solder-mask opening graphic (a board-level ``gr_line``; #8743).
+
+    Coordinates are board-relative. A bent leg yields one per straight piece.
+    ``existing`` is True when an identical graphic was already on the board
+    (idempotent re-run), so nothing new was written for it.
+    """
+
+    layer: str
+    start: tuple[float, float]
+    end: tuple[float, float]
+    width_mm: float
+    existing: bool = False
+
+
+@dataclass
+class RefusedOpening:
+    """A leg whose mask opening was refused by a creepage/clearance rule (#8743)."""
+
+    copper_layer: str
+    start: tuple[float, float]
+    end: tuple[float, float]
+    rule: str
+    required_mm: float
+    actual_mm: float
+    obstacle_net: str = ""
 
 
 @dataclass
@@ -325,6 +378,14 @@ class ReinforceResult:
     legs: list[LegSummary] = field(default_factory=list)
     #: Declared current paths on this net that did not resolve (both modes).
     unresolved_paths: list[UnresolvedPath] = field(default_factory=list)
+    #: Mask openings are emitted (``ends`` mode default; #8743).
+    mask_opening: bool = False
+    #: Opening width override (mm); ``None`` = the leg's trace width.
+    mask_width_mm: float | None = None
+    #: Mask-opening graphics planned this pass (written unless ``dry_run``).
+    openings: list[MaskOpening] = field(default_factory=list)
+    #: Legs whose opening was refused (never a partial opening).
+    refused_openings: list[RefusedOpening] = field(default_factory=list)
 
     @property
     def placed_count(self) -> int:
@@ -834,6 +895,8 @@ def reinforce_net(
     board_rules: BoardClearanceRules | None = None,
     anchor_mode: str = DEFAULT_ANCHOR_MODE,
     end_offset_mm: float = DEFAULT_END_OFFSET_MM,
+    mask_opening: bool | None = None,
+    mask_width_mm: float | None = None,
 ) -> ReinforceResult:
     """Emit same-net PTH buttress-wire anchors along a routed net's trace.
 
@@ -909,6 +972,11 @@ def reinforce_net(
             brings it closer than that; a leg with no room for two such
             anchors, measured along the leg and straight-line, is
             ``too_short`` and gets none.
+        mask_opening: Issue #8743. Open the solder mask along each fully
+            anchored leg (a ``gr_line`` on the leg's own side's mask layer,
+            anchor to anchor) and write the anchors with per-via tenting off.
+            ``None`` (default) = on in ``ends`` mode, off in ``spaced``.
+        mask_width_mm: Opening width override (default: the leg's trace width).
 
     Returns:
         A :class:`ReinforceResult` summarising placed/refused anchors, the
@@ -928,6 +996,10 @@ def reinforce_net(
         )
     if end_offset_mm < 0 or not math.isfinite(end_offset_mm):
         raise ReinforceError(f"end_offset_mm must be >= 0, got {end_offset_mm}")
+    if mask_width_mm is not None and (mask_width_mm <= 0 or not math.isfinite(mask_width_mm)):
+        raise ReinforceError(f"mask_width_mm must be positive, got {mask_width_mm}")
+    if mask_opening is None:
+        mask_opening = anchor_mode == ANCHOR_MODE_ENDS
 
     rules = design_rules or _FALLBACK_DESIGN_RULES
 
@@ -959,6 +1031,8 @@ def reinforce_net(
         spacing_mm=spacing_mm,
         anchor_mode=anchor_mode,
         end_offset_mm=end_offset_mm,
+        mask_opening=bool(mask_opening) and anchor_mode == ANCHOR_MODE_ENDS,
+        mask_width_mm=mask_width_mm,
     )
 
     if not net_segments:
@@ -1581,6 +1655,122 @@ def _clear_arc(
     return None
 
 
+def _arc_of_point(
+    points: list[tuple[float, float]], cum: list[float], p: tuple[float, float]
+) -> float:
+    """Arc length of the polyline point nearest ``p``."""
+    best_t, best_d = 0.0, float("inf")
+    for i in range(len(points) - 1):
+        (x0, y0), (x1, y1) = points[i], points[i + 1]
+        dx, dy = x1 - x0, y1 - y0
+        seg2 = dx * dx + dy * dy
+        u = 0.0
+        if seg2 > 1e-18:
+            u = max(0.0, min(1.0, ((p[0] - x0) * dx + (p[1] - y0) * dy) / seg2))
+        d = math.hypot(p[0] - (x0 + u * dx), p[1] - (y0 + u * dy))
+        if d < best_d:
+            best_d, best_t = d, cum[i] + u * math.sqrt(seg2)
+    return best_t
+
+
+def _sub_polyline(
+    points: list[tuple[float, float]], cum: list[float], t0: float, t1: float
+) -> list[tuple[float, float]]:
+    """The polyline between arc lengths ``t0 <= t1`` (interpolated ends)."""
+    out = [_point_at_arc(points, cum, t0)]
+    out.extend(p for p, c in zip(points, cum, strict=True) if t0 + 1e-9 < c < t1 - 1e-9)
+    out.append(_point_at_arc(points, cum, t1))
+    return out
+
+
+def _opening_violation(
+    run: list[tuple[float, float]],
+    exposed_width: float,
+    other: _OtherNetCopper,
+    policy: _ClearancePolicy,
+) -> _Violation | None:
+    """Creepage test of an exposed run, modelled as a chain of discs.
+
+    The exposed copper has half-width ``exposed_width / 2``; each obstacle
+    net must keep ``policy.required(net)`` (``max(class floor, creepage @
+    |dV|)`` with a voltage map) from it. Layer-agnostic like the anchor test:
+    other-net copper on the far side is treated as an obstacle too
+    (conservative).
+    """
+    step = max(0.05, min(_MASK_SAMPLE_STEP_MM, exposed_width / 2.0))
+    samples: list[tuple[float, float]] = []
+    for (x0, y0), (x1, y1) in zip(run, run[1:], strict=False):
+        n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / step))
+        samples.extend((x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n) for k in range(n))
+    samples.append(run[-1])
+    for net_number, group in other.by_net.items():
+        net = other.net_names.get(net_number, "")
+        required, rule = policy.required(net)
+        for x, y in samples:
+            if not _group_clear(x, y, exposed_width, required, group):
+                tag = (
+                    RULE_MASK_OPENING_PAIRWISE
+                    if rule == RULE_VOLTAGE_MAP_PAIRWISE
+                    else RULE_MASK_OPENING_CLEARANCE
+                )
+                gap = _actual_gap(x, y, exposed_width, required, group)
+                return _Violation(tag, required, gap, net)
+    return None
+
+
+def _plan_mask_opening(
+    pcb: PCB,
+    result: ReinforceResult,
+    leg: LegSummary,
+    points: list[tuple[float, float]],
+    cum: list[float],
+    other: _OtherNetCopper,
+    policy: _ClearancePolicy,
+    dry_run: bool,
+) -> None:
+    """Open the solder mask along a fully anchored leg, anchor to anchor (#8743)."""
+    mask_layer = MASK_LAYER_FOR_COPPER.get(leg.layer)
+    if mask_layer is None:
+        leg.mask_status = MASK_SKIPPED
+        leg.mask_reason = f"{leg.layer} is an inner layer: no solder mask on it"
+        return
+    ta, tb = sorted(_arc_of_point(points, cum, (a.x, a.y)) for a in leg.anchors)
+    run = _sub_polyline(points, cum, ta, tb)
+    width = result.mask_width_mm if result.mask_width_mm is not None else leg.width_mm
+    # Voltage-map creepage test: the exposed run counts as copper of
+    # half-width max(opening, wire diameter) / 2.
+    if policy.pairwise is not None:
+        exposed = max(width, bare_copper_diameter_mm(result.wire_gauge_awg))
+        v = _opening_violation(run, exposed, other, policy)
+        if v is not None:
+            leg.mask_status = MASK_REFUSED
+            leg.mask_reason = (
+                f"exposed run would be {v.actual_mm:.3f} mm from net {v.obstacle_net!r} "
+                f"(need {v.required_mm:.3f} mm, {v.rule}); no opening written"
+            )
+            result.refused_openings.append(
+                RefusedOpening(
+                    copper_layer=leg.layer,
+                    start=run[0],
+                    end=run[-1],
+                    rule=v.rule,
+                    required_mm=v.required_mm,
+                    actual_mm=v.actual_mm,
+                    obstacle_net=v.obstacle_net,
+                )
+            )
+            return
+    for a, b in zip(run, run[1:], strict=False):
+        if math.dist(a, b) <= 1e-9:
+            continue
+        if dry_run:
+            existing = pcb.has_graphic_line(a, b, mask_layer)
+        else:
+            existing = pcb.add_graphic_line(a, b, mask_layer, width=width) is None
+        result.openings.append(MaskOpening(mask_layer, a, b, width, existing))
+    leg.mask_status = MASK_OPENED
+
+
 def _reinforce_ends(
     pcb: PCB,
     result: ReinforceResult,
@@ -1893,10 +2083,15 @@ def _reinforce_ends(
                                 layers=("F.Cu", "B.Cu"),
                                 net=net_name,
                                 dedupe=True,
+                                tenting=("no", "no") if result.mask_opening else None,
                             )
                         result.placed.append(PlacedAnchor(x=a.x, y=a.y))
                     if len(leg.anchors) == 2:
                         leg.status = LEG_FULL
+                        if result.mask_opening:
+                            _plan_mask_opening(
+                                pcb, result, leg, points, cum, other, policy, dry_run
+                            )
                     elif leg.anchors:
                         leg.status = LEG_PARTIAL
                         leg.reason = (

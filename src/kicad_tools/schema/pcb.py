@@ -7098,6 +7098,7 @@ class PCB:
         net: str | None = None,
         dedupe: bool = True,
         via_type: str | None = None,
+        tenting: tuple[str, str] | None = None,
     ) -> Via | None:
         """
         Add a via at the specified position.
@@ -7125,6 +7126,10 @@ class PCB:
                 exists on the board.
             via_type: ``"micro"``, ``"blind"``, ``"buried"``, ``"through"``,
                 or ``None`` (default) to derive it from ``layers`` as above.
+            tenting: Optional per-via ``(front, back)`` tenting override, each
+                ``"yes"``, ``"no"`` or ``"none"`` (Issue #8743).  ``("no", "no")``
+                leaves the via's rings solder-mask open whatever the board-level
+                tenting is.  ``None`` (default) writes no override.
 
         Raises:
             ValueError: If ``via_type`` is not a via type KiCad knows.
@@ -7173,6 +7178,8 @@ class PCB:
             net_name_only=self._net_name_only_dialect and bool(net),
             uuid=self.mint_uuid("via", net_number, x, y, size, drill, *layers),
         )
+        if tenting is not None:
+            via.tenting_front, via.tenting_back = tenting
         self._vias.append(via)
 
         # Input position is board-relative (matches Footprint.position and
@@ -7183,6 +7190,69 @@ class PCB:
         self._sexp.append(via.to_sexp(offset=(ox, oy)))
 
         return via
+
+    def has_graphic_line(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        layer: str,
+        *,
+        absolute: bool = False,
+    ) -> bool:
+        """Whether a ``gr_line`` with these endpoints (either order) is on ``layer``.
+
+        Endpoints match within 11 um: gr_line nodes are written at 2 decimals, so a line read
+        back from disk differs from the in-memory value by rounding. Inputs are
+        board-relative unless ``absolute`` (sheet coordinates).
+        """
+        ox, oy = (0.0, 0.0) if absolute else self._board_origin
+        a = (start[0] + ox, start[1] + oy)
+        b = (end[0] + ox, end[1] + oy)
+        tol = 1.1e-2
+
+        def near(p: tuple[float, float], q: tuple[float, float]) -> bool:
+            return abs(p[0] - q[0]) <= tol and abs(p[1] - q[1]) <= tol
+
+        return any(
+            g.layer == layer
+            and ((near(g.start, a) and near(g.end, b)) or (near(g.start, b) and near(g.end, a)))
+            for g in self._graphic_lines
+        )
+
+    def add_graphic_line(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        layer: str,
+        width: float = 0.1,
+        dedupe: bool = True,
+    ) -> GraphicLine | None:
+        """Add a board-level ``gr_line`` (Issue #8743, e.g. a solder-mask opening).
+
+        ``start``/``end`` are board-relative (like :meth:`add_via`); the written
+        node is sheet-absolute.  With ``dedupe`` (default) a line already on the
+        same ``layer`` with the same endpoints (either direction, to 1 nm) is
+        not added again and ``None`` is returned.
+        """
+        from ..sexp.builders import gr_line_node
+
+        ox, oy = self._board_origin
+        a = (start[0] + ox, start[1] + oy)
+        b = (end[0] + ox, end[1] + oy)
+        if dedupe and self.has_graphic_line(a, b, layer, absolute=True):
+            return None
+        line = GraphicLine(
+            start=a,
+            end=b,
+            layer=layer,
+            width=width,
+            uuid=self.mint_uuid("gr_line", layer, a[0], a[1], b[0], b[1], width),
+        )
+        node = gr_line_node(a[0], a[1], b[0], b[1], layer, width, line.uuid)
+        self._sexp.append(node)
+        self._graphic_lines.append(line)
+        self._graphics.append(BoardGraphic.from_sexp(node, "line"))
+        return line
 
     def relocate_via(self, via: Via, new_position: tuple[float, float]) -> bool:
         """Move an existing via to a new board-relative position.
