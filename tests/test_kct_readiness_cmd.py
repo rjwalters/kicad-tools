@@ -2284,6 +2284,8 @@ def test_missing_spec_is_reported_not_silent_8727(tmp_path):
     assert check_status(report, "bom") == "failed"
     detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
     assert "D1" in detail and "no .kct spec found" in detail and "exemptions not applied" in detail
+    # #8764: names the user's board directory, never the deleted staging dir.
+    assert str(board) in detail and "kct-readiness-candidate" not in detail
 
 
 def test_unloadable_spec_is_reported_not_silent_8727(tmp_path):
