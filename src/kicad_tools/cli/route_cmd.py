@@ -6119,6 +6119,12 @@ def _native_drc_failure_advice(geo) -> list[str]:
 # "no errors".  Cleared at the start of each outermost invocation.
 _path_ampacity_errors: dict[str, frozenset[str]] = {}
 
+# Issue #8695: the same record for EVERY error-severity finding class
+# (``rule_id|message @ location``), so the chained completion pass can refuse
+# copper that added blocking errors of any kind, not only path_ampacity.
+# Same semantics: a missing entry means "not audited", never "clean".
+_drc_error_findings: dict[str, frozenset[str]] = {}
+
 
 def run_post_route_drc(
     output_path: Path,
@@ -6375,6 +6381,19 @@ def run_post_route_drc(
             if not quiet:
                 print(
                     "  Warning: could not record the path_ampacity audit "
+                    f"({record_exc}); a chained completion pass will treat this "
+                    "board as not audited"
+                )
+
+        _drc_error_findings.pop(_record_key, None)
+        try:
+            _drc_error_findings[_record_key] = frozenset(
+                f"{v.rule_id}|{v.message} @ {v.location}" for v in results.errors
+            )
+        except Exception as record_exc:
+            if not quiet:
+                print(
+                    "  Warning: could not record the post-route DRC errors "
                     f"({record_exc}); a chained completion pass will treat this "
                     "board as not audited"
                 )
@@ -19434,6 +19453,7 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
     with _process_state_guard():
         try:
             _path_ampacity_errors.clear()  # Issue #8674: per-invocation record
+            _drc_error_findings.clear()  # Issue #8695
             rc = _main_impl(argv)
             if rc != 0:
                 _list_unverified_sets(_interrupt_state.get("output_path"))
@@ -22130,6 +22150,33 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
                     "  Chained completion pass refused: its copper added "
                     f"{len(staged_errors - outer_errors)} path_ampacity error(s) "
                     "against the declared --current-paths; negotiated output kept"
+                )
+                return result
+        # Issue #8695: the inner exit 8 is returned before its DRC verdict is
+        # consulted, so compare every error-severity class (not only
+        # path_ampacity) and refuse copper that added blocking errors.
+        if not getattr(args, "skip_drc", False):
+            staged_all = _drc_error_findings.get(str(staged.resolve()))
+            outer_all = _drc_error_findings.get(str(output.resolve()))
+            if staged_all is None:
+                print(
+                    "  Chained completion pass refused: its copper was not audited "
+                    "(the pass's post-route DRC did not run, e.g. skipped for "
+                    "--timeout); negotiated output kept"
+                )
+                return result
+            added = staged_all if outer_all is None else staged_all - outer_all
+            if added:
+                classes = ", ".join(sorted({f.split("|", 1)[0] for f in added}))
+                why = (
+                    " (the negotiated board was not audited, so they could not be compared)"
+                    if outer_all is None
+                    else ""
+                )
+                print(
+                    "  Chained completion pass refused: its copper added "
+                    f"{len(added)} blocking DRC error(s) [{classes}]{why}; "
+                    "negotiated output kept"
                 )
                 return result
         # Sidecars first, the board last, so -o only changes once the rest is in place.

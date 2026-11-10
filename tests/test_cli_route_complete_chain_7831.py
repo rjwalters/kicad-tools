@@ -24,6 +24,22 @@ def _args(out: Path, **overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
+class _CleanByDefault(dict):
+    """Generic DRC record (Issue #8695) where an unrecorded board reads as clean.
+
+    Keeps the stubbed inner passes below, which never run a DRC, focused on what
+    they test; the #8695 tests install a plain dict to exercise "not audited".
+    """
+
+    def get(self, key, default=None):
+        return super().get(key, frozenset())
+
+
+@pytest.fixture(autouse=True)
+def _drc_record(monkeypatch):
+    monkeypatch.setattr(route_cmd, "_drc_error_findings", _CleanByDefault())
+
+
 @pytest.fixture
 def board(tmp_path: Path) -> Path:
     out = tmp_path / "out.kicad_pcb"
@@ -502,3 +518,68 @@ def test_skip_drc_note_needs_current_paths(board, monkeypatch, capsys):
     _pass_recording_ampacity(monkeypatch, None)
     assert _chain_complete_pass(_args(board, quiet=False, skip_drc=True), None, 2) == 2
     assert "NOT audited" not in capsys.readouterr().out
+
+
+def _pass_recording_drc(monkeypatch, staged_errors: set[str] | None, outer: set[str] | None):
+    """Stub the inner pass; record the generic DRC findings (None = never ran)."""
+
+    def fake_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("completed")
+        if staged_errors is not None:
+            route_cmd._drc_error_findings[str(staged.resolve())] = frozenset(staged_errors)
+        return 8
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    monkeypatch.setattr(route_cmd, "_drc_error_findings", {})
+
+
+def test_pass_adding_a_non_ampacity_error_is_refused(board, monkeypatch, capsys):
+    """Issue #8695: no --current-paths, a geometric error added by the pass."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, {"clearance|gap @ (1, 2)", "old|x @ (0, 0)"}, None)
+    route_cmd._drc_error_findings[str(board.resolve())] = frozenset({"old|x @ (0, 0)"})
+    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    out = capsys.readouterr().out
+    assert "refused" in out and "1 blocking DRC error(s) [clearance]" in out
+
+
+def test_pass_adding_no_error_is_promoted(board, monkeypatch):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, {"old|x @ (0, 0)"}, None)
+    route_cmd._drc_error_findings[str(board.resolve())] = frozenset(
+        {"old|x @ (0, 0)", "gone|y @ 1"}
+    )
+    assert _chain_complete_pass(_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_unaudited_pass_is_refused_without_current_paths(board, monkeypatch, capsys):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, None, None)
+    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    assert "not audited" in capsys.readouterr().out
+
+
+def test_errors_over_unaudited_negotiated_board_are_refused(board, monkeypatch, capsys):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, {"short|s @ 1"}, None)
+    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    assert "could not be compared" in capsys.readouterr().out
+
+
+def test_clean_pass_over_unaudited_negotiated_board_promoted_generic(board, monkeypatch):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, set(), None)
+    assert _chain_complete_pass(_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_skip_drc_skips_generic_audit(board, monkeypatch):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, None, None)
+    assert _chain_complete_pass(_args(board, skip_drc=True), None, 2) == 2
+    assert board.read_text() == "completed"
