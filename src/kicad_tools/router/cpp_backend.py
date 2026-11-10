@@ -5553,7 +5553,10 @@ def sync_authored_floors(cpp_grid: CppGrid, py_grid: RoutingGrid) -> None:
     impl = cpp_grid._impl
     floors = dict(getattr(py_grid.rules, "net_clearance_floors", None) or {})
     active = bool(floors) or getattr(py_grid, "_authored_item_floors", False) is True
-    key = (tuple(sorted(floors.items())), len(py_grid._pads), active)
+    # Issue #8577: a class map merged after loading can change a neutralised
+    # pad's item floor without touching the net floors or the pad count.
+    pad_version = getattr(py_grid, "_authored_pad_floor_version", 0)
+    key = (tuple(sorted(floors.items())), len(py_grid._pads), active, pad_version)
     previous = getattr(cpp_grid, "_authored_key", None)
     if previous == key or (previous is None and not active):
         cpp_grid._authored_key = key
