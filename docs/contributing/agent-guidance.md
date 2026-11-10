@@ -65,16 +65,29 @@ extension is the most likely cause of multi-minute-per-net routing.
 
 ### Check the acceleration backend before timing routes
 
-When a `RoutingGrid` is built with a `PerformanceConfig` on a GPU backend
-(MLX/CuPy), the pure-Python A* does per-cell scalar indexing that is
-slower than on NumPy (Issue #8609; the slowdown is unmeasured here -- #8609
-reports 10-12x on the default path, which this guard does not touch). `Router` now
-forces NumPy grid arrays as a defensive guard. The default `kct route` path
-builds the grid without a `config`, so it is NumPy regardless of installed
-extras; the original ~1,650 s vs ~140 s report is **not** explained by this
-and its real cause is unconfirmed. When benchmarking, check what is active:
-`uv pip list | grep -i -E 'mlx|cupy'`, and the `Grid using ... backend` log
-line from `RoutingGrid._select_backend`.
+The confirmed cause of slow routing under `--all-extras` (#8609 reported
+~1,650 s vs ~140 s on one board) is **scipy, not MLX/CuPy** (Issue #8657).
+`RoutingGrid._dilate_blocked`
+called `scipy.ndimage.binary_dilation` whenever scipy was importable, and
+scipy arrives transitively with the `bayesian`, `research` and `models`
+extras. That branch is removed: the dilation is now always the NumPy loop,
+so installed extras no longer change its speed or its result (the scipy
+branch also disagreed with the loop within `radius` cells of the grid edge).
+
+What was measured: on a synthetic 4 x 2001 x 2001 (16M-cell) grid, one
+wide-net pure-Python `Router.route` took ~1.8 s without scipy and ~17.5 s
+with it, almost all of it inside scipy's dilation. Adding only scipy made
+it slow; blocking only the scipy import made it fast again. The original
+full-board timing was **not** re-run, so whether this accounts for all of
+that gap is not established.
+
+Separately, when a `RoutingGrid` is built with a `PerformanceConfig` on a
+GPU backend (MLX/CuPy), the pure-Python A* does per-cell scalar indexing
+that is slower than on NumPy (unmeasured here). `Router` forces NumPy grid
+arrays as a defensive guard. The default `kct route` path builds the grid
+without a `config`, so it is NumPy regardless of installed extras. When
+benchmarking, check what is active: `uv pip list | grep -i -E 'mlx|cupy'`,
+and the `Grid using ... backend` log line from `RoutingGrid._select_backend`.
 `uv sync --all-extras` now resolves on macOS (`cupy-cuda12x` is skipped there).
 
 ### Rebuilding after editing C++ sources
