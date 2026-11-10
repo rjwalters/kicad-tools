@@ -2727,6 +2727,78 @@ class TestEndAnchorReviewMutations:
         assert [r.rule for r in result.refused] == [rule, rule]
 
 
+class TestEndAnchorEmptyAndHoleSpacing:
+    """Issue #8780: zero-length-only nets and the ``dedup_floor`` drill term."""
+
+    def test_zero_length_only_net_raises_reinforce_error(self):
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20.0, 50.0), (20.0, 50.0), width=2.0, layer="F.Cu", net="P")
+        with pytest.raises(ReinforceError, match="no walkable polyline"):
+            reinforce_net(pcb, "P", dry_run=True)
+
+    def test_zero_length_on_one_layer_real_copper_on_another(self):
+        pcb = _padded_straight_pcb()
+        pcb.add_trace((70.0, 50.0), (70.0, 50.0), width=2.0, layer="B.Cu", net="FUSED_LINE")
+        result = reinforce_net(pcb, "FUSED_LINE", dry_run=True)
+        assert result.placed_count == 2
+
+    @staticmethod
+    def _rules() -> DesignRules:
+        return DesignRules(
+            min_trace_width_mm=0.127,
+            min_clearance_mm=0.2,
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=0.25,
+            min_hole_to_hole_mm=0.8,
+        )
+
+    @pytest.mark.parametrize("gap", [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0])
+    def test_anchors_keep_hole_to_hole_with_drill_term(self, gap):
+        """The drill term wins (``drill + 0.8 > anchor_pad``): no two anchors,
+        on one leg or on adjacent legs, sit closer than
+        ``anchor_drill + min_hole_to_hole``. Fails if ``dedup_floor`` is
+        replaced by ``anchor_pad`` in ``plan_pair`` or ``violation_at``."""
+        rules = self._rules()
+        floor = _ANCHOR_DRILL + rules.min_hole_to_hole_mm
+        assert floor > _ANCHOR_PAD + 1e-6
+        # Two short collinear legs ``gap`` apart; lengths chosen so the
+        # two anchors of a leg fall between the pad and drill-term floors.
+        leg_len = 2 * (1.0 + _ANCHOR_PAD / 2) + _ANCHOR_PAD + 0.1
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20.0, 50.0), (20.0 + leg_len, 50.0), width=0.5, layer="F.Cu", net="N")
+        x2 = 20.0 + leg_len + gap
+        pcb.add_trace((x2, 50.0), (x2 + leg_len, 50.0), width=0.5, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", design_rules=rules, dry_run=True)
+        pts = [(a.x, a.y) for a in result.placed]
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                d = math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1])
+                assert d >= floor - 1e-6, (gap, pts)
+
+    @pytest.mark.parametrize("gap", [0.05, 0.1, 0.2, 0.28])
+    def test_adjacent_legs_keep_hole_to_hole_with_drill_term(self, gap):
+        """Adjacent legs whose facing end anchors would land between the pad
+        floor and the drill-term floor: the later leg's anchor must be
+        nudged/refused, not placed (kills ``dedup_floor -> anchor_pad`` in
+        ``violation_at``)."""
+        rules = self._rules()
+        floor = _ANCHOR_DRILL + rules.min_hole_to_hole_mm
+        assert _ANCHOR_PAD < _ANCHOR_PAD + gap < floor
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20.0, 50.0), (30.0, 50.0), width=0.5, layer="F.Cu", net="N")
+        pcb.add_trace((30.0 + gap, 50.0), (40.0 + gap, 50.0), width=0.5, layer="F.Cu", net="N")
+        result = reinforce_net(
+            pcb, "N", design_rules=rules, end_offset_mm=0.0, all_runs=True, dry_run=True
+        )
+        assert result.placed_count >= 2
+        pts = [(a.x, a.y) for a in result.placed]
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                d = math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1])
+                assert d >= floor - 1e-6, (gap, pts)
+
+
 def _random_pad(rng):
     shape = rng.choice(["rect", "oval", "roundrect", "circle"])
     if shape == "circle":
