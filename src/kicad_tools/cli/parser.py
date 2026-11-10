@@ -7289,6 +7289,17 @@ def _add_readiness_parser(subparsers) -> None:
         ),
     )
     rd_parser.add_argument(
+        "--baseline",
+        dest="readiness_baseline",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Previous revision (.kicad_pcb, board directory or bundle) to diff "
+            "against (Issue #8664). Introduced assembly-affecting warnings block "
+            "unless acknowledged with --ack-warnings"
+        ),
+    )
+    rd_parser.add_argument(
         "--ack-trace-quality",
         dest="readiness_ack_trace_quality",
         action="append",

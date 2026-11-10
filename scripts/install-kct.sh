@@ -701,6 +701,9 @@ sign-off.
    assembly risk) indefinitely. Record and compare warning counts rule-by-rule
    (`kct check`'s BY RULE breakdown, or per-rule counts derived from the
    `--output` JSON report's violations).
+   Compare against the previous revision with `kct check --diff OLD NEW`
+   (add `--strict` to exit 2 on any introduced warning), or pass
+   `kct readiness --baseline <previous>` at sign-off.
 CONVENTIONS_EOF
 }
 do_action "write .kct/CONVENTIONS.md" write_conventions

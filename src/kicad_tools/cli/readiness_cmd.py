@@ -866,6 +866,10 @@ class ReadinessOptions:
     cleanup_record: dict[str, Any] | None = None
     # Trace-quality acknowledgements (Issue #8633): ``rule_id -> reason``.
     ack_trace_quality: dict[str, str] = field(default_factory=dict)
+    # Previous revision to diff warnings against (Issue #8664): a board file,
+    # board directory or bundle.  ``baseline_record`` is filled in by Gate 4b.
+    baseline: Path | None = None
+    baseline_record: dict[str, Any] | None = None
 
     @property
     def root(self) -> Path:
@@ -1016,6 +1020,12 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
     ack = frozenset(rule.strip() for rule in (args.ack_warnings or "").split(",") if rule.strip())
 
+    baseline: Path | None = None
+    if getattr(args, "baseline", None):
+        baseline = Path(args.baseline).resolve()
+        if not baseline.exists():
+            return None, f"--baseline path not found: {baseline}"
+
     ack_trace: dict[str, str] = {}
     for item in getattr(args, "ack_trace_quality", None) or []:
         rule, _, reason = item.partition("=")
@@ -1040,6 +1050,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             output_dir=output_dir,
             evidence_dir=evidence_dir,
             ack_warnings=ack,
+            baseline=baseline,
             known_issues=tuple(known_issues),
             include_tht=bool(args.include_tht),
             archive=not args.no_archive,
@@ -1835,12 +1846,131 @@ def _gate_lvs(check_report: dict) -> tuple[CheckOutcome, dict]:
     )
 
 
+def _baseline_pcb(spec: Path) -> Path | None:
+    """Resolve ``--baseline`` (file, board dir or bundle) to a ``.kicad_pcb``."""
+    if spec.is_file():
+        return spec if spec.suffix == ".kicad_pcb" else None
+    if not spec.is_dir():
+        return None
+    found = _find_pcb(spec)
+    if found is not None:
+        return found
+    for pcb in sorted(spec.rglob("*.kicad_pcb")):
+        if not pcb.name.endswith("-bak.kicad_pcb"):
+            return pcb
+    return None
+
+
+def _baseline_candidates(options: ReadinessOptions) -> list[Path]:
+    """Previous boards/bundles sitting beside the output directory (Issue #8664)."""
+    parent = options.output_dir.parent
+    found: list[Path] = []
+    if not parent.is_dir():
+        return found
+    current = options.pcb.resolve()
+    for entry in sorted(parent.iterdir()):
+        is_board = entry.is_file() and entry.suffix == ".kicad_pcb" and entry.resolve() != current
+        is_bundle = (
+            entry.is_dir()
+            and entry.name.startswith(options.output_dir.name)
+            and entry.resolve() != options.output_dir.resolve()
+            and _baseline_pcb(entry) is not None
+        )
+        if is_board or is_bundle:
+            found.append(entry)
+    return found
+
+
+def _introduced_warning_counts(
+    options: ReadinessOptions, engines: Engines, check_report: dict
+) -> tuple[dict[str, int] | None, str | None]:
+    """Per-rule count of warnings introduced since ``options.baseline``.
+
+    Returns ``(counts, error)``; exactly one is non-``None``.
+    """
+    from kicad_tools.cli.check_diff import diff_reports
+
+    assert options.baseline is not None
+    pcb = _baseline_pcb(options.baseline)
+    if pcb is None:
+        return None, f"--baseline {options.baseline} contains no readable .kicad_pcb"
+    report_path = options.evidence_dir / "kct-check-baseline.json"
+    run = engines.kct_check(pcb, options.manufacturer, report_path, options.check_args)
+    if not run.ok or not report_path.is_file():
+        return None, f"baseline {pcb} could not be checked: {run.detail}"
+    try:
+        old = _read_json(report_path)
+    except (OSError, ValueError) as exc:
+        return None, f"baseline report unreadable: {exc}"
+    result = diff_reports(old, check_report)
+    counts: dict[str, int] = {}
+    for row in result["introduced"]:
+        if row.get("severity") == "warning":
+            rule = str(row.get("rule_id") or "unknown")
+            counts[rule] = counts.get(rule, 0) + 1
+    return dict(sorted(counts.items())), None
+
+
 def _gate_warning_review(
-    options: ReadinessOptions, check_report: dict
+    options: ReadinessOptions, check_report: dict, engines: Engines | None = None
 ) -> tuple[CheckOutcome, dict[str, int]]:
     """Gate 4b — per-rule warning table + assembly-affecting acknowledgement."""
     counts = _warning_counts(check_report)
     table = _format_warning_table(counts)
+    introduced: dict[str, int] = {}
+    if options.baseline is not None:
+        found, error = _introduced_warning_counts(options, engines or Engines(), check_report)
+        if found is None:
+            return (
+                CheckOutcome(
+                    name="warning_review",
+                    status=FAILED,
+                    detail=f"Baseline comparison failed: {error}",
+                    blockers=[f"Baseline comparison failed: {error}"],
+                ),
+                counts,
+            )
+        introduced = found
+        old_counts = {r: counts.get(r, 0) - n for r, n in introduced.items()}
+        options.baseline_record = {
+            "baseline": str(options.baseline),
+            "introduced": introduced,
+            "previous_counts": old_counts,
+        }
+    else:
+        candidates = _baseline_candidates(options)
+        if candidates:
+            names = ", ".join(c.name for c in candidates)
+            print(
+                f"NOTICE: previous revision found beside the output directory ({names}); "
+                "warnings were not compared. Pass --baseline <path> to diff against it "
+                "(Issue #8664).",
+                file=sys.stderr,
+            )
+    intro_block = sorted(
+        rule
+        for rule, n in introduced.items()
+        if n and rule in ASSEMBLY_AFFECTING_RULES and rule not in options.ack_warnings
+    )
+    if intro_block:
+        named = ", ".join(
+            f"{rule} +{introduced[rule]} (now {counts.get(rule, 0)})" for rule in intro_block
+        )
+        return (
+            CheckOutcome(
+                name="warning_review",
+                status=FAILED,
+                detail=(
+                    f"Assembly-affecting warnings introduced since baseline: {named}. "
+                    f"Table: {table}."
+                ),
+                blockers=[
+                    "Assembly-affecting warnings introduced since baseline "
+                    f"({named}); acknowledge with --ack-warnings or fix them."
+                ],
+            ),
+            counts,
+        )
     unacknowledged = sorted(
         rule
         for rule, count in counts.items()
@@ -1881,6 +2011,10 @@ def _gate_warning_review(
         )
     acked = sorted(options.ack_warnings & set(counts))
     suffix = f" Acknowledged: {', '.join(acked)}." if acked else ""
+    if introduced:
+        suffix += (
+            " Introduced since baseline (non-blocking): " + _format_warning_table(introduced) + "."
+        )
     return (
         CheckOutcome(
             name="warning_review",
@@ -2506,6 +2640,19 @@ def _write_readme(
             lines.append(
                 f"  ACCEPTED RISK: {rule} ({warning_counts[rule]} warning(s)) trace quality "
                 f"acknowledged: {reason}"
+            )
+    base = options.baseline_record
+    if base is not None:
+        lines.extend(
+            ["", "Warnings introduced since baseline", "----------------------------------"]
+        )
+        if not base["introduced"]:
+            lines.append("  none")
+        for rule, n in base["introduced"].items():
+            tag = "assembly-affecting" if rule in ASSEMBLY_AFFECTING_RULES else "advisory"
+            lines.append(
+                f"  {rule}: +{n} ({base['previous_counts'].get(rule, 0)} -> "
+                f"{warning_counts.get(rule, 0)}) [{tag}]"
             )
     record = options.cleanup_record
     if record is not None:
@@ -3537,7 +3684,7 @@ def _run_readiness_candidate(
     checks.append(lvs)
     metrics.update(lvs_metrics)
 
-    warning_review, warning_counts = _gate_warning_review(options, check_report)
+    warning_review, warning_counts = _gate_warning_review(options, check_report, engines)
     checks.append(warning_review)
 
     hv = _gate_hv_isolation(options)
@@ -3659,6 +3806,17 @@ def _print_report(result: ReadinessResult, options: ReadinessOptions) -> None:
     print()
     for check in report["checks"]:
         print(f"  [{check['status']:>8s}] {check['name']}: {check['detail']}")
+    base = options.baseline_record
+    if base is not None:
+        print()
+        print(f"  Warnings introduced since baseline {base['baseline']}:")
+        for rule, n in base["introduced"].items():
+            print(
+                f"    {rule}: +{n} ({base['previous_counts'].get(rule, 0)} -> "
+                f"{base['previous_counts'].get(rule, 0) + n})"
+            )
+        if not base["introduced"]:
+            print("    none")
     if report.get("known_issues"):
         print()
         print(f"  {len(report['known_issues'])} known issue(s):")
@@ -3753,6 +3911,17 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Comma-separated rule_ids whose assembly-affecting warnings are "
             "explicitly accepted; each becomes an accepted-risk line in README.txt"
+        ),
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Previous revision (.kicad_pcb, board directory or bundle) to diff against "
+            "(Issue #8664). Warnings introduced since then are listed per rule; "
+            "introduced assembly-affecting warnings block unless acknowledged with "
+            "--ack-warnings. Same comparison as `kct check --diff OLD NEW`."
         ),
     )
     parser.add_argument(

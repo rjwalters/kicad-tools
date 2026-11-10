@@ -1131,3 +1131,20 @@ def test_erc_list_types_needs_no_input():
     with patch("kicad_tools.cli.erc_cmd.main", return_value=0) as inner_main:
         assert kct_main(["erc", "--list-types"]) == 0
     assert inner_main.call_args[0][0] == ["--list-types"]
+
+
+def test_readiness_shim_forwards_baseline():
+    """``kct readiness --baseline X`` must reach the inner parser (#8664)."""
+    from kicad_tools.cli.commands.readiness import run_readiness_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["readiness", "board", "--verify", "--baseline", "prev"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        assert run_readiness_command(args) == 0
+    sub_argv = inner_main.call_args[0][0]
+    assert sub_argv[sub_argv.index("--baseline") + 1] == "prev", sub_argv
+
+    args = create_parser().parse_args(["readiness", "board"])
+    with patch("kicad_tools.cli.readiness_cmd.main", return_value=0) as inner_main:
+        run_readiness_command(args)
+    assert "--baseline" not in inner_main.call_args[0][0]
