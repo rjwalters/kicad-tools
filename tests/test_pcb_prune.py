@@ -2382,3 +2382,26 @@ def test_cli_prune_reaches_a_fixed_point_in_one_invocation(tmp_path):
     assert again.stats["segments_removed"] == 0
     assert again.stats.get("segments_split", 0) == 0
     assert len(PCB.load(p).segments) == 5
+
+
+def test_has_segment_counts_a_run_contained_in_a_wider_segment():
+    """Issue #8768: a stub run lying within an existing same-layer segment at
+    least as wide is already-present copper (``redundant_copper_covered`` would
+    flag the duplicate); partial overlap, narrower hosts and other layers are
+    not."""
+    from types import SimpleNamespace
+
+    from kicad_tools.pcb_prune import _has_segment, _Node
+
+    def model(width, layer="F.Cu"):
+        node = _Node("seg", [layer], (0.0, 0.0), (10.0, 0.0), width / 2.0)
+        return SimpleNamespace(nodes=[node])
+
+    run = ((2.0, 0.0), (5.0, 0.0))
+    assert _has_segment(model(0.15), set(), "F.Cu", *run, 0.15)  # contained
+    assert _has_segment(model(0.3), set(), "F.Cu", *run, 0.15)  # wider host
+    assert not _has_segment(model(0.15), set(), "F.Cu", (2.0, 0.0), (12.0, 0.0), 0.15)  # sticks out
+    assert not _has_segment(model(0.1), set(), "F.Cu", *run, 0.15)  # narrower host
+    assert not _has_segment(model(0.15), set(), "F.Cu", (2.0, 0.5), (5.0, 0.5), 0.15)  # off-line
+    assert not _has_segment(model(0.15, "B.Cu"), set(), "F.Cu", *run, 0.15)  # other layer
+    assert not _has_segment(model(0.15), {0}, "F.Cu", *run, 0.15)  # host removed

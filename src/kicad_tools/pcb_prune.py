@@ -1141,7 +1141,8 @@ def _has_segment(
     width: float,
 ) -> bool:
     """Does the net already hold a live ``layer`` track of ``width`` joining
-    ``a`` and ``b`` (either direction, ends within ``CENTRE_TOL``)?
+    ``a`` and ``b`` (either direction, ends within ``CENTRE_TOL``), or a track
+    at least that wide that contains the whole ``a -> b`` run?
 
     Compared by distance, not by ``_segment_dedup_key``: a 0.0125 mm-grid
     coordinate can sit on a half-quantum of that key's rounding (x = 40.9125
@@ -1151,10 +1152,18 @@ def _has_segment(
     for j, o in enumerate(model.nodes):
         if o.kind != "seg" or j in removed or layer not in o.layers:
             continue
-        if abs(o.radius * 2.0 - width) > CENTRE_TOL:
-            continue
-        if (math.dist(o.a, a) <= CENTRE_TOL and math.dist(o.b, b) <= CENTRE_TOL) or (
-            math.dist(o.a, b) <= CENTRE_TOL and math.dist(o.b, a) <= CENTRE_TOL
+        if abs(o.radius * 2.0 - width) <= CENTRE_TOL and (
+            (math.dist(o.a, a) <= CENTRE_TOL and math.dist(o.b, b) <= CENTRE_TOL)
+            or (math.dist(o.a, b) <= CENTRE_TOL and math.dist(o.b, a) <= CENTRE_TOL)
+        ):
+            return True
+        # Contained: both ends lie on a live segment at least as wide, so the
+        # stub's copper is already there and ``redundant_copper_covered`` would
+        # flag it (issue #8768).  A segment is convex, so ends on it suffice.
+        if (
+            o.radius * 2.0 >= width - CENTRE_TOL
+            and _pt_seg_dist(a, o.a, o.b) <= CENTRE_TOL
+            and _pt_seg_dist(b, o.a, o.b) <= CENTRE_TOL
         ):
             return True
     return False
