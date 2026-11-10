@@ -16,6 +16,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8715**: feat(sync): report and remove copper left on pads removed by a footprint swap
+- **Issue #8705** (closed): sync: report (and optionally remove) copper stranded by a pad-net change
+- **PR #8713**: feat: report and optionally remove copper stranded by pad-net changes in kct sync
 - **PR #8711**: chore(board-07): prune reviewed copper and re-derive authored escapes
 - **PR #8710**: fix: forward --length-match-groups to the chained completion pass
 - **PR #8709**: test: remove stale strict xfail on lattice hole-clearance test
