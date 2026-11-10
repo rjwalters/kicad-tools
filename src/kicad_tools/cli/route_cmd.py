@@ -6126,10 +6126,29 @@ def _native_drc_failure_advice(geo) -> list[str]:
 _path_ampacity_errors: dict[str, frozenset[str]] = {}
 
 # Issue #8695: the same record for EVERY error-severity finding class
-# (``rule_id|message @ location``), so the chained completion pass can refuse
+# (keyed by :func:`_drc_error_finding_key`), so the chained completion pass can refuse
 # copper that added blocking errors of any kind, not only path_ampacity.
 # Same semantics: a missing entry means "not audited", never "clean".
 _drc_error_findings: dict[str, frozenset[str]] = {}
+
+
+def _drc_error_finding_key(v) -> str:
+    """Record key of one post-route DRC error for the chained comparison.
+
+    ``rule_id|message @ location`` for every class, except ``connectivity``
+    (Issue #8702): its message carries the net's pad counts ("2 of 3 pads
+    stranded") and its location/items name the first stranded pad, so a pass
+    that connects only some of an open net's pads re-reports the SAME open net
+    under a new string and was refused as if it had added an error (measured
+    on boards/04-stm32-devboard).  Key it by net instead: a pass still refuses
+    when it strands a net that had no connectivity error, never when it only
+    advances one.  ``DRCViolation.key`` is not used: it keeps the first
+    stranded pad in ``items`` (the same drift) and collapses distinct
+    dimension errors on one net and layer into one key.
+    """
+    if v.rule_id == "connectivity" and v.nets:
+        return f"connectivity|{','.join(sorted(v.nets))}"
+    return f"{v.rule_id}|{v.message} @ {v.location}"
 
 
 def run_post_route_drc(
@@ -6396,7 +6415,7 @@ def run_post_route_drc(
         _drc_error_findings.pop(_record_key, None)
         try:
             _drc_error_findings[_record_key] = frozenset(
-                f"{v.rule_id}|{v.message} @ {v.location}" for v in results.errors
+                _drc_error_finding_key(v) for v in results.errors
             )
         except Exception as record_exc:
             if not quiet:
