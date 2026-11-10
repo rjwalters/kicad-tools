@@ -7823,8 +7823,10 @@ class RoutingGrid:
         of each ``route()`` call.  The per-neighbor check then becomes a
         single array lookup: ``expanded[layer, ny, nx]``.
 
-        The dilation uses ``scipy.ndimage.maximum_filter`` when available,
-        falling back to a pure-NumPy sliding-window maximum.
+        The dilation is a pure-NumPy Euclidean-disc shift-and-OR
+        (:meth:`_dilate_blocked`) with out-of-bounds treated as blocked.
+        It never uses scipy, so the result is the same in every
+        environment (Issue #8657).
 
         Issue #2559 / Epic #2556 Phase 1C: When ``partner_net`` is provided
         with a tighter ``partner_radius`` (< ``radius``), partner-owned
@@ -7958,6 +7960,12 @@ class RoutingGrid:
         roughly half the cells of the square kernel at the radii used in
         practice, so the dilation runs marginally *faster* than the
         previous ``maximum_filter`` path on typical boards.
+
+        Out-of-bounds cells count as **blocked** (the mask is padded with
+        ones), so every cell within ``radius`` of the grid edge is blocked:
+        a trace that wide cannot be centred there without leaving the
+        board.  The result does not depend on which optional packages are
+        installed (Issue #8657).
         """
         if radius <= 0:
             return base_blocked.copy() if isinstance(base_blocked, np.ndarray) else base_blocked
@@ -7971,40 +7979,33 @@ class RoutingGrid:
         # ``route()`` invocation (one per net) do not rebuild the disc.
         disc = self._get_disc_kernel(radius)
 
-        try:
-            from scipy.ndimage import binary_dilation  # type: ignore[import-untyped]
+        # Issue #8657: always the NumPy shift-and-OR, never scipy.  A
+        # ``scipy.ndimage.binary_dilation`` branch used to run whenever
+        # scipy happened to be importable; it padded with zeros, so its
+        # answer differed from this one within ``radius`` cells of the
+        # grid edge, and it was 8-17x slower on large grids.
+        kernel_size = 2 * radius + 1
+        padded = np.ones(
+            (
+                self.num_layers,
+                self.rows + 2 * radius,
+                self.cols + 2 * radius,
+            ),
+            dtype=np.bool_,
+        )
+        padded[
+            :,
+            radius : radius + self.rows,
+            radius : radius + self.cols,
+        ] = base_blocked
 
-            # The dilation is applied per layer (no cross-layer coupling);
-            # express the 3D structure as ``(1, 2r+1, 2r+1)`` so the layer
-            # axis is treated independently.
-            structure = np.zeros((1, disc.shape[0], disc.shape[1]), dtype=np.bool_)
-            structure[0] = disc
-            expanded = binary_dilation(base_blocked, structure=structure)
-            return expanded
-        except ImportError:
-            # Fallback: pure-NumPy disc dilation via padded shift-and-OR.
-            kernel_size = 2 * radius + 1
-            padded = np.ones(
-                (
-                    self.num_layers,
-                    self.rows + 2 * radius,
-                    self.cols + 2 * radius,
-                ),
-                dtype=np.bool_,
-            )
-            padded[
-                :,
-                radius : radius + self.rows,
-                radius : radius + self.cols,
-            ] = base_blocked
+        expanded = np.zeros_like(base_blocked)
+        for dy in range(kernel_size):
+            for dx in range(kernel_size):
+                if disc[dy, dx]:
+                    expanded |= padded[:, dy : dy + self.rows, dx : dx + self.cols]
 
-            expanded = np.zeros_like(base_blocked)
-            for dy in range(kernel_size):
-                for dx in range(kernel_size):
-                    if disc[dy, dx]:
-                        expanded |= padded[:, dy : dy + self.rows, dx : dx + self.cols]
-
-            return expanded
+        return expanded
 
     def _get_disc_kernel(self, radius: int) -> np.ndarray:
         """Return (and cache) the Euclidean-disc structuring element.
