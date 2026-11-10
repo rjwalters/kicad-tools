@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.router.current_paths import (
         CurrentPathSpec,
+        ParallelGroup,
         PathResolution,
         ThermalDesignCurrent,
         UnmodeledCopper,
@@ -196,6 +197,15 @@ class PathAmpacityRule(DRCRule):
                 results.add(self._unchecked_fusing_violation(spec))
 
             required_cache: dict[bool, float] = {}
+            grouped_ids = {
+                id(seg) for group in resolution.parallel_groups for seg in group.segments
+            }
+            for group in resolution.parallel_groups:
+                violation = self._parallel_group_violation(
+                    spec, thermal, group, design_rules, required_cache
+                )
+                if violation is not None:
+                    results.add(violation)
             for segment in resolution.segments:
                 layer = getattr(segment, "layer", "F.Cu")
                 external = self._is_external_layer(layer)
@@ -208,7 +218,9 @@ class PathAmpacityRule(DRCRule):
                     )
                     required_cache[external] = required_width_mm
 
-                if actual_width_mm < required_width_mm:
+                # Doubled copper is judged on its summed cross-section above,
+                # not branch by branch (issue #8790).
+                if actual_width_mm < required_width_mm and id(segment) not in grouped_ids:
                     results.add(
                         self._underwidth_violation(
                             spec=spec,
@@ -242,6 +254,56 @@ class PathAmpacityRule(DRCRule):
                 results.add(self._unmodeled_copper_violation(net_name, item))
 
         return results
+
+    def _parallel_group_violation(
+        self,
+        spec: CurrentPathSpec,
+        thermal: ThermalDesignCurrent,
+        group: ParallelGroup,
+        design_rules: DesignRules,
+        required_cache: dict[bool, float],
+    ) -> DRCViolation | None:
+        """Judge a doubled-copper group on its summed cross-section (issue #8790).
+
+        Each branch contributes ``width / required_width`` for its layer class
+        (its narrowest segment, so a pinch point limits the branch), which
+        weights outer vs inner copper correctly; the group passes when the
+        contributions sum to at least 1.  Current is not split by resistance.
+        """
+        capacity = 0.0
+        widths = []
+        for branch in group.branches:
+            ratios = []
+            for segment in branch:
+                external = self._is_external_layer(segment.layer)
+                required = required_cache.get(external)
+                if required is None:
+                    required = self._required_width_mm(
+                        thermal.current_a, design_rules, external=external
+                    )
+                    required_cache[external] = required
+                ratios.append(segment.width / required if required > 0 else float("inf"))
+            capacity += min(ratios)
+            widths.append(min(seg.width for seg in branch))
+        if capacity >= 1.0:
+            return None
+        first = group.branches[0][0]
+        loc_x, loc_y = self._segment_midpoint(first)
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity="error",
+            message=(
+                f"Current path {spec.name!r} ({spec.source.label()} -> "
+                f"{spec.sink.label()}) {group.describe()} too narrow for "
+                f"{thermal.description}: summed width {sum(widths):.3f}mm provides "
+                f"{capacity:.0%} of the IPC-2221 requirement"
+            ),
+            location=(loc_x, loc_y),
+            layer=first.layer,
+            actual_value=capacity,
+            required_value=1.0,
+            items=(spec.name, spec.net_name),
+        )
 
     def _unresolved_violation(self, resolution: PathResolution) -> DRCViolation:
         spec = resolution.spec
