@@ -230,6 +230,13 @@ def _output_table(analysis) -> None:
             print(f"    Schematic: {mm['schematic_footprint']}")
             print(f"    PCB:       {mm['pcb_footprint']}")
 
+    if analysis.pad_net_mismatches:
+        print(f"\n{'-' * 60}")
+        print(f"PAD NET MISMATCHES ({len(analysis.pad_net_mismatches)}):")
+        for mm in analysis.pad_net_mismatches:
+            old = mm["pcb_net"] or "(unconnected)"
+            print(f"  {mm['reference']}.{mm['pad']}: {old} -> {mm['schematic_net']}")
+
     if analysis.medium_confidence_matches or analysis.low_confidence_matches:
         print(f"\n{'-' * 60}")
         print("PROPOSED REFERENCE RENAMES:")

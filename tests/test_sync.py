@@ -3026,3 +3026,83 @@ class TestFootprintsEquivalent:
         assert _footprints_equivalent("Capacitor_SMD:C_0603", "C_0603")
         assert _footprints_equivalent("C_0603", "Capacitor_SMD:C_0603")
         assert not _footprints_equivalent("Capacitor_SMD:C_0603", "C_0402")
+
+
+class TestPadNetMismatches:
+    """Pad-net mismatch detection and apply (Issue #8703)."""
+
+    MM = {"reference": "R1", "pad": "2", "pcb_net": "GND", "schematic_net": "VCC"}
+
+    def test_mismatch_breaks_sync_and_is_actionable(self):
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        assert not analysis.is_in_sync
+        assert analysis.has_actionable_items
+
+    def test_to_dict_and_summary(self):
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        d = analysis.to_dict()
+        assert d["pad_net_mismatches"] == [self.MM]
+        assert d["summary"]["pad_net_mismatches"] == 1
+        assert "R1.2: GND -> VCC" in analysis.summary()
+
+    def test_find_uses_validator_and_filters_unconnected_schematic(self):
+        from kicad_tools.validate.netlist import SyncIssue
+
+        issues = [
+            SyncIssue("error", "net_mismatch", "m", "s", "R1", "VCC", "GND", "2"),
+            SyncIssue("error", "net_mismatch", "m", "s", "R2", "", "GND", "1"),
+        ]
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = Path("a.kicad_sch")
+        rec._pcb_path = Path("a.kicad_pcb")
+        with patch("kicad_tools.validate.netlist.NetlistValidator") as nv:
+            nv.return_value.pad_net_mismatches.return_value = issues
+            assert rec._find_pad_net_mismatches() == [self.MM]
+
+    def _reconciler(self):
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = Path("a.kicad_sch")
+        rec._pcb_path = Path("a.kicad_pcb")
+        return rec
+
+    def test_apply_dry_run_reports_without_assigning(self):
+        rec = self._reconciler()
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load") as load,
+            patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+            patch.object(rec, "_assign_nets") as assign,
+        ):
+            changes = rec.apply(analysis, dry_run=True)
+        load.assert_called_once()
+        assign.assert_not_called()
+        assert len(changes) == 1
+        c = changes[0]
+        assert (c.reference, c.change_type, c.old_value, c.new_value, c.applied) == (
+            "R1.2",
+            "assign_pad_net",
+            "GND",
+            "VCC",
+            False,
+        )
+
+    def test_apply_assigns_nets_and_saves(self, tmp_path):
+        rec = self._reconciler()
+        out = tmp_path / "out.kicad_pcb"
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load") as load,
+            patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+            patch.object(rec, "_assign_nets") as assign,
+        ):
+            changes = rec.apply(analysis, dry_run=False, output=out)
+        assign.assert_called_once_with(load.return_value, strict=True)
+        load.return_value.save.assert_called_once_with(str(out))
+        assert changes[0].applied
+
+    def test_strict_assign_failure_is_reported(self):
+        rec = self._reconciler()
+        with patch("kicad_tools.operations.netlist.export_netlist", side_effect=OSError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                rec._assign_nets(MagicMock(), strict=True)
+            rec._assign_nets(MagicMock())  # non-strict stays best-effort
