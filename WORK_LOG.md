@@ -16,6 +16,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8679**: fix: forward layer, HV, edge and current-path constraints to the chained completion pass
+- **PR #8682**: fix: take readiness baseline warning counts from the baseline report
+- **Issue #8673** (closed): readiness --baseline: previous_counts misreports old->new when findings were also resolved
 - **PR #8678**: fix: derive --complete links from kept-copper islands
 - **PR #8677**: fix: block NPTH holes on every copper layer in the grid router
 - **PR #8667**: feat(readiness): diff warnings against a previous revision with --baseline
