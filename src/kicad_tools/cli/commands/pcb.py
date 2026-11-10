@@ -845,6 +845,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     except Exception as e:
         print(f"Error pruning PCB: {e}", file=sys.stderr)
         return 1
+    assert res is not None  # _PRUNE_MAX_PASSES >= 1, so the loop ran at least once
 
     def _net(p) -> dict[str, Any]:
         return {
