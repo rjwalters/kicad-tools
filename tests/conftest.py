@@ -213,6 +213,31 @@ def _snapshot_hashes(rel_paths: list[str]) -> dict[str, str | None]:
     return snap
 
 
+def pytest_report_header(config):
+    """Show which kicad-cli the session uses (#8779)."""
+    from tests.kicad_docker_session import report_header
+
+    return report_header()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _pinned_kicad_toolchain():
+    """Under ``KCT_KICAD_DOCKER=1`` run the whole session on the pinned image (#8779).
+
+    No-op when the variable is unset.  If docker is missing or the version is
+    not ``PINNED_KICAD_VERSION`` the session exits with the reason instead of
+    quietly using the host's kicad-cli.
+    """
+    from kicad_tools.cli.kicad_toolchain import KiCadEnvironmentError
+    from tests.kicad_docker_session import pinned_session
+
+    try:
+        with pinned_session() as toolchain:
+            yield toolchain
+    except KiCadEnvironmentError as exc:
+        pytest.exit(f"KCT_KICAD_DOCKER=1 but the pinned kicad-cli is unusable: {exc}", returncode=2)
+
+
 @pytest.fixture(autouse=True)
 def _clear_find_kicad_cli_cache():
     """Reset the ``find_kicad_cli`` memoization around every test (#5903).
