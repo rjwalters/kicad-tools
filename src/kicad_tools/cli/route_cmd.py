@@ -21905,6 +21905,12 @@ def _chain_complete_argv(
         chain_argv.append("--no-reserve-plane-layers")
     if getattr(args, "auto_pour", True) is False:
         chain_argv.append("--no-auto-pour")
+    # Issue #8694: the pass runs on the lattice engine and reaches the same
+    # _run_match_group_tuning_phase as the outer run, which reads
+    # ``args.length_match_groups`` (the ``length_critical`` engage mode).  Without
+    # forwarding, the pass would only auto-tune via ``checker_limit``.
+    if getattr(args, "length_match_groups", False):
+        chain_argv.append("--length-match-groups")
     return chain_argv
 
 

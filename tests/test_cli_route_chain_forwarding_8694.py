@@ -31,6 +31,7 @@ NEW_FLAGS = (
     "--no-reserve-plane-layers",
     "--no-auto-pour",
     "--no-optimize",
+    "--length-match-groups",
 )
 
 
@@ -48,6 +49,7 @@ def test_default_chain_argv_gains_none_of_the_new_flags():
         "--no-reserve-plane-layers",
         "--no-auto-pour",
         "--no-optimize",
+        "--length-match-groups",
     ],
 )
 def test_boolean_flag_is_forwarded_when_set(flag):
