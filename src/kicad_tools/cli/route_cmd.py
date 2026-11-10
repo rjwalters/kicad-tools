@@ -3554,8 +3554,16 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
     ``router.existing_routes``, which the layer-escalation loop would otherwise
     lose when it re-reads a checkpoint-overwritten staged file.
 
+    Issue #8658: on a KiCad-10 name-only board the parser returns every trace
+    and via under net id 0.  Each route is re-keyed by its net name with the
+    loader's own rule (:func:`~kicad_tools.router.io.rekey_name_only_copper`),
+    so this list carries the same ids as ``router.existing_routes``.  Otherwise
+    the short check reads a new trace joining its own net's kept copper as a
+    short against "Net 0".  Copper with no resolvable net name stays at id 0.
+
     Returns an empty list when the file has no routed copper or cannot be read.
     """
+    from kicad_tools.router.io import _build_net_number_map, rekey_name_only_copper
     from kicad_tools.router.optimizer.pcb import parse_segments, parse_vias
     from kicad_tools.router.primitives import Route
 
@@ -3567,6 +3575,7 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
     segments_by_net = parse_segments(text)
     vias_by_net = parse_vias(text)
     all_net_names = set(segments_by_net) | set(vias_by_net)
+    net_map = _build_net_number_map(text)
 
     routes: list[Route] = []
     for net_name in sorted(all_net_names):
@@ -3575,6 +3584,7 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
         if not segs and not vias:
             continue
         net_id = segs[0].net if segs else vias[0].net
+        net_id, segs, vias = rekey_name_only_copper(net_id, net_name, segs, vias, net_map)
         routes.append(Route(net=net_id, net_name=net_name, segments=segs, vias=vias))
     return routes
 
