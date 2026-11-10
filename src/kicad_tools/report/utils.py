@@ -6,8 +6,11 @@ and the report CLI command.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
+import re
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -137,3 +140,50 @@ def _project_stem(pro_path: Path) -> str:
     except Exception:
         pass
     return pro_path.stem
+
+
+@dataclasses.dataclass
+class SchematicHierarchy:
+    """Result of :func:`walk_schematic_hierarchy`."""
+
+    #: The root schematic plus every reachable sub-sheet that was accepted.
+    sheets: list[Path]
+    #: Referenced sheets the caller's containment predicate rejected.
+    outside: list[Path]
+    #: Referenced sheets that are accepted but do not exist on disk.
+    missing: list[Path]
+
+
+def walk_schematic_hierarchy(
+    schematic: Path, contains: Callable[[Path], bool] | None = None
+) -> SchematicHierarchy:
+    """Follow ``(property "Sheetfile" ...)`` / ``(file ...)`` references.
+
+    The single sheet walker shared by ``kct readiness`` and the manufacturing
+    exporter (Issue #8752).  Containment stays the caller's choice: sheets for
+    which *contains* is false are reported in ``outside`` and not read
+    (readiness raises on them; the exporter skips them).  Cycles terminate.
+    """
+    found: dict[Path, None] = {}
+    outside: list[Path] = []
+    missing: list[Path] = []
+    pending = [schematic.resolve()]
+    seen: set[Path] = set()
+    while pending:
+        sheet = pending.pop()
+        if sheet in seen:
+            continue
+        seen.add(sheet)
+        if contains is not None and not contains(sheet):
+            outside.append(sheet)
+            continue
+        if not sheet.is_file():
+            missing.append(sheet)
+            continue
+        found[sheet] = None
+        text = sheet.read_text(errors="replace")
+        for name in re.findall(r'\(property\s+"Sheet(?:file|name)"\s+"([^"\n]+\.kicad_sch)"', text):
+            pending.append((sheet.parent / name).resolve())
+        for name in re.findall(r'\(file\s+"([^"\n]+\.kicad_sch)"\)', text):
+            pending.append((sheet.parent / name).resolve())
+    return SchematicHierarchy(sorted(found), outside, missing)
