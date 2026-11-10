@@ -6108,6 +6108,15 @@ def _native_drc_failure_advice(geo) -> list[str]:
     ]
 
 
+# Issue #8674: the ``path_ampacity`` errors (message + location) the last
+# post-route DRC found, per resolved board path.  Declared current paths are
+# audited after routing, never planned by a search, so the chained completion
+# pass compares its staged board against the negotiated one here to tell
+# whether its copper added any.  Cleared at the start of each outermost
+# invocation.
+_path_ampacity_errors: dict[str, frozenset[str]] = {}
+
+
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
@@ -6341,6 +6350,12 @@ def run_post_route_drc(
             current_path_specs=current_path_specs,
         )
         results = checker.check_all()
+        if current_path_specs:
+            _path_ampacity_errors[str(Path(output_path).resolve())] = frozenset(
+                f"{v.message} @ {v.location}"
+                for v in results.errors
+                if v.rule_id == "path_ampacity"
+            )
 
         error_count = results.error_count
         warning_count = results.warning_count
@@ -19396,6 +19411,7 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
 
     with _process_state_guard():
         try:
+            _path_ampacity_errors.clear()  # Issue #8674: per-invocation record
             rc = _main_impl(argv)
             if rc != 0:
                 _list_unverified_sets(_interrupt_state.get("output_path"))
@@ -19550,7 +19566,10 @@ def _route_parser() -> argparse.ArgumentParser:
             "that leaves signal nets open. By default, when the grid engine "
             "finishes with unconnected signal nets, one in-process --complete "
             "(lattice, existing copper fixed) pass runs on the output before "
-            "the exit code is decided; fully routed boards are untouched."
+            "the exit code is decided; fully routed boards are untouched. "
+            "The pass inherits --layers, --voltage-map and its lookup "
+            "settings, --edge-clearance and --current-paths (Issue #8674), "
+            "and is refused if its copper adds a path_ampacity error."
         ),
     )
     parser.add_argument(
@@ -21698,13 +21717,55 @@ def _chain_complete_argv(
     ``--complete-exclude-nets`` value so the inner pass never requests a net
     the outer run already refused to attempt.
 
-    Copper-affecting recipe flags are forwarded so the inner pass reserves and
-    places copper under the same rules as the outer route: via size,
-    clearance and trace width (only when the operator passed them, since their
-    resolved ``args`` values may come from the board or manufacturer), the net
-    class map, the plane-via reservation opt-outs and the deterministic
-    budget.  ``--auto-layers``, ``--route-engine`` and ``--grid`` are left out:
-    ``--complete`` deliberately picks its own engine and lattice.
+    The inner pass must reserve and place copper under the same rules as the
+    outer route, so every recipe flag that constrains copper is forwarded.
+
+    Forwarded whenever the outer run has a value:
+
+    * ``--manufacturer``, ``--seed``, ``--backend``, ``--copper``,
+      ``--net-class-map`` -- the fab tier, determinism and net classes.
+    * ``--complete-exclude-nets`` -- rebuilt from ``excluded_nets``.
+    * ``--per-net-iterations``, ``--deterministic-budget`` -- the search budget.
+    * ``--quiet``, ``--skip-drc``, ``--allow-offboard``,
+      ``--no-plane-via-reservation``, ``--no-reserve-pour-only-passives``.
+    * ``--layers`` (Issue #8674) unless it is ``auto``: the operator's stack is
+      passed by name, so the inner pass builds the same explicit stack instead
+      of re-detecting one from the routed board.  Under ``auto`` the operator
+      named no stack; the inner pass detects it from the board the outer run
+      wrote.
+    * ``--voltage-map`` (Issue #8674) -- the HV pairwise-clearance table the
+      lattice search rejects against and the completion creepage rollback
+      measures against.
+    * ``--current-paths`` / ``--no-current-paths`` (Issue #8674).  The path the
+      outer run actually loaded is forwarded, so a sidecar auto-discovered next
+      to the *input* board also reaches the inner pass, whose input is ``-o``.
+      No engine plans by the declared paths; the inner pass's post-route DRC
+      audits them (``path_ampacity``) and :func:`_chain_complete_pass` refuses
+      a pass whose copper added such an error.
+
+    Forwarded only when the operator passed them (their ``args`` values are
+    otherwise a parser default or were resolved from the board/manufacturer,
+    and the inner pass must resolve those itself):
+
+    * ``--via-drill``, ``--via-diameter``, ``--clearance``, ``--trace-width``.
+    * ``--edge-clearance`` (Issue #8674) -- ``args.edge_clearance`` is filled
+      from the manufacturer when omitted, so only an explicit value is passed.
+    * ``--creepage-standard``, ``--pollution-degree``, ``--material-group``,
+      ``--hv-threshold`` (Issue #8674) -- the ``--voltage-map`` lookup settings.
+
+    Deliberately not forwarded:
+
+    * ``--auto-layers``, ``--route-engine``, ``--grid`` and the grid-engine
+      search/strategy flags -- ``--complete`` picks its own engine (lattice),
+      lattice and single-attempt path.
+    * ``-o``, ``--complete-report``, ``--checkpoint``, ``--timeout`` and the
+      other per-invocation I/O and budget flags -- the pass has its own staged
+      output, and the ``--timeout`` deadline reaches it through the environment.
+
+    ``tests/test_cli_route_chain_forwarding_guard_8674.py`` enumerates every
+    ``kct route`` option and fails when one is neither forwarded here nor
+    listed there with a reason, so a new copper-affecting flag cannot be
+    dropped silently.
     """
     chain_argv = [str(output), "-o", str(staged), "--complete"]
     for flag, attr in (
@@ -21713,10 +21774,24 @@ def _chain_complete_argv(
         ("--backend", "backend"),
         ("--copper", "copper"),
         ("--net-class-map", "net_class_map"),
+        ("--voltage-map", "voltage_map"),  # Issue #8674
     ):
         value = getattr(args, attr, None)
         if value not in (None, ""):
             chain_argv.extend([flag, str(value)])
+    # Issue #8674: an explicit stack is inherited by name; "auto" names none.
+    layers = getattr(args, "layers", None)
+    if layers not in (None, "", "auto"):
+        chain_argv.extend(["--layers", str(layers)])
+    # Issue #8674: the file the outer run loaded (explicit or auto-discovered
+    # beside the input board), else the operator's own flag or opt-out.
+    current_paths = getattr(args, "_current_paths_input_path", None) or getattr(
+        args, "current_paths", None
+    )
+    if getattr(args, "no_current_paths", False):
+        chain_argv.append("--no-current-paths")
+    elif current_paths not in (None, ""):
+        chain_argv.extend(["--current-paths", str(current_paths)])
     exclude = set(excluded_nets) | {
         n.strip()
         for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
@@ -21729,6 +21804,13 @@ def _chain_complete_argv(
         ("--via-diameter", "via_diameter"),
         ("--clearance", "clearance"),
         ("--trace-width", "trace_width"),
+        # Issue #8674: args.edge_clearance is manufacturer-filled when omitted.
+        ("--edge-clearance", "edge_clearance"),
+        # Issue #8674: the --voltage-map lookup settings (value defaults).
+        ("--creepage-standard", "creepage_standard"),
+        ("--pollution-degree", "pollution_degree"),
+        ("--material-group", "material_group"),
+        ("--hv-threshold", "hv_threshold"),
     ):
         value = getattr(args, attr, None)
         if value is not None and _flag_passed_explicitly(argv, (flag,)):
@@ -21774,9 +21856,13 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     cleanly (0, or 8 for a partial improvement) and closed at least one net;
     otherwise it is discarded and ``-o`` was never touched.  A closing pass
     replaces the stale pre-pass exit code; a partial improvement keeps the
-    original one.  Copper-affecting recipe flags are forwarded
-    (:func:`_chain_complete_argv`); ``--grid``, ``--layers`` and the engine
-    flags are not, since ``--complete`` picks its own.
+    original one.  A pass whose copper added a ``path_ampacity`` error against
+    the declared ``--current-paths`` is refused with a message (Issue #8674):
+    those paths are audited, not planned, and the inner exit 8 does not consult
+    the audit.  Copper-affecting recipe flags -- the layer stack, the HV
+    voltage map, the edge clearance and the current paths included (Issue
+    #8674) -- are forwarded (:func:`_chain_complete_argv`); ``--grid`` and the
+    engine flags are not, since ``--complete`` picks its own.
     """
     if (
         getattr(args, "no_chain_complete", False)
@@ -21912,6 +21998,21 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
                     "  Chained completion pass closed no nets cleanly "
                     f"(exit {chain_rc}); negotiated output kept"
                 )
+            return result
+        # Issue #8674: no search plans by --current-paths; the post-route DRC
+        # audits them, and the inner exit 8 is returned before that audit is
+        # consulted.  Refuse copper that added a path_ampacity error.  An
+        # unaudited negotiated board (DRC skipped for --timeout) has none on
+        # record, so every error of the staged board counts as added.
+        ampacity_added = _path_ampacity_errors.get(
+            str(staged.resolve()), frozenset()
+        ) - _path_ampacity_errors.get(str(output.resolve()), frozenset())
+        if ampacity_added:
+            print(
+                "  Chained completion pass refused: its copper added "
+                f"{len(ampacity_added)} path_ampacity error(s) against the "
+                "declared --current-paths; negotiated output kept"
+            )
             return result
         # Sidecars first, the board last, so -o only changes once the rest is in place.
         # The receipt and constraint sidecars (.kicad_pro/.kicad_dru/.kicad_prl)
