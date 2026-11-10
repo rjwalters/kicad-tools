@@ -2285,23 +2285,14 @@ def _outside_root_message(what: str, kind: str, root_given: bool) -> str:
 
 def _schematic_hierarchy(schematic: Path, limit: Path, root_given: bool = True) -> list[Path]:
     """The schematic plus every sub-sheet it references, contained within *limit*."""
-    found: dict[Path, None] = {}
-    pending = [schematic.resolve()]
-    while pending:
-        sheet = pending.pop()
-        if sheet in found:
-            continue
-        if not sheet.resolve().is_relative_to(limit):
-            raise ValueError(_outside_root_message(str(sheet), "sheet", root_given))
-        if not sheet.is_file():
-            raise ValueError(f"Project dependency is missing: {sheet}")
-        found[sheet] = None
-        text = sheet.read_text(errors="replace")
-        for name in re.findall(r'\(property\s+"Sheet(?:file|name)"\s+"([^"\n]+\.kicad_sch)"', text):
-            pending.append((sheet.parent / name).resolve())
-        for name in re.findall(r'\(file\s+"([^"\n]+\.kicad_sch)"\)', text):
-            pending.append((sheet.parent / name).resolve())
-    return sorted(found)
+    from kicad_tools.report.utils import walk_schematic_hierarchy
+
+    walked = walk_schematic_hierarchy(schematic, lambda sheet: sheet.is_relative_to(limit))
+    if walked.outside:
+        raise ValueError(_outside_root_message(str(walked.outside[0]), "sheet", root_given))
+    if walked.missing:
+        raise ValueError(f"Project dependency is missing: {walked.missing[0]}")
+    return walked.sheets
 
 
 def _project_dependencies(
