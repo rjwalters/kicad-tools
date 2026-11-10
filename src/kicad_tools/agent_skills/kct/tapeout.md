@@ -133,6 +133,8 @@ The distinction is load-bearing: **matcher-broken → refuse the whole tapeout**
 
    **Print this table in the tapeout report.** Reporting an aggregate warning total alone ("N warnings") is **non-compliant** — an aggregate can satisfy a "matches baseline / non-regressive" check indefinitely while concealing an entire defect class. The per-rule table is the artifact that prevents that.
 
+   **Baseline step (Issue #8664).** A per-rule table for *this* revision cannot show a rule growing 14 → 40 between revisions. When a previous revision exists (an earlier `.kicad_pcb`, board directory or bundle), pass it: `kct readiness --baseline <previous>` diffs the Gate 1 report against the baseline's with the same finding-key comparison as `kct check --diff OLD NEW`, prints the warnings **introduced** per rule (old → new count), and lists them in `README.txt`. Introduced findings in an assembly-affecting rule make this gate **fail** unless that rule is in `--ack-warnings`; introduced findings in other rules are listed but do not block. An unreadable baseline fails the gate rather than being skipped. Without `--baseline`, readiness prints a notice if a previous board or bundle sits beside the output directory — pass `--baseline` rather than ignoring it.
+
 2. **Check the assembly-affecting rule set.** At minimum, the following rules are **assembly-affecting** (treat this set as a floor, not a ceiling — extend it when a new rule clearly affects assembly or is a manufacturer-profile floor):
 
    - `silk_over_copper` — silk over an exposed pad interferes with solder wetting

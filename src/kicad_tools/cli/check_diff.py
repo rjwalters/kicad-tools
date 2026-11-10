@@ -25,6 +25,11 @@ next to the board (net-class map, waivers, ``.kicad_pro``) come along.
 Exit codes: ``0`` no new error-severity findings (and no new warnings under
 ``--strict``); ``2`` regressions introduced; ``1`` a side could not be
 checked.
+
+Use ``--diff OLD NEW --strict`` as the build-script gate for warning
+regressions: without ``--strict`` a warnings-only regression exits ``0``.
+``kct readiness --baseline`` applies the same comparison at sign-off
+(Issue #8664).
 """
 
 from __future__ import annotations
