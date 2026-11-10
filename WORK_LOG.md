@@ -16,6 +16,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8725**: fix: honour gr_text rotation in silk over-copper/overlap/edge checks
+- **Issue #8724** (closed): kct check silk_over_copper / silk_overlap: a board-level gr_text rotated 90 degrees is measured as if upright
+- **PR #8721**: fix(optimize-traces): roll back nets that raise any kicad-cli rule count
+- **Issue #8720** (closed): optimize-traces --drc-aware (0.29.0): reports a new kicad-cli clearance error on the written board, then keeps the result and exits 0
+- **PR #8630**: fix: model JLC option groups as chips and explain CDP attach with no open tab
+- **PR #8722**: test(prune): assert convergence on sub-0.1 mm in-pad segments
+- **Issue #8719** (closed): kct pcb prune is not idempotent: repeated runs alternate between two board states (0.01-0.07 mm in-pad segments)
 - **PR #8718**: fix(route): key chained-pass connectivity errors by net, not message
 - **Issue #8702** (closed): Chained --complete DRC comparison: measure finding key and cover native kicad-cli findings
 - **PR #8715**: feat(sync): report and remove copper left on pads removed by a footprint swap
