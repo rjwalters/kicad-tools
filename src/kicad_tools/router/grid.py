@@ -452,8 +452,9 @@ def _sync_pad_to_cpp_grid(
     except ImportError:
         return
 
-    # Compute layer index (-1 for through-hole = all layers).
-    if pad.through_hole:
+    # Compute layer index (-1 for through-hole = all layers).  Issue #8675:
+    # a drilled NPTH (``drill > 0``) has its barrel on every copper layer.
+    if pad.through_hole or pad.drill > 0:
         layer_idx = -1
     else:
         try:
@@ -1086,6 +1087,10 @@ class SetupDeadlineExpired(Exception):
     reports a deadline stop. It is re-exported from ``pathfinder`` as
     ``_SetupDeadlineExpired``.
     """
+
+
+#: KiCad's default ``min_hole_clearance`` (mm); mirrors board_clearance_rules.
+_KICAD_HOLE_CLEARANCE_MM = 0.25
 
 
 class RoutingGrid:
@@ -2574,7 +2579,18 @@ class RoutingGrid:
         # inside a detected fine-pitch package's escape region.
         clearance = self._clearance_for_pin_pitch(pin_pitch, pad=pad)
 
-        if pad.through_hole:
+        # Issue #8675: an NPTH (``drill > 0`` without ``through_hole``) is a
+        # hole on EVERY copper layer, kept clear at hole-to-copper clearance.
+        is_npth = not pad.through_hole and pad.drill > 0
+        if is_npth:
+            half_w, half_h = pad_half_extents(pad)
+            effective_width = max(2 * half_w, pad.drill)
+            effective_height = max(2 * half_h, pad.drill)
+            clearance = max(
+                clearance,
+                _KICAD_HOLE_CLEARANCE_MM + self.rules.trace_width / 2,
+            )
+        elif pad.through_hole:
             if pad.width > 0 and pad.height > 0:
                 half_w, half_h = pad_half_extents(pad)
                 effective_width, effective_height = 2 * half_w, 2 * half_h
@@ -2596,8 +2612,8 @@ class RoutingGrid:
         gx1, gy1 = self.world_to_grid(x1, y1)
         gx2, gy2 = self.world_to_grid(x2, y2)
 
-        # PTH pads block all layers, SMD pads block only their layer
-        if pad.through_hole:
+        # PTH/NPTH pads block all layers, SMD pads block only their layer
+        if pad.through_hole or is_npth:
             layers_to_block = list(range(self.num_layers))
         else:
             layers_to_block = [self.layer_to_index(pad.layer.value)]
