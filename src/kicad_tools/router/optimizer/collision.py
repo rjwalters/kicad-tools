@@ -696,6 +696,43 @@ def _routed_copper_clear(
     return True
 
 
+def _rule_area_path_clear(
+    grid: Any, x1: float, y1: float, x2: float, y2: float, layer: Layer, width: float, net: int
+) -> bool:
+    """Issue #8760: the optimizer may not move a track into a keepout rule area.
+
+    A ``(tracks not_allowed)`` area is stamped as static ``blocked`` cells with
+    ``net == 0`` and neither ``is_obstacle`` nor ``pad_blocked``, a shape every
+    raster branch of the checkers treats as free -- so a shortcut/staircase
+    pass could straighten a detour right back through the area the search had
+    avoided.  Asks the installed areas directly, sampling the path one cell at
+    a time with the trace half-width as the disc radius (as the search does).
+    ``True`` for a grid with no rule areas or a test double without them.
+    """
+    areas = getattr(grid, "_rule_area_keepouts", None)
+    if not isinstance(areas, list | tuple) or not areas:
+        return True
+    try:
+        layer_idx = grid.layer_to_index(layer.value)
+    except Exception:
+        return True
+    track_areas = [
+        a for a in areas if a.blocks_tracks and layer_idx in a.layers and a.applies_to(net)
+    ]
+    if not track_areas:
+        return True
+    gx1, gy1 = grid.world_to_grid(x1, y1)
+    gx2, gy2 = grid.world_to_grid(x2, y2)
+    radius = int(np.ceil(width / 2 / grid.resolution))
+    steps = max(abs(gx2 - gx1), abs(gy2 - gy1), 1)
+    for i in range(steps + 1):
+        gx = round(gx1 + (gx2 - gx1) * i / steps)
+        gy = round(gy1 + (gy2 - gy1) * i / steps)
+        if any(area.hits_disc(gx, gy, radius) for area in track_areas):
+            return False
+    return True
+
+
 def _authored_path_clear(
     grid: Any, x1: float, y1: float, x2: float, y2: float, layer: Layer, width: float, net: int
 ) -> bool:
@@ -832,6 +869,8 @@ class GridCollisionChecker:
         """
         if not _authored_path_clear(self.grid, x1, y1, x2, y2, layer, width, exclude_net):
             return False
+        if not _rule_area_path_clear(self.grid, x1, y1, x2, y2, layer, width, exclude_net):
+            return False  # Issue #8760
         # Convert to grid coordinates
         gx1, gy1 = self.grid.world_to_grid(x1, y1)
         gx2, gy2 = self.grid.world_to_grid(x2, y2)
@@ -1202,6 +1241,8 @@ class VectorCollisionChecker:
         """
         if not _authored_path_clear(self.grid, x1, y1, x2, y2, layer, width, exclude_net):
             return False  # Issue #6243
+        if not _rule_area_path_clear(self.grid, x1, y1, x2, y2, layer, width, exclude_net):
+            return False  # Issue #8760
 
         # Resolve layer index
         try:
