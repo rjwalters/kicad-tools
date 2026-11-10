@@ -140,3 +140,19 @@ def test_assembly_prep_generate_verify_and_skip(tmp_path):
     pcb = PCB.load(str(p))
     assert FiducialsRule().check(pcb, None).violations == []
     assert BoardIdRule().check(pcb, None).violations == []
+
+
+def _silk(text: str) -> str:
+    return f'(gr_text "{text}" (at 5 5) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))'
+
+
+@pytest.mark.parametrize("text", ["batt", "swd data"])
+def test_board_id_short_revision_is_not_a_substring_match(tmp_path, text):
+    _, pcb = _load(tmp_path, _board(rev="A", extra=_silk(text)))
+    assert len(BoardIdRule().check(pcb, None).violations) == 1
+
+
+@pytest.mark.parametrize("text", ["REV A", "proj A 2026-01-01"])
+def test_board_id_short_revision_whole_token_passes(tmp_path, text):
+    _, pcb = _load(tmp_path, _board(rev="A", extra=_silk(text)))
+    assert BoardIdRule().check(pcb, None).violations == []
