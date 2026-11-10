@@ -277,6 +277,30 @@ class TestAsymmetryAndVisibility:
         pcb = _pcb(_fp(name=HLK_NAME, pads=_hlk_pads(), graphics=_hlk_graphics(marker=False)))
         assert _ids(_run(pcb)) == [(PIN1_MARKER_MISSING_RULE_ID, ("U1",))]
 
+    def test_marker_outside_fab_body_within_courtyard(self):
+        """Stock HLK-PMxx: mark ~1.1 mm outside the Fab body, inside the courtyard (#8731)."""
+
+        def graphics(marker: bool) -> list[FootprintGraphic]:
+            gs = [
+                _g("rect", layer="F.Fab", width=0.1, start=(-2.86, -7.75), end=(31.94, 12.75)),
+                _g("rect", layer="F.CrtYd", width=0.05, start=(-4.11, -9.0), end=(33.19, 14.0)),
+            ]
+            if marker:
+                gs.append(_g("poly", points=[(-3.97, 0.0), (-4.58, 0.44), (-4.58, -0.44)]))
+            return gs
+
+        ok = _fp(name=HLK_NAME, pads=_hlk_pads(), graphics=graphics(True))
+        assert _run(_pcb(ok)) == []
+        bad = _run(_pcb(_fp(name=HLK_NAME, pads=_hlk_pads(), graphics=graphics(False))))
+        assert _ids(bad) == [(PIN1_MARKER_MISSING_RULE_ID, ("U1",))]
+        # Message cites the radius actually used (courtyard reach), not the 2.5 mm floor.
+        assert "within 3.46mm of pad 1" in bad[0].message
+        assert bad[0].required_value == pytest.approx(3.46, abs=0.01)
+
+    def test_missing_message_cites_floor_without_outline(self):
+        found = _run(_pcb(_fp(graphics=[])))
+        assert "within 2.5mm of pad 1" in found[0].message
+
     def test_marker_graphic_indices_accepts_body_edge_triangle(self):
         graphics = _hlk_graphics(marker=True)
         fp = _fp(name=HLK_NAME, pads=_hlk_pads(), graphics=graphics)
