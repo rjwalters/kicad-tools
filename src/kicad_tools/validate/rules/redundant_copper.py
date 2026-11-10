@@ -180,7 +180,7 @@ class RedundantCopperRule(DRCRule):
                             message=(
                                 f"Track segment lies wholly on a longer collinear "
                                 f"segment: [{label}] on {seg.layer} "
-                                f"(removable with `kct pcb prune`)"
+                                f"(`kct pcb prune` removes this when safe)"
                             ),
                             location=seg.start,
                             layer=seg.layer,

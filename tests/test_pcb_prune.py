@@ -2360,3 +2360,25 @@ def test_cli_json_reports_audit_rejection_reason(tmp_path, capsys, forced_loopin
     assert _cli(tmp_path, p, "--no-drc", "--dry-run", "--current-paths", str(cp)) == 0
     out = json.loads(capsys.readouterr().out)
     assert "resolved to ambiguous" in out["rejected_by_drc"][0]["reject_reason"]
+
+
+def test_cli_prune_reaches_a_fixed_point_in_one_invocation(tmp_path):
+    """Issue #8730: two T-joint covered tracks sharing a container's end; a
+    split container piece is frozen for the rest of its pass, so the second
+    one is only found by a re-plan.  One CLI run must remove both and a second
+    run must find nothing."""
+    a, t1, t2, f = (115.7, 108.6), (119.3, 105.0), (117.5, 106.8), (127.3, 97.0)
+    segs = [
+        (a, f, "F.Cu", 0.2),
+        (a, t1, "F.Cu", 0.2),
+        (t1, (119.3, 103.0), "F.Cu", 0.2),
+        (a, t2, "F.Cu", 0.2),
+        (t2, (117.5, 104.0), "F.Cu", 0.2),
+    ]
+    pads = [("A", *a), ("F", *f), ("C", 119.3, 103.0), ("D", 117.5, 104.0)]
+    p = _board(tmp_path, pads, segs)
+    assert _cli(tmp_path, p, "--no-drc", "--unverified") == 0
+    _, again = _run(p)
+    assert again.stats["segments_removed"] == 0
+    assert again.stats.get("segments_split", 0) == 0
+    assert len(PCB.load(p).segments) == 5
