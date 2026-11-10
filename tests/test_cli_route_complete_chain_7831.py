@@ -583,3 +583,91 @@ def test_skip_drc_skips_generic_audit(board, monkeypatch):
     _pass_recording_drc(monkeypatch, None, None)
     assert _chain_complete_pass(_args(board, skip_drc=True), None, 2) == 2
     assert board.read_text() == "completed"
+
+
+def _stranded(net: str, stranded: int, total: int, pad: str, at: tuple[float, float]):
+    from kicad_tools.validate.violations import DRCViolation
+
+    return DRCViolation(
+        rule_id="connectivity",
+        severity="error",
+        message=(
+            f"Net '{net}' is partially routed: {stranded} of {total} pads stranded "
+            f"(connected island has {total - stranded} pads)"
+        ),
+        location=at,
+        items=(pad,),
+        nets=(net,),
+    )
+
+
+def _via_error(net: str, at: tuple[float, float]):
+    from kicad_tools.validate.violations import DRCViolation
+
+    return DRCViolation(
+        rule_id="dimension_via_drill",
+        severity="error",
+        message="Via drill 0.2mm < 0.3mm",
+        location=at,
+        nets=(net,),
+    )
+
+
+def _record(board: Path, violations) -> None:
+    route_cmd._drc_error_findings[str(board.resolve())] = frozenset(
+        route_cmd._drc_error_finding_key(v) for v in violations
+    )
+
+
+def test_pass_advancing_an_open_net_is_not_read_as_an_added_error(board, monkeypatch):
+    """Issue #8702: measured on boards/04 -- a pass that connects one more pad of
+    a net it does not finish re-reports that net's connectivity error with new
+    counts (and, when it connects the first stranded pad, a new location and
+    pad).  The same open net must keep its key, so the pass is promoted."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    old_via = _via_error("C", (1.0, 1.0))
+    baseline = [_stranded("B", 2, 3, "U1.4", (1.0, 2.0)), old_via]
+    post = [_stranded("B", 1, 3, "U1.7", (5.0, 6.0)), old_via]
+
+    def fake_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("completed")
+        _record(staged, post)
+        return 8
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    monkeypatch.setattr(route_cmd, "_drc_error_findings", {})
+    _record(board, baseline)
+    assert _chain_complete_pass(_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_pass_stranding_a_net_is_still_refused(board, monkeypatch, capsys):
+    """A connectivity error on a net that had none is still an added error."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+
+    def fake_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("completed")
+        _record(
+            staged, [_stranded("B", 1, 3, "U1.7", (5.0, 6.0)), _stranded("D", 1, 2, "R1.1", (0, 0))]
+        )
+        return 8
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    monkeypatch.setattr(route_cmd, "_drc_error_findings", {})
+    _record(board, [_stranded("B", 2, 3, "U1.4", (1.0, 2.0))])
+    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    assert "1 blocking DRC error(s) [connectivity]" in capsys.readouterr().out
+
+
+def test_other_classes_keep_their_location_in_the_key():
+    """Two via errors on one net and layer stay distinct (DRCViolation.key would
+    collapse them and mask a second one added by the pass)."""
+    a, b = _via_error("C", (1.0, 1.0)), _via_error("C", (2.0, 2.0))
+    assert a.key == b.key
+    assert route_cmd._drc_error_finding_key(a) != route_cmd._drc_error_finding_key(b)
+    assert route_cmd._drc_error_finding_key(
+        _stranded("B", 2, 3, "U1.4", (1.0, 2.0))
+    ) == route_cmd._drc_error_finding_key(_stranded("B", 1, 3, "U1.7", (5.0, 6.0)))
