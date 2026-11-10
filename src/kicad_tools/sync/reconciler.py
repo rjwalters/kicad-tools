@@ -649,13 +649,21 @@ class Reconciler:
                 analysis.add_footprint_actions.append(action)
 
         analysis.pad_net_mismatches = self._find_pad_net_mismatches()
-        analysis.stranded_copper = self._find_stranded_copper(analysis.pad_net_mismatches)
+        swaps = [
+            a for m in analysis.matches for a in m.actions if a.get("type") == "update_footprint"
+        ]
+        analysis.stranded_copper = self._find_stranded_copper(analysis.pad_net_mismatches, swaps)
 
         return analysis
 
-    def _find_stranded_copper(self, mismatches: list[dict[str, str]]) -> list[dict[str, str]]:
-        """Report copper left on the old net of pads whose net changed (Issue #8705)."""
-        if not mismatches or self._pcb_path is None:
+    def _find_stranded_copper(
+        self,
+        mismatches: list[dict[str, str]],
+        swaps: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, str]]:
+        """Report copper left on pads whose net changed or that a swap removes (Issue #8705)."""
+        swaps = swaps or []
+        if (not mismatches and not swaps) or self._pcb_path is None:
             return []
         from kicad_tools.schema.pcb import PCB
 
@@ -664,7 +672,49 @@ class Reconciler:
         except Exception as exc:
             logger.warning("Stranded-copper scan skipped: %s", exc)
             return []
-        return [info for _obj, info in self._collect_stranded(pcb, mismatches)]
+        seeds = list(mismatches) + self._removed_pad_seeds(pcb, swaps)
+        return [info for _obj, info in self._collect_stranded(pcb, seeds)]
+
+    def _removed_pad_seeds(self, pcb, swaps: list[dict[str, Any]]) -> list[dict[str, str]]:
+        """Seeds for pads present in the old footprint but absent from its replacement.
+
+        Pads are matched by pad number.  The replacement's pad numbers come from
+        a scratch copy of the PCB, so ``pcb`` is never modified.  Pads on no net
+        are skipped (no copper can be stranded on them).  A replacement that
+        cannot be loaded yields no seeds for that swap (Issue #8705).
+        """
+        if not swaps or self._pcb_path is None:
+            return []
+        from kicad_tools.schema.pcb import PCB
+
+        try:
+            scratch = PCB.load(str(self._pcb_path))
+        except Exception as exc:
+            logger.warning("Removed-pad scan skipped: %s", exc)
+            return []
+        seeds: list[dict[str, str]] = []
+        for action in swaps:
+            ref = action["reference"]
+            old_fp = pcb.get_footprint(ref)
+            if old_fp is None:
+                continue
+            try:
+                new_fp = scratch.add_footprint(
+                    library_id=action["new_value"],
+                    reference="__SCAN__",
+                    x=0.0,
+                    y=0.0,
+                )
+            except (FileNotFoundError, ValueError) as exc:
+                logger.warning("Removed-pad scan skipped for %s: %s", ref, exc)
+                continue
+            new_numbers = {p.number for p in new_fp.pads}
+            scratch.remove_footprint("__SCAN__")
+            for pad in old_fp.pads:
+                if pad.number in new_numbers or not pad.net_name:
+                    continue
+                seeds.append({"reference": ref, "pad": pad.number, "pcb_net": pad.net_name})
+        return seeds
 
     @staticmethod
     def _collect_stranded(
@@ -951,6 +1001,13 @@ class Reconciler:
         has_add_footprint = any(a["type"] == "add_footprint" for a in actions_to_apply)
         has_update_footprint = any(a["type"] == "update_footprint" for a in actions_to_apply)
 
+        # Copper on pads a footprint swap removes must be collected before the
+        # swap deletes the old pads and their attached segments (#8705).
+        swap_stranded: list[tuple[Any, dict[str, str]]] = []
+        if has_stranded_to_remove and has_update_footprint:
+            swaps = [a for a in actions_to_apply if a["type"] == "update_footprint"]
+            swap_stranded = self._collect_stranded(pcb, self._removed_pad_seeds(pcb, swaps))
+
         for action in actions_to_apply:
             if action["type"] == "add_footprint":
                 ref = action["reference"]
@@ -1000,7 +1057,17 @@ class Reconciler:
         if has_stranded_to_remove:
             to_remove_segs: list[Segment] = []
             to_remove_vias: list[Via] = []
-            for obj, info in self._collect_stranded(pcb, pad_net_mismatches):
+            merged = list(swap_stranded)
+            known = {id(o) for o, _i in merged}
+            merged += [
+                (o, i)
+                for o, i in self._collect_stranded(pcb, pad_net_mismatches)
+                if id(o) not in known
+            ]
+            live_segs = {id(s) for s in pcb.segments}
+            for obj, info in merged:
+                if info["kind"] == "segment" and id(obj) not in live_segs:
+                    continue  # already deleted by the footprint swap
                 locked = info["locked"] == "true"
                 if locked:
                     outcome = "locked (skipped)"

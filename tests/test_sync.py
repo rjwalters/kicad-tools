@@ -3304,6 +3304,79 @@ class TestStrandedCopper:
         }
         assert vals["segment:s2"] == "locked (skipped)"
 
+    SWAP = {
+        "type": "update_footprint",
+        "reference": "R1",
+        "old_value": "Old:FP",
+        "new_value": "New:FP",
+    }
+
+    def _swap_pcb(self, segs, vias, new_pad_numbers):
+        """PCB whose R1 has pads 1 and 2 on GND; the swap keeps only new_pad_numbers."""
+        from types import SimpleNamespace as NS
+
+        pcb = self._pcb(segs, vias)
+        old_fp = NS(
+            reference="R1",
+            position=(0.0, 0.0),
+            rotation=0.0,
+            layer="F.Cu",
+            value="",
+            pads=[
+                NS(number="1", net_name="GND", net_number=1),
+                NS(number="2", net_name="GND", net_number=1),
+            ],
+        )
+        pcb.footprints = [old_fp, *pcb.footprints[1:]]
+        pcb.get_footprint.side_effect = lambda r: old_fp if r == "R1" else None
+        pcb.get_pad_position.side_effect = lambda r, n: {
+            ("R1", "2"): (0.0, 0.0),
+            ("R1", "1"): (0.0, 5.0),
+            ("R2", "1"): (10.0, 0.0),
+        }.get((r, n))
+        scratch = MagicMock()
+        from types import SimpleNamespace as NS2
+
+        scratch.add_footprint.return_value = NS2(pads=[NS2(number=n) for n in new_pad_numbers])
+        return pcb, scratch
+
+    def test_removed_pad_seed_only_for_pads_absent_from_new_footprint(self):
+        pcb, scratch = self._swap_pcb([], [], ["1"])
+        rec = self._rec()
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=scratch):
+            seeds = rec._removed_pad_seeds(pcb, [self.SWAP])
+        assert seeds == [{"reference": "R1", "pad": "2", "pcb_net": "GND"}]
+
+    def test_pad_present_in_both_footprints_is_not_seeded(self):
+        pcb, scratch = self._swap_pcb([], [((0, 0), "GND", "v1")], ["1", "2"])
+        rec = self._rec()
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=scratch):
+            assert rec._removed_pad_seeds(pcb, [self.SWAP]) == []
+
+    def test_via_stub_on_removed_pad_is_reported_and_removed_on_apply(self, tmp_path):
+        # Segment is deleted by the swap itself; the via at the pad is not.
+        pcb, scratch = self._swap_pcb(
+            [((0, 0), (1, 0), "GND", "s1", False)], [((1, 0), "GND", "v1")], ["1"]
+        )
+        rec = self._rec()
+        analysis = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact", actions=(self.SWAP,))],
+            stranded_copper=[{"kind": "via"}],
+        )
+        pcb.remove_footprint.side_effect = lambda r: None
+        pcb.add_footprint.return_value = scratch.add_footprint.return_value
+        with patch("kicad_tools.schema.pcb.PCB.load", side_effect=[pcb, scratch]):
+            with (
+                patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+                patch.object(rec, "_assign_nets"),
+            ):
+                changes = rec.apply(
+                    analysis, dry_run=False, remove_stranded=True, output=tmp_path / "o"
+                )
+        removed_vias = pcb.remove_vias.call_args[0][0]
+        assert [v.uuid for v in removed_vias] == ["v1"]
+        assert any(c.change_type == "remove_stranded_copper" for c in changes)
+
     def test_analysis_wiring(self):
         a = SyncAnalysis(stranded_copper=[{"kind": "via"}])
         assert not a.is_in_sync and a.has_actionable_items
