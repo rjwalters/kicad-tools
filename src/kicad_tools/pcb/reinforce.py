@@ -351,6 +351,155 @@ class ReinforceError(ValueError):
     """Raised when the reinforce pass cannot proceed (e.g. unknown net)."""
 
 
+# --------------------------------------------------------------------------
+# ``--clear`` / ``--replace`` (Issue #8747): remove previously placed anchors
+# --------------------------------------------------------------------------
+
+#: Tolerance (mm) when matching a via's drill / pad to the anchor size.
+_ANCHOR_SIZE_TOL_MM = 1e-3
+
+#: Reason on a :class:`RefusedClear` whose removal would sever the net.
+CLEAR_REFUSED_SEVERS_NET = (
+    "removal would leave the net without its only layer link (copper that this "
+    "anchor joins would be disconnected)"
+)
+
+
+@dataclass
+class ClearedAnchor:
+    """An anchor via removed (or, in a dry run, that would be removed)."""
+
+    x: float
+    y: float
+
+
+@dataclass
+class RefusedClear:
+    """An anchor-sized via that was left in place by the connectivity guard."""
+
+    x: float
+    y: float
+    reason: str = CLEAR_REFUSED_SEVERS_NET
+
+
+@dataclass
+class ClearResult:
+    """Outcome of a :func:`clear_anchors` pass."""
+
+    net_name: str
+    wire_gauge_awg: int
+    anchor_drill_mm: float
+    anchor_pad_mm: float
+    removed: list[ClearedAnchor] = field(default_factory=list)
+    refused: list[RefusedClear] = field(default_factory=list)
+
+    @property
+    def removed_count(self) -> int:
+        return len(self.removed)
+
+    @property
+    def refused_count(self) -> int:
+        return len(self.refused)
+
+
+def _copper_component_count(model, removed: set[int]) -> int:
+    """Connected groups of the net's copper, ignoring isolated vias.
+
+    A group made only of vias (a stray via nothing is joined to) is not copper
+    anybody relies on, so it never counts -- removing a leaf or isolated
+    anchor must not look like a split.
+    """
+    comp = model.components(removed)
+    groups: set[int] = set()
+    for i, c in enumerate(comp):
+        if c != -1 and model.nodes[i].kind != "via":
+            groups.add(c)
+    return len(groups)
+
+
+def clear_anchors(
+    pcb: PCB,
+    net_name: str,
+    *,
+    wire_gauge_awg: int = DEFAULT_WIRE_GAUGE_AWG,
+    design_rules: DesignRules | None = None,
+    dry_run: bool = False,
+) -> ClearResult:
+    """Remove the buttress-wire anchors previously placed for ``net_name``.
+
+    An anchor is identified by size: a through via on ``net_name`` whose drill
+    and pad equal :func:`anchor_drill_for_awg` / :func:`anchor_pad_for_drill`
+    for ``wire_gauge_awg``. Vias of any other size, or on any other net, are
+    never touched. (A wire-list sidecar, #8744, would identify anchors exactly;
+    until it exists on the board this size rule is the only identification.)
+
+    Each removal goes through the connectivity model of
+    :mod:`kicad_tools.pcb_prune`: an anchor whose removal would split the net's
+    copper into more groups than before -- it is the net's only link between
+    layers or copper groups -- is refused and reported in
+    :attr:`ClearResult.refused`, and stays on the board. Candidates are
+    judged one at a time against the removals already accepted, so when several
+    anchors share a link, enough of them stay to keep it.
+
+    With ``dry_run`` the board is not modified.
+
+    Raises:
+        ReinforceError: If the net does not exist on the board.
+    """
+    from kicad_tools.pcb_prune import _build_net_models
+
+    rules = design_rules or _FALLBACK_DESIGN_RULES
+    net_obj = pcb.get_net_by_name(net_name)
+    if net_obj is None and not any(s.net_name == net_name for s in pcb.segments):
+        raise ReinforceError(f"net {net_name!r} not found on board")
+    net_number = net_obj.number if net_obj is not None else None
+
+    drill = anchor_drill_for_awg(wire_gauge_awg)
+    pad = anchor_pad_for_drill(drill, rules.min_annular_ring_mm)
+    result = ClearResult(
+        net_name=net_name,
+        wire_gauge_awg=wire_gauge_awg,
+        anchor_drill_mm=drill,
+        anchor_pad_mm=pad,
+    )
+
+    candidates = [
+        v
+        for v in pcb.vias
+        if v.via_type is None
+        and (
+            (net_number is not None and v.net_number == net_number)
+            or (net_number is None and v.net_name == net_name)
+        )
+        and abs(v.drill - drill) <= _ANCHOR_SIZE_TOL_MM
+        and abs(v.size - pad) <= _ANCHOR_SIZE_TOL_MM
+    ]
+    if not candidates:
+        return result
+
+    model = _build_net_models(pcb).get(candidates[0].net_number)
+    node_of = {}
+    if model is not None:
+        node_of = {id(n.ref): i for i, n in enumerate(model.nodes) if n.kind == "via"}
+
+    gone: set[int] = set()
+    baseline = _copper_component_count(model, set()) if model is not None else 0
+    accepted = []
+    for via in candidates:
+        idx = node_of.get(id(via))
+        if model is not None and idx is not None:
+            if _copper_component_count(model, gone | {idx}) > baseline:
+                result.refused.append(RefusedClear(x=via.position[0], y=via.position[1]))
+                continue
+            gone.add(idx)
+        accepted.append(via)
+        result.removed.append(ClearedAnchor(x=via.position[0], y=via.position[1]))
+
+    if accepted and not dry_run:
+        pcb.remove_vias(accepted)
+    return result
+
+
 def _seg_length(seg: Segment) -> float:
     (x1, y1), (x2, y2) = seg.start, seg.end
     return math.hypot(x2 - x1, y2 - y1)

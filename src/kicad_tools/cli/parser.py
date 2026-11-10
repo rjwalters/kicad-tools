@@ -2670,6 +2670,22 @@ def _add_pcb_parser(subparsers) -> None:
         action="store_true",
         help="Report anchors that would be placed/refused without writing files",
     )
+    pcb_reinforce.add_argument(
+        "--clear",
+        action="store_true",
+        help="Remove the anchors previously placed for --net (same-net through vias "
+        "whose drill and pad equal the --wire-gauge anchor size) and place none. "
+        "Other-size and other-net vias are never touched; a removal that would "
+        "leave the net without its only layer link is refused and reported. "
+        "Refill zone pours afterward.",
+    )
+    pcb_reinforce.add_argument(
+        "--replace",
+        action="store_true",
+        help="Clear the existing anchors for --net (as --clear), then place new "
+        "ones per --anchor-mode, in one write. Use to migrate a board reinforced "
+        "in spaced mode to the end anchors.",
+    )
 
     # pcb current-paths-audit (issue #4980)
     pcb_current_paths_audit = pcb_subparsers.add_parser(

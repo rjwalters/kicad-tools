@@ -2828,3 +2828,145 @@ class TestEndAnchorPropertySweep:
             self._check(pcb, [], {"trunk": _track_poly(trunk, width)}, result)
             anchored += sum(1 for leg in result.legs if leg.kind == "branch" and leg.anchors)
         assert anchored > self.CASES // 8
+
+
+# --------------------------------------------------------------------------
+# --clear / --replace (Issue #8747)
+# --------------------------------------------------------------------------
+
+
+def _anchor_dims(gauge: int = 16) -> tuple[float, float]:
+    from kicad_tools.pcb.reinforce import _FALLBACK_DESIGN_RULES
+
+    drill = anchor_drill_for_awg(gauge)
+    return drill, anchor_pad_for_drill(drill, _FALLBACK_DESIGN_RULES.min_annular_ring_mm)
+
+
+def _anchor_vias(pcb: PCB, net: str = "FUSED_LINE") -> list:
+    drill, pad = _anchor_dims()
+    return [
+        v
+        for v in pcb.vias
+        if v.net_name == net and abs(v.drill - drill) < 1e-3 and abs(v.size - pad) < 1e-3
+    ]
+
+
+def _spaced_reinforced_pcb() -> PCB:
+    pcb = _padded_straight_pcb(length=100.0)
+    res = reinforce_net(pcb, "FUSED_LINE", anchor_mode="spaced", spacing_mm=20.0)
+    assert res.placed_count > 2
+    return pcb
+
+
+class TestClearAnchors:
+    def test_clear_removes_only_anchor_sized_same_net_vias(self):
+        from kicad_tools.pcb.reinforce import clear_anchors
+
+        pcb = _spaced_reinforced_pcb()
+        n = len(_anchor_vias(pcb))
+        pcb.add_via(60.0, 52.5, size=0.8, drill=0.4, net="FUSED_LINE")  # other size
+        pcb.add_trace((30, 60), (60, 60), width=1.0, layer="F.Cu", net="OTHER")
+        drill, pad = _anchor_dims()
+        pcb.add_via(40.0, 60.0, size=pad, drill=drill, net="OTHER")  # other net
+
+        res = clear_anchors(pcb, "FUSED_LINE")
+        assert res.removed_count == n
+        assert res.refused_count == 0
+        assert _anchor_vias(pcb) == []
+        assert len(pcb.vias) == 2  # the other-size and other-net vias survive
+
+    def test_dry_run_lists_but_does_not_remove(self):
+        from kicad_tools.pcb.reinforce import clear_anchors
+
+        pcb = _spaced_reinforced_pcb()
+        n = len(_anchor_vias(pcb))
+        res = clear_anchors(pcb, "FUSED_LINE", dry_run=True)
+        assert res.removed_count == n
+        assert len(_anchor_vias(pcb)) == n
+
+    def test_nothing_to_clear(self):
+        from kicad_tools.pcb.reinforce import clear_anchors
+
+        res = clear_anchors(_padded_straight_pcb(), "FUSED_LINE")
+        assert res.removed_count == 0 and res.refused_count == 0
+
+    def test_unknown_net_raises(self):
+        from kicad_tools.pcb.reinforce import clear_anchors
+
+        with pytest.raises(ReinforceError):
+            clear_anchors(_padded_straight_pcb(), "NOPE")
+
+    def test_only_layer_link_is_refused(self):
+        from kicad_tools.pcb.reinforce import clear_anchors
+
+        pcb = PCB.create(width=200, height=120, center=False)
+        _add_pad_footprint(pcb, ref="RSH1", x=20, y=50, net="PGND")
+        _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="PGND")
+        pcb.add_trace((20, 50), (70, 50), width=3.0, layer="F.Cu", net="PGND")
+        drill, pad = _anchor_dims()
+        pcb.add_via(70.0, 50.0, size=pad, drill=drill, layers=("F.Cu", "B.Cu"), net="PGND")
+        pcb.add_trace((70, 50), (120, 50), width=3.0, layer="B.Cu", net="PGND")
+        # A leaf anchor mid-run on F.Cu: removable.
+        pcb.add_via(45.0, 50.0, size=pad, drill=drill, layers=("F.Cu", "B.Cu"), net="PGND")
+
+        res = clear_anchors(pcb, "PGND")
+        assert res.removed_count == 1
+        assert res.refused_count == 1
+        assert (res.refused[0].x, res.refused[0].y) == pytest.approx((70.0, 50.0))
+        assert len(pcb.vias) == 1
+
+
+class TestReinforceClearCLI:
+    def _board(self, tmp_path) -> Path:
+        pcb = _spaced_reinforced_pcb()
+        path = tmp_path / "board.kicad_pcb"
+        pcb.save(path)
+        return path
+
+    def test_clear_dry_run_writes_nothing(self, tmp_path, capsys):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        path = self._board(tmp_path)
+        before = path.read_text()
+        n = len(_anchor_vias(PCB.load(path)))
+        rc = run_pcb_command(_reinforce_args(path, clear=True, dry_run=True))
+        assert rc == 0
+        assert path.read_text() == before
+        assert f"{n} (would be removed)" in capsys.readouterr().out
+
+    def test_clear_removes_all_and_places_none(self, tmp_path, capsys):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        path = self._board(tmp_path)
+        rc = run_pcb_command(_reinforce_args(path, clear=True))
+        assert rc == 0
+        assert _anchor_vias(PCB.load(path)) == []
+        assert "refill zone pours" in capsys.readouterr().out
+
+    def test_clear_nothing_to_clear_exit_0(self, tmp_path, capsys):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb = _padded_straight_pcb()
+        path = tmp_path / "b.kicad_pcb"
+        pcb.save(path)
+        assert run_pcb_command(_reinforce_args(path, clear=True)) == 0
+        assert "Nothing to clear" in capsys.readouterr().out
+
+    def test_replace_leaves_exactly_two_end_anchors(self, tmp_path):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        path = self._board(tmp_path)
+        pcb = PCB.load(path)
+        pcb.add_via(60.0, 53.0, size=0.8, drill=0.4, net="FUSED_LINE")  # unrelated
+        pcb.save(path)
+        rc = run_pcb_command(_reinforce_args(path, replace=True, anchor_mode="ends"))
+        assert rc == 0
+        out = PCB.load(path)
+        assert len(_anchor_vias(out)) == 2
+        assert len(out.vias) == 3
+
+    def test_clear_and_replace_are_exclusive(self, tmp_path):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        path = self._board(tmp_path)
+        assert run_pcb_command(_reinforce_args(path, clear=True, replace=True)) == 1
