@@ -144,42 +144,52 @@ NOT_COPPER = {
     "--strict-drc",  # whether a missing kicad-cli fails the outer run's DRC
 }
 
+# Issue #8694: reviewed against the single-attempt tail the pass runs
+# (``_run_main_impl``).  Each is excluded for the stated evidence.
+COVERED_BY_OUTER_RUN = {
+    # Default-valued: the pass already runs at this value, and the opt-out
+    # (--no-reserve-plane-layers / --no-auto-pour) IS forwarded.
+    "--reserve-plane-layers",
+    "--auto-pour",
+    # Outer run writes the zones into -o (``zone_sexp``, route_cmd.py power-nets
+    # block) before the chain runs; the pass loads them as existing copper and
+    # re-adding would duplicate them.
+    "--power-nets",
+    # _run_post_save_stitching runs inside the outer run, before the chain, so
+    # the stitching vias are already in the board the pass loads.
+    "--stitch-power-planes",
+    # Repairs the outer run's DRC findings in the outer run; the pass is
+    # incremental over a board that run already repaired.
+    "--auto-fix",
+    "--auto-fix-passes",
+}
+
+# Governed nets are checked by ``_chain_coupled_routing_refusal``: the chain is
+# skipped (not forwarded) when the flag governs an open net.
+REFUSES_CHAIN_WHEN_GOVERNED = {
+    "--differential-pairs",
+    "--analog-nets",
+    "--diffpair-spacing",  # only read under --differential-pairs
+}
+
 # NOT FORWARDED, AND NOT REVIEWED.  Each of these is read (or may be read) on
 # the single-attempt path the pass runs, and can change the copper it places or
 # the rules it places copper under; the pass runs with the option's default
-# whatever the outer run was given.  That was already true before #8674, which
-# fixed the layer, HV, edge and current-path constraints only.  Moving an entry
-# out of this group means forwarding it AND checking that the lattice
-# completion honours it; do not move one to another group to make this test
-# pass.
+# whatever the outer run was given.  Issue #8694 reviewed the clearance/layer,
+# pour, post-route and coupled-routing families above; what remains is the
+# search/budget/bus flags and --length-match-groups (needs the net-class map to
+# know which open nets it governs; follow-up).  Moving an entry out of this
+# group means forwarding it AND checking that the lattice completion honours
+# it; do not move one to another group to make this test pass.
 NOT_FORWARDED_UNREVIEWED = {
-    # Clearance and layer rules.
-    "--via-clearance",
-    "--strict-pad-clearance",
-    "--fine-pitch-clearance",
-    "--strict-layers",
-    "--reserve-plane-layers",
-    "--no-reserve-plane-layers",
-    "--strict-in-pad-clearance",
-    "--micro-via-in-pad-fallback",
-    "--micro-via-size",
-    "--micro-via-drill",
     "--via-in-pad-last-resort",
     "--force",
-    # Pours, planes and their vias.
-    "--auto-pour",
-    "--no-auto-pour",
-    "--power-nets",
     "--allow-stranded-pour-pads",
     "--native-zone-clearance",
-    "--stitch-power-planes",
     "--reserve-skipped-plane-vias",
     "--reserve-pour-only-passives",  # the default; its negation IS forwarded
-    # Net classes and coupled routing.
-    "--analog-nets",
+    # Coupled routing and buses.
     "--auto-analog",
-    "--differential-pairs",
-    "--diffpair-spacing",
     "--diffpair-max-delta",
     "--diffpair-per-pair-timeout",
     "--length-match-diffpairs",
@@ -221,10 +231,6 @@ NOT_FORWARDED_UNREVIEWED = {
     "--no-cache",
     "--cache-only",
     # Post-route passes.
-    "--no-optimize",
-    "--raw",
-    "--auto-fix",
-    "--auto-fix-passes",
 }
 
 EXCLUSION_GROUPS = {
@@ -232,6 +238,8 @@ EXCLUSION_GROUPS = {
     "OWNED_BY_ONE_INVOCATION": OWNED_BY_ONE_INVOCATION,
     "COMPLETE_PICKS_ITS_OWN": COMPLETE_PICKS_ITS_OWN,
     "NOT_COPPER": NOT_COPPER,
+    "COVERED_BY_OUTER_RUN": COVERED_BY_OUTER_RUN,
+    "REFUSES_CHAIN_WHEN_GOVERNED": REFUSES_CHAIN_WHEN_GOVERNED,
     "NOT_FORWARDED_UNREVIEWED": NOT_FORWARDED_UNREVIEWED,
 }
 EXCLUDED = frozenset().union(*EXCLUSION_GROUPS.values())
@@ -259,6 +267,19 @@ MUST_FORWARD = {
     "--complete-exclude-nets",
     "--no-plane-via-reservation",
     "--no-reserve-pour-only-passives",
+    # Issue #8694
+    "--strict-layers",
+    "--strict-pad-clearance",
+    "--strict-in-pad-clearance",
+    "--micro-via-in-pad-fallback",
+    "--micro-via-size",
+    "--micro-via-drill",
+    "--via-clearance",
+    "--fine-pitch-clearance",
+    "--no-reserve-plane-layers",
+    "--no-auto-pour",
+    "--no-optimize",
+    "--raw",  # implies --no-optimize, which is what reaches the pass
 }
 
 
