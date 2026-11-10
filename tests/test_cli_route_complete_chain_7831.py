@@ -671,3 +671,23 @@ def test_other_classes_keep_their_location_in_the_key():
     assert route_cmd._drc_error_finding_key(
         _stranded("B", 2, 3, "U1.4", (1.0, 2.0))
     ) == route_cmd._drc_error_finding_key(_stranded("B", 1, 3, "U1.7", (5.0, 6.0)))
+
+
+def test_pass_adding_a_native_only_error_is_refused(board, monkeypatch, capsys):
+    """Issue #8717: a native-only class added by the pass is refused and named."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(
+        monkeypatch, {"native:shorting_items|s @ (1, 2)", "native:old|x @ (0, 0)"}, None
+    )
+    route_cmd._drc_error_findings[str(board.resolve())] = frozenset({"native:old|x @ (0, 0)"})
+    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    assert "[native:shorting_items]" in capsys.readouterr().out
+
+
+def test_pass_keeping_an_existing_native_error_is_promoted(board, monkeypatch):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, {"native:old|x @ (0, 0)"}, None)
+    route_cmd._drc_error_findings[str(board.resolve())] = frozenset({"native:old|x @ (0, 0)"})
+    assert _chain_complete_pass(_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
