@@ -2228,3 +2228,102 @@ def test_cli_rejects_unknown_net_and_bad_region(tmp_path, capsys):
     assert "NOPE" in capsys.readouterr().err
     assert _cli_prune(p, "--region", "10,10,5,20") == 1
     assert "x1 < x2" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Issue #8687: the prune plan must not turn a resolved declared-current net
+# ambiguous (a stub that runs parallel to the trunk it is anchored to).
+# ---------------------------------------------------------------------------
+
+
+def _looping_plan(net_number: int = 1, net_name: str = "SIG"):
+    from kicad_tools.pcb_prune import NetPlan
+
+    # Two pieces from pad A's centre to B's: a second path beside the trunk.
+    return NetPlan(
+        net_number,
+        net_name,
+        stubs=[
+            ("F.Cu", (100, 100), (102, 102), 0.2),
+            ("F.Cu", (102, 102), (105, 100), 0.2),
+        ],
+    )
+
+
+def _gate_board(tmp_path: Path) -> tuple[Path, Path]:
+    p = _board(tmp_path, [("A", 100, 100), ("B", 105, 100)], [((100, 100), (105, 100))])
+    return p, _specs(tmp_path)
+
+
+@pytest.fixture
+def forced_looping_plan(monkeypatch):
+    import kicad_tools.pcb_prune as mod
+
+    monkeypatch.setattr(mod, "plan_prune", lambda *a, **k: [_looping_plan()])
+
+
+def test_audit_gate_rejects_plan_that_resolves_to_ambiguous(tmp_path, forced_looping_plan):
+    from kicad_tools.router.current_paths import load_current_path_specs
+
+    p, cp = _gate_board(tmp_path)
+    pcb, res = prune_board(
+        p, verify_drc=False, current_paths=load_current_path_specs(cp), apply=True
+    )
+    assert not res.accepted
+    assert len(res.rejected) == 1
+    assert "resolved to ambiguous" in res.rejected[0].reject_reason
+    assert len(pcb.segments) == 1  # nothing was added
+
+
+def test_audit_gate_uses_discovered_sidecar(tmp_path, forced_looping_plan):
+    p, cp = _gate_board(tmp_path)
+    cp.rename(tmp_path / "current_paths.json")
+    pcb, res = prune_board(p, verify_drc=False)
+    assert len(res.rejected) == 1 and not res.accepted
+    # Discovery only feeds the gate: no loop-audit report is produced.
+    assert res.uncut_loops == []
+
+
+def test_audit_gate_inactive_without_specs(tmp_path, forced_looping_plan):
+    p, _ = _gate_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=False)
+    assert len(res.accepted) == 1 and not res.rejected
+
+
+def test_audit_gate_warns_and_continues_on_unparsable_sidecar(tmp_path, forced_looping_plan):
+    p, _ = _gate_board(tmp_path)
+    (tmp_path / "current_paths.json").write_text("{not json")
+    _, res = prune_board(p, verify_drc=False)
+    assert len(res.accepted) == 1 and not res.rejected
+
+
+def test_audit_gate_is_per_net(tmp_path, monkeypatch):
+    import kicad_tools.pcb_prune as mod
+    from kicad_tools.pcb_prune import NetPlan
+    from kicad_tools.router.current_paths import load_current_path_specs
+
+    p, cp = _gate_board(tmp_path)
+    other = NetPlan(2, "OTHER", stubs=[("F.Cu", (90, 90), (91, 90), 0.2)])
+    monkeypatch.setattr(mod, "plan_prune", lambda *a, **k: [_looping_plan(), other])
+    _, res = prune_board(
+        p, verify_drc=False, current_paths=load_current_path_specs(cp), apply=False
+    )
+    assert [x.net_name for x in res.rejected] == ["SIG"]
+    assert [x.net_name for x in res.accepted] == ["OTHER"]
+
+
+def test_cli_json_lists_added_stubs_per_net(tmp_path, capsys):
+    segs = [((100, 100), (104.82, 100))]
+    p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100.08)])
+    assert _cli(tmp_path, p, "--no-drc", "--dry-run") == 0
+    out = json.loads(capsys.readouterr().out)
+    stubs = out["nets"][0]["stubs_added"]
+    assert len(stubs) == 2
+    assert {"layer", "start", "end", "width"} == set(stubs[0])
+
+
+def test_cli_json_reports_audit_rejection_reason(tmp_path, capsys, forced_looping_plan):
+    p, cp = _gate_board(tmp_path)
+    assert _cli(tmp_path, p, "--no-drc", "--dry-run", "--current-paths", str(cp)) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "resolved to ambiguous" in out["rejected_by_drc"][0]["reject_reason"]
