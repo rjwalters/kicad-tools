@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8655**: chore(release): v0.29.0
+- **PR #8654**: test: cover project_rules call sites in kct check and readiness report
+- **PR #8626**: chore(deps): bump astral-sh/setup-uv from 10.3.0 to 10.3.2 in the github-actions group across 1 directory
+- **Issue #8652** (closed): test: cover kct check stderr warning and readiness 'warnings' wiring for project_rules (follow-up to #8648)
 - **PR #8651**: fix: route-link honours project netclass clearances
 - **PR #8647**: fix: share setup/search deadline budget and bound blocked-mask dilation
 - **PR #8646**: fix: raise back-off floor above HV mask setup time so backed-off nets reach A*
