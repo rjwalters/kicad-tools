@@ -1195,6 +1195,32 @@ def run_fill_zones(
     return result
 
 
+def relieve_solid_overrides(
+    pcb_path: Path,
+    output_path: Path | None = None,
+    kicad_cli: Path | None = None,
+) -> Path:
+    """Issue #8659: retry thermal relief on stale solid pad overrides.
+
+    Copies to ``output_path`` when given, then runs the refill/DRC loop with
+    ``revisit_solid=True``.  Returns the path of the resulting board.
+    """
+    import shutil
+
+    kicad_cli = kicad_cli or find_kicad_cli()
+    if kicad_cli is None:
+        raise FileNotFoundError("kicad-cli not found")
+    target = output_path or pcb_path
+    if target != pcb_path:
+        shutil.copy2(pcb_path, target)
+
+    def _carve(path: Path) -> None:
+        _apply_foreign_pad_clearance(path)
+
+    _remediate_starved_thermal(target, kicad_cli, settle=_carve, revisit_solid=True)
+    return target
+
+
 #: Issue #6273: a remediation step is only started when the time left covers
 #: its estimated kicad-cli cost times this factor.
 _REMEDIATION_DEADLINE_SAFETY = 1.25
@@ -1209,6 +1235,7 @@ def _remediate_starved_thermal(
     skip_first_refill: bool = False,
     time_left: Callable[[], float | None] | None = None,
     refill_cost_estimate: float = 0.0,
+    revisit_solid: bool = False,
 ) -> dict | None:
     """Remediate the pads KiCad's DRC flags (Issue #3729).
 
@@ -1240,6 +1267,11 @@ def _remediate_starved_thermal(
     left as produced.
 
     Args:
+        revisit_solid: Issue #8659.  Strip stale per-pad ``(zone_connect 2)``
+            overrides on two-pad parts and through-hole pins before pass 0, so
+            the loop re-decides each pad on measured geometry (relief where it
+            fits, solid again only where relief starves).  Forces pass 0 to
+            refill, overriding ``skip_first_refill``.
         skip_first_refill: When ``True``, step (1) is skipped on the very
             first pass only -- the caller asserts ``pcb_path`` is already a
             freshly filled, saved board (Issue #5617), so pass 0's own
@@ -1267,6 +1299,7 @@ def _remediate_starved_thermal(
             force_solid_on_isolated_island_pads,
             force_solid_on_pads_by_uuid,
             isolated_copper_zone_uuids,
+            revisit_solid_pad_overrides,
             starved_thermal_pad_uuids,
         )
     except Exception:
@@ -1292,6 +1325,11 @@ def _remediate_starved_thermal(
         return left >= estimate * _REMEDIATION_DEADLINE_SAFETY
 
     try:
+        if revisit_solid:
+            revisit_doc = parse_file(pcb_path)
+            if revisit_solid_pad_overrides(revisit_doc):
+                save_pcb(revisit_doc, pcb_path)
+            skip_first_refill = False  # overrides changed: pass 0 must refill
         for pass_num in range(max_passes):
             if not _affordable(2):
                 return None  # Issue #6273: out of --timeout budget; keep the fill.

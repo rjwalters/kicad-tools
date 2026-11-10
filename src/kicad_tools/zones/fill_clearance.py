@@ -1041,6 +1041,36 @@ def force_solid_on_pads_by_uuid(
     return changed
 
 
+def revisit_solid_pad_overrides(doc: SExp) -> int:
+    """Drop stale per-pad ``(zone_connect 2)`` overrides so they can be re-decided.
+
+    Issue #8659: the starved-thermal repair writes ``(zone_connect 2)`` on a
+    pad when no relief rung fit *at the time*, and the override then lives for
+    the life of the board even after a later revision makes it unnecessary.
+    This removes the solid override from pads of two-pad parts and from
+    through-hole pins only (multi-pin SMD pads are untouched), returning the
+    number removed.  The refill/DRC loop then puts solid back exactly where
+    relief would starve (``_remediate_starved_thermal(revisit_solid=True)``).
+
+    Only the explicit solid code is removed: ``(zone_connect 0|1|3)`` are
+    deliberate choices and stay.
+    """
+    removed = 0
+    for fp in _find_all_footprints(doc):
+        pads = fp.find_all("pad")
+        two_pad_part = len(pads) == 2
+        for pad in pads:
+            node = pad.find("zone_connect")
+            if node is None or node.get_int(0) != _ZONE_CONNECT_SOLID:
+                continue
+            if not (two_pad_part or pad.get_string(1) == "thru_hole"):
+                continue
+            pad.children.remove(node)
+            removed += 1
+            logger.info("revisiting solid thermal override on %s", _footprint_label(fp, pad))
+    return removed
+
+
 def normalize_zone_pad_connection(
     doc: SExp,
     mode: str = _SELECTIVE_MODE,

@@ -6,6 +6,7 @@ filling zones using kicad-cli:
     kicad-tools zones add board.kicad_pcb --net GND --layer B.Cu
     kicad-tools zones list board.kicad_pcb
     kicad-tools zones fill board.kicad_pcb
+    kicad-tools zones relieve board.kicad_pcb
 """
 
 import argparse
@@ -18,6 +19,30 @@ from kicad_tools.cli.format_options import add_format_flag, emit_json
 def _wants_json(args) -> bool:
     """True when the canonical ``--format json`` spelling was requested."""
     return getattr(args, "format", "text") == "json"
+
+
+def _thermal_asymmetry_count(pcb_path: Path) -> int | None:
+    """Issue #8659: number of ``thermal_asymmetry`` findings, ``None`` if unreadable."""
+    try:
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.validate.rules.thermal_asymmetry import ThermalAsymmetryRule
+
+        results = ThermalAsymmetryRule().check(PCB.load(pcb_path), None)
+        return len(list(results))
+    except Exception:
+        return None
+
+
+def _warn_if_asymmetry_rose(before: int | None, pcb_path: Path, payload: dict) -> None:
+    """Print one warning line when ``thermal_asymmetry`` rose (Issue #8659)."""
+    after = _thermal_asymmetry_count(pcb_path)
+    payload["thermal_asymmetry"] = {"before": before, "after": after}
+    if before is not None and after is not None and after > before:
+        print(
+            f"Warning: thermal_asymmetry findings rose {before} -> {after} "
+            f"(tombstoning risk); try `kct zones relieve {pcb_path}`",
+            file=sys.stderr,
+        )
 
 
 def _fail(args, message: str) -> int:
@@ -347,6 +372,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     add_format_flag(fill_parser)
 
+    # zones relieve
+    relieve_parser = subparsers.add_parser(
+        "relieve",
+        help="Retry thermal relief on stale solid pad overrides, then refill",
+    )
+    relieve_parser.add_argument("pcb", help="Path to .kicad_pcb file")
+    relieve_parser.add_argument(
+        "-o", "--output", help="Output file path (default: overwrites input)"
+    )
+    relieve_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output"
+    )
+    add_format_flag(relieve_parser)
+
     args = parser.parse_args(argv)
 
     if not args.zones_command:
@@ -363,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_hv_keepout(args)
     elif args.zones_command == "fill":
         return _run_fill(args)
+    elif args.zones_command == "relieve":
+        return _run_relieve(args)
 
     return 0
 
@@ -461,10 +502,12 @@ def _run_add(args) -> int:
     if not quiet:
         print(f"\nSaving to: {output_path}")
 
+    asym_before = _thermal_asymmetry_count(pcb_path)
     try:
         gen.save(output_path)
     except Exception as e:
         return _fail(args, f"Error: Write verification failed: {e}")
+    _warn_if_asymmetry_rose(asym_before, output_path, payload)
 
     if json_mode:
         payload["saved"] = True
@@ -1024,12 +1067,14 @@ def _run_fill(args) -> int:
     if not quiet:
         print(f"Filling zones in: {pcb_path}")
 
+    asym_before = _thermal_asymmetry_count(pcb_path)
     result = run_fill_zones(pcb_path, output_path, kicad_cli=kicad_cli)
 
     if not result.success:
         return _fail(args, f"Error: {result.stderr}")
 
     target = output_path if output_path else pcb_path
+    _warn_if_asymmetry_rose(asym_before, target, payload)
 
     # Issue #8053: export refuses a saved fill that is split where a refill
     # is not.  Say so now, not at export time.
@@ -1071,6 +1116,41 @@ def _run_fill(args) -> int:
     if not check.ran and not quiet:
         print(f"Warning: saved zone fill not verified ({check.note or 'no DRC report'})")
 
+    return 0
+
+
+def _run_relieve(args) -> int:
+    """Retry thermal relief on solid pad overrides, keeping solid where relief starves."""
+    from .runner import find_kicad_cli, relieve_solid_overrides
+
+    json_mode = _wants_json(args)
+    quiet = getattr(args, "quiet", False) or json_mode
+
+    pcb_path = Path(args.pcb)
+    if not pcb_path.exists():
+        return _fail(args, f"Error: File not found: {pcb_path}")
+    kicad_cli = find_kicad_cli()
+    if not kicad_cli:
+        return _fail(
+            args,
+            "Error: kicad-cli not found. Install KiCad 8 from https://www.kicad.org/download/",
+        )
+    output_path = Path(args.output) if args.output else None
+
+    asym_before = _thermal_asymmetry_count(pcb_path)
+    try:
+        target = relieve_solid_overrides(pcb_path, output_path, kicad_cli=kicad_cli)
+    except Exception as e:
+        return _fail(args, f"Error: {e}")
+
+    payload = {"pcb": str(pcb_path), "output": str(target)}
+    _warn_if_asymmetry_rose(asym_before, target, payload)
+    if json_mode:
+        emit_json(payload)
+    elif not quiet:
+        info = payload["thermal_asymmetry"]
+        print(f"Relieved solid overrides: {target}")
+        print(f"thermal_asymmetry: {info['before']} -> {info['after']}")
     return 0
 
 
