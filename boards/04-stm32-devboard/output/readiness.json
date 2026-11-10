@@ -67,8 +67,8 @@
     "output/manufacturing/images/pcb_copper.png": "4e10851df7ec90c078dcc83de60a4533d3c0ef2f8883dcf6dda321a26890a636",
     "output/manufacturing/images/pcb_front.png": "c199029e43608545425f43a202e21ebec8b74123c54d2bb028e6dfeba8c6b4a1",
     "output/manufacturing/images/schematic_stm32_devboard.png": "701fa6f1e47427d23becbd4c0d3e509a4dd66b0178ff50d7e61e7e7c5601cb1f",
-    "output/manufacturing/kicad_project.zip": "5a0d01f3d399f120240e9c6daff7f55542b37bc77d8862c1fd8b7b2f328d3915",
-    "output/manufacturing/manifest.json": "18ee1ec8746db1c1d17ee9526b2fa428c8485785c929ea86ccf06407d0bb3005",
+    "output/manufacturing/kicad_project.zip": "b2741a5df1364d8af3452ffbb21bbb97545171b1a8d64957375f874b05e65c1e",
+    "output/manufacturing/manifest.json": "fc0ddbd4e431adfe315b30837fe2bb19b249abfebe205f129f8d07443b59fe54",
     "output/manufacturing/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
     "output/manufacturing/native-drc.json": "98b3e1eea2d868b39295d98fe7d9cc52e971a4e399010b203ca3380e6dc71bf4",
     "output/manufacturing/native-erc.json": "a63705556bc9c62121b86b9ba175962761eddaf7107211dc068c4acba96251ff",
@@ -76,7 +76,7 @@
     "output/manufacturing/report.md": "2ac1352131fa3f8e086f378c7c92d8681080414031b6357541c8092dc89909ac",
     "output/manufacturing/report.pdf": "c62a4519808e04ee81ac08ea22858355249bff2723e3babf667970ec5bd59ae1",
     "output/manufacturing-requirements.json": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",
-    "output/manufacturing.zip": "a9029793698291c71ad82778c7e1befe580051a86b5e70bf386ff2fa20934049",
+    "output/manufacturing.zip": "d486667a1d81c334eb7f474215088b7ab1a8eced3041c35078b3f390de17cc3c",
     "output/readiness/fill-consistency.json": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
     "output/readiness/kct-check.json": "f07fcbfabce4274e254b66575e2e1d7d9a7eba05f37511af2ce52de0eb19de70",
     "output/readiness/native-drc.json": "98b3e1eea2d868b39295d98fe7d9cc52e971a4e399010b203ca3380e6dc71bf4",
@@ -85,7 +85,7 @@
     "output/stm32_devboard.kicad_pro": "13e8bbe652a672ea673545b4cbb8f0bbf85f3e58999f58d395527833fa665354",
     "output/stm32_devboard.kicad_sch": "ff038da882f9937520c09a309d30883d07ba3805aaa929e940c0a213db1fe8cb",
     "output/stm32_devboard_routed.kicad_dru": "7e654117eb597b5596d55075cd11cc70de9002d7a76d30c53f76230a9583c7a2",
-    "output/stm32_devboard_routed.kicad_pcb": "aee6f48710a681f5df3ba6380d2b100fd18d0227bb9f5d679bd7dd3270ff90b0",
+    "output/stm32_devboard_routed.kicad_pcb": "faf32b06ae50069ccd3694f93f55b603342b2289d57e30d2bdd276713db4bd73",
     "output/stm32_devboard_routed.kicad_pro": "6347021a376122b83a28c5fa13b47a1a55da29b3bef4c14cefb38d54ae95567f",
     "output/sym-lib-table": "f071d0d282da9663ca1f29a3e2271e6790369eac7ba4f19ad72066c488f47309",
     "project.kct": "9cacd7cb85b1207fb3353da55e04a25a51b7323dc8cc4af416d4f47f252156f0",
@@ -287,7 +287,7 @@
   ],
   "manufacturer": "jlcpcb-tier1",
   "report_sources": {
-    "output/readiness/native-drc.json": "aee6f48710a681f5df3ba6380d2b100fd18d0227bb9f5d679bd7dd3270ff90b0",
-    "output/manufacturing/native-drc.json": "aee6f48710a681f5df3ba6380d2b100fd18d0227bb9f5d679bd7dd3270ff90b0"
+    "output/readiness/native-drc.json": "faf32b06ae50069ccd3694f93f55b603342b2289d57e30d2bdd276713db4bd73",
+    "output/manufacturing/native-drc.json": "faf32b06ae50069ccd3694f93f55b603342b2289d57e30d2bdd276713db4bd73"
   }
 }

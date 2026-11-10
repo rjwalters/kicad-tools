@@ -119,6 +119,14 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(module, "tie_power_pads", lambda *a, **k: True)
         monkeypatch.setattr(module, "relocate_drill_clearance_step", lambda *a, **k: True)
         monkeypatch.setattr(module, "quantize_escapes", lambda *a, **k: True)
+        # Issue #8532: main() imports these inside the function; route_pcb is
+        # stubbed so no routed board exists for them to edit.
+        monkeypatch.setattr(
+            "kicad_tools.cli.pcb_add_fiducials.run_add_fiducials", lambda *a, **k: 0
+        )
+        monkeypatch.setattr(
+            "kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **k: 0
+        )
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "generate_manufacturing", lambda *a, **k: True)

@@ -3498,6 +3498,7 @@
 					(thickness 0.15)
 				)
 			)
+			(uuid "373cd755-6dc8-5688-a9b0-df9c43373ad2")
 		)
 		(property "Value" "Fiducial"
 			(at 0 1.95 0)
@@ -3508,6 +3509,7 @@
 					(thickness 0.15)
 				)
 			)
+			(uuid "90153ecb-1fb9-5bf3-8606-29acf8b8f968")
 		)
 		(property "KiLib_Generator" "fiducial"
 			(at 0 0 0)
@@ -3519,6 +3521,7 @@
 					(thickness 0.15)
 				)
 			)
+			(uuid "b8779658-202b-5a6a-852e-c0e1d6cf5169")
 		)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_circle
@@ -3530,6 +3533,7 @@
 			)
 			(fill no)
 			(layer "F.CrtYd")
+			(uuid "4ea6604e-636f-5dc4-976b-6db19b11b66b")
 		)
 		(fp_circle
 			(center 0 0)
@@ -3540,6 +3544,7 @@
 			)
 			(fill no)
 			(layer "F.Fab")
+			(uuid "32832ad4-3403-51de-a465-2666d2e832a1")
 		)
 		(fp_text user "${REFERENCE}"
 			(at 0 0 0)
@@ -3550,6 +3555,7 @@
 					(thickness 0.08)
 				)
 			)
+			(uuid "c0093937-4563-508a-be51-e538755137a3")
 		)
 		(pad "" smd circle
 			(at 0 0)
@@ -3579,6 +3585,7 @@
 					(thickness 0.15)
 				)
 			)
+			(uuid "d46562cf-d733-59a5-ba26-827afdd78b9f")
 		)
 		(property "Value" "Fiducial"
 			(at 0 1.95 0)
@@ -3589,6 +3596,7 @@
 					(thickness 0.15)
 				)
 			)
+			(uuid "b25d89ad-a1f9-5986-8bfa-f6662a37264d")
 		)
 		(property "KiLib_Generator" "fiducial"
 			(at 0 0 0)
@@ -3600,6 +3608,7 @@
 					(thickness 0.15)
 				)
 			)
+			(uuid "276f5dae-4adf-5bd9-8a8b-e1989b7a9afe")
 		)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_circle
@@ -3611,6 +3620,7 @@
 			)
 			(fill no)
 			(layer "F.CrtYd")
+			(uuid "268f2e0b-aeb9-54e0-996d-14563238ebd9")
 		)
 		(fp_circle
 			(center 0 0)
@@ -3621,6 +3631,7 @@
 			)
 			(fill no)
 			(layer "F.Fab")
+			(uuid "db318451-f786-5873-a9bc-2d6db162416c")
 		)
 		(fp_text user "${REFERENCE}"
 			(at 0 0 0)
@@ -3631,6 +3642,7 @@
 					(thickness 0.08)
 				)
 			)
+			(uuid "4aafcbd8-ef6d-5d5f-aaa5-3a81d499491d")
 		)
 		(pad "" smd circle
 			(at 0 0)
@@ -3660,6 +3672,7 @@
 					(thickness 0.15)
 				)
 			)
+			(uuid "f92f9242-3cb0-55fa-9fdf-4f950299f7bf")
 		)
 		(property "Value" "Fiducial"
 			(at 0 1.95 0)
@@ -3670,6 +3683,7 @@
 					(thickness 0.15)
 				)
 			)
+			(uuid "ed8d7b76-13bb-562b-8d25-32faaa28cab9")
 		)
 		(property "KiLib_Generator" "fiducial"
 			(at 0 0 0)
@@ -3681,6 +3695,7 @@
 					(thickness 0.15)
 				)
 			)
+			(uuid "4608bd2b-7c8b-50e9-835c-7ce576ca5c38")
 		)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_circle
@@ -3692,6 +3707,7 @@
 			)
 			(fill no)
 			(layer "F.CrtYd")
+			(uuid "aea9d336-8d61-5e50-886f-0e23b4ebdee0")
 		)
 		(fp_circle
 			(center 0 0)
@@ -3702,6 +3718,7 @@
 			)
 			(fill no)
 			(layer "F.Fab")
+			(uuid "298a08d6-f835-5b92-a9b3-9f95f2f15847")
 		)
 		(fp_text user "${REFERENCE}"
 			(at 0 0 0)
@@ -3712,6 +3729,7 @@
 					(thickness 0.08)
 				)
 			)
+			(uuid "13ee76a4-ae39-592e-b14c-c9ff290444d8")
 		)
 		(pad "" smd circle
 			(at 0 0)
@@ -3728,7 +3746,7 @@
 	(gr_text "STM32F103C8 Development Board A 2025-01"
 		(at 137.62 95.92)
 		(layer "F.SilkS")
-		(uuid "d23620f0-2780-466f-ab91-888477cc6e61")
+		(uuid "30b2a348-0a1f-5ad3-9770-19f2bec55b46")
 		(effects
 			(font
 				(size 1 1)
