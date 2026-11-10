@@ -587,6 +587,116 @@ def test_acknowledged_warnings_pass_and_become_accepted_risk_lines(tmp_path):
     }
 
 
+# -- Baseline comparison (Issue #8664) ---------------------------------------
+
+
+def _baseline_engines(board: Path, new: dict, old: dict):
+    """FakeEngines whose kct check reports ``old`` warnings for the baseline board."""
+    fake = FakeEngines(board, warnings=new)
+    real = fake.kct_check
+
+    def kct_check(pcb, mfr, report_path, extra):
+        if pcb.name == "old.kicad_pcb":
+            saved, fake.warnings = fake.warnings, old
+            try:
+                return real(pcb, mfr, report_path, extra)
+            finally:
+                fake.warnings = saved
+        return real(pcb, mfr, report_path, extra)
+
+    fake.kct_check = kct_check
+    return fake
+
+
+def _make_baseline(tmp_path: Path) -> Path:
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    (prev / "old.kicad_pcb").write_text("(kicad_pcb old)\n")
+    return prev
+
+
+def test_baseline_introduced_assembly_warnings_block_until_acked(tmp_path):
+    board = make_board(tmp_path)
+    prev = _make_baseline(tmp_path)
+    # Rule is acked-by-count in neither run: 14 -> 40 is a regression.
+    fake = _baseline_engines(board, {"silk_over_copper": 40}, {"silk_over_copper": 14})
+
+    code, report = run(board, fake, "--baseline", str(prev), "--ack-warnings", "")
+    # silk_over_copper was already unacknowledged in total, so it blocks either way;
+    # the introduced-count message must be the one reported.
+    assert code != 0
+    assert any(
+        "introduced since baseline" in b and "silk_over_copper +26" in b for b in report["blockers"]
+    )
+
+    fake = _baseline_engines(board, {"silk_over_copper": 40}, {"silk_over_copper": 14})
+    code, report = run(board, fake, "--baseline", str(prev), "--ack-warnings", "silk_over_copper")
+    assert code == 0
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "silk_over_copper: +26 (14 -> 40) [assembly-affecting]" in readme
+
+
+def test_baseline_introduced_advisory_warnings_list_but_do_not_block(tmp_path):
+    board = make_board(tmp_path)
+    prev = _make_baseline(tmp_path)
+    fake = _baseline_engines(board, {"trace_width_advisory": 9}, {"trace_width_advisory": 2})
+
+    code, report = run(board, fake, "--baseline", str(prev))
+
+    assert code == 0
+    assert check_status(report, "warning_review") == "passed"
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "trace_width_advisory: +7 (2 -> 9) [advisory]" in readme
+
+
+def test_baseline_identical_introduces_nothing(tmp_path):
+    board = make_board(tmp_path)
+    prev = _make_baseline(tmp_path)
+    fake = _baseline_engines(board, {"trace_width_advisory": 4}, {"trace_width_advisory": 4})
+
+    code, _ = run(board, fake, "--baseline", str(prev))
+
+    assert code == 0
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "Warnings introduced since baseline" in readme
+    assert "  none" in readme
+
+
+def test_baseline_unreadable_fails_loudly(tmp_path):
+    board = make_board(tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    fake = FakeEngines(board)
+
+    code, report = run(board, fake, "--baseline", str(empty))
+
+    assert code != 0
+    assert any("Baseline comparison failed" in b for b in report["blockers"])
+
+
+def test_missing_baseline_path_is_refused(tmp_path):
+    board = make_board(tmp_path)
+    code, _ = run(board, FakeEngines(board), "--baseline", str(tmp_path / "nope"))
+    assert code != 0
+
+
+def test_no_baseline_notice_names_sibling_board(tmp_path, capsys):
+    board = make_board(tmp_path)
+    (board / "output" / "old.kicad_pcb").write_text("(kicad_pcb old)\n")
+
+    run(board, FakeEngines(board))
+
+    assert "old.kicad_pcb" in capsys.readouterr().err
+
+
+def test_no_baseline_no_candidate_prints_no_notice(tmp_path, capsys):
+    board = make_board(tmp_path)
+
+    run(board, FakeEngines(board))
+
+    assert "--baseline" not in capsys.readouterr().err
+
+
 def test_first_signoff_is_not_blocked_by_the_not_yet_existing_bundle(tmp_path):
     """``meta_checks.manifest`` is NOT RUN before the bundle this run creates.
 

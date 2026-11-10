@@ -173,6 +173,7 @@ def compute_routing_statistics(
     layer_stats: dict,
     nets_to_route_ids: set[int] | None = None,
     net_pads: dict[int, list[Pad]] | None = None,
+    kept_routes: list[Route] | None = None,
 ) -> dict:
     """Compute routing statistics including congestion metrics.
 
@@ -211,7 +212,7 @@ def compute_routing_statistics(
     )
     congestion_stats = grid.get_congestion_map()
 
-    all_routed_nets = {r.net for r in routes}
+    all_routed_nets = {r.net for r in routes} | {r.net for r in kept_routes or ()}
 
     # --- Connectivity-aware routing count ---
     connectivity: dict[int, dict] | None = None
@@ -227,7 +228,9 @@ def compute_routing_statistics(
             if nets_to_route_ids is not None
             else net_pads
         )
-        connectivity = validate_net_connectivity(routes, target_pads)
+        # Issue #8676: ``--complete`` requests only the joins kept copper
+        # leaves missing, so connectivity must count that kept copper too.
+        connectivity = validate_net_connectivity([*routes, *(kept_routes or ())], target_pads)
         nets_fully_connected = sum(1 for info in connectivity.values() if info["connected"])
         has_disconnected_islands = any(
             not info["connected"] for info in connectivity.values() if info["total_pads"] >= 2
