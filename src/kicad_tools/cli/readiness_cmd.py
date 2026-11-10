@@ -2313,6 +2313,8 @@ def _project_dependencies(
     ``${KIPRJMOD}/../...`` library reference may resolve outside the PCB
     directory only when it stays inside *limit* (Issue #5813).
     """
+    from kicad_tools.export.manufacturing import project_library_members
+
     root = pcb.parent
     boundary = (limit or root).resolve()
     real_root = root.resolve()
@@ -2332,7 +2334,7 @@ def _project_dependencies(
         if directory.is_dir() and (
             directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
         ):
-            files.update(p for p in directory.rglob("*") if p.is_file())
+            files.update(project_library_members(directory, real_root))
     for table in (root / "fp-lib-table", root / "sym-lib-table"):
         if not table.exists():
             continue
