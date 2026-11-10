@@ -23,39 +23,30 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#8657**: route: _dilate_blocked uses scipy when importable — 8-17x slower and different results at the grid edge
-- **#8658**: route --complete: kept copper on name-only (KiCad 10) boards is keyed to net 0, so the short check reports phantom shorts
+- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs
-- **#8657**: route: _dilate_blocked uses scipy when importable — 8-17x slower and different results at the grid edge
-- **#8658**: route --complete: kept copper on name-only (KiCad 10) boards is keyed to net 0, so the short check reports phantom shorts
-- **#8659**: thermal_asymmetry: forced solid pad overrides are never revisited, have no fixer, and are not gated at tapeout
-- **#8663**: detect-mistakes: 208 of 209 warnings on a clean board are noise (bypass cross-product, duplicates, 90° reported as acute, supply net as crystal trace)
-- **#8664**: Sign-off never compares warnings against the previous revision: wire kct check --diff into readiness and tapeout
-- **#8665**: check: report segment wholly covered by collinear same-net segment as redundant copper
-- **#8669**: audit sync: a header footprint with 'MountingHoles' in its name is dropped as a mounting hole and reported schematic-only; no-connect pins reported as net mismatches
+- **#8702**: Chained --complete DRC comparison: measure finding key and cover native kicad-cli findings
+- **#8719**: kct pcb prune is not idempotent: repeated runs alternate between two board states (0.01-0.07 mm in-pad segments)
+- **#8720**: optimize-traces --drc-aware (0.29.0): reports a new kicad-cli clearance error on the written board, then keeps the result and exits 0
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8660**: fix(router): make _dilate_blocked independent of scipy
-- **#8661**: feat(zones): add 'zones relieve' fixer and gate thermal_asymmetry at tapeout
-- **#8666**: fix: cut false-positive noise in detect-mistakes checks
-- **#8667**: feat(readiness): diff warnings against a previous revision with --baseline
-- **#8668**: feat(check): report segments covered by a longer collinear segment
-- **#8670**: fix(audit): keep netted MountingHoles footprints and treat NC nets as equivalent
+- **#8718**: fix(route): key chained-pass connectivity errors by net, not message
+- **#8721**: fix(optimize-traces): roll back nets that raise any kicad-cli rule count
+- **#8722**: test(prune): assert convergence on sub-0.1 mm in-pad segments
 
 ## Approved (Awaiting Merge)
 
@@ -76,17 +67,13 @@ Issues carrying `loom:curated`.
 - **#8486**: route perf: nets proven sealed are re-searched at full budget and re-rescued every iteration (43% of search time, rescue 0/15 for ~1,475 s each pass) *(curated)*
 - **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step *(curated)*
 - **#8577**: route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class (fails kicad-cli DRC) *(curated)*
-- **#8602**: Board 07: DRC-verified prune and re-derive authored escapes so validate.py passes (part of #8399) *(curated)*
+- **#8603**: Board 07: classify and eliminate remaining redundant_copper warnings at source (part of #8399) *(curated)*
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
-- **#8657**: route: _dilate_blocked uses scipy when importable — 8-17x slower and different results at the grid edge *(curated)*
-- **#8658**: route --complete: kept copper on name-only (KiCad 10) boards is keyed to net 0, so the short check reports phantom shorts *(curated)*
-- **#8659**: thermal_asymmetry: forced solid pad overrides are never revisited, have no fixer, and are not gated at tapeout *(curated)*
-- **#8663**: detect-mistakes: 208 of 209 warnings on a clean board are noise (bypass cross-product, duplicates, 90° reported as acute, supply net as crystal trace) *(curated)*
-- **#8664**: Sign-off never compares warnings against the previous revision: wire kct check --diff into readiness and tapeout *(curated)*
-- **#8665**: check: report segment wholly covered by collinear same-net segment as redundant copper *(curated)*
-- **#8669**: audit sync: a header footprint with 'MountingHoles' in its name is dropped as a mounting hole and reported schematic-only; no-connect pins reported as net mismatches *(curated)*
+- **#8702**: Chained --complete DRC comparison: measure finding key and cover native kicad-cli findings *(curated)*
+- **#8719**: kct pcb prune is not idempotent: repeated runs alternate between two board states (0.01-0.07 mm in-pad segments) *(curated)*
+- **#8720**: optimize-traces --drc-aware (0.29.0): reports a new kicad-cli clearance error on the written board, then keeps the result and exits 0 *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -104,12 +91,12 @@ _None._
 |------|-------|
 | Operator merge-risk holds | 1 |
 | Very important | 0 |
-| Important | 2 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 9 |
-| PRs awaiting review | 6 |
+| Important | 1 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 4 |
+| PRs awaiting review | 3 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 20 |
+| Curated | 16 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
