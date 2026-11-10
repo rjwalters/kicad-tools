@@ -2336,6 +2336,71 @@ def test_output_inside_board_dir_still_runs(tmp_path, capsys):
     assert fake.calls  # gates ran
 
 
+def _run_output(board: Path, output: str, fake: FakeEngines, board_arg: Path | None = None) -> int:
+    return readiness_cmd.main(
+        [str(board_arg or board), "--mfr", "jlcpcb", "--generate", "--output", output],
+        engines=fake.bundle(),
+    )
+
+
+def test_output_symlink_inside_board_pointing_outside_is_refused(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = board / "escape"
+    link.symlink_to(outside, target_is_directory=True)
+
+    code = _run_output(board, str(link / "bundle"), fake)
+
+    assert code == 2
+    assert "--output must be inside the board directory" in capsys.readouterr().err
+    assert not (outside / "bundle").exists()
+    assert fake.calls == []
+
+
+def test_output_real_path_accepted_when_board_given_via_symlink(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+    board_link = tmp_path / "board-link"
+    board_link.symlink_to(board, target_is_directory=True)
+
+    _run_output(board, str(board / "out2"), fake, board_arg=board_link)
+
+    assert "--output must be inside" not in capsys.readouterr().err
+    assert fake.calls  # gates ran
+
+
+def test_output_relative_path_resolves_against_cwd(tmp_path, capsys, monkeypatch):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+    monkeypatch.chdir(board)
+
+    code = _run_output(board, "../escaped", fake)
+
+    assert code == 2
+    assert "--output must be inside the board directory" in capsys.readouterr().err
+    assert fake.calls == []
+
+    fake_ok = FakeEngines(board)
+    _run_output(board, "out2", fake_ok)
+    assert "--output must be inside" not in capsys.readouterr().err
+    assert fake_ok.calls
+
+
+def test_output_sibling_with_board_name_prefix_is_refused(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+    sibling = tmp_path / f"{board.name}-out"
+
+    code = _run_output(board, str(sibling), fake)
+
+    assert code == 2
+    assert "--output must be inside the board directory" in capsys.readouterr().err
+    assert not sibling.exists()
+    assert fake.calls == []
+
+
 # ---------------------------------------------------------------------------
 # Issue #8727: declared BOM exemptions; sibling revisions are not dependencies
 # ---------------------------------------------------------------------------
