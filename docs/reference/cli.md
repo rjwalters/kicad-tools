@@ -216,6 +216,7 @@ kct pcb <subcommand> <pcb_file> [options]
 | `add-3d-models` | Patch missing `(model ...)` refs; `--refresh` rewrites existing refs through the current tier chain (see [LCSC 3D models guide](../guides/lcsc-3d-models.md)) |
 | `model-audit` | Classify every footprint's 3D model coverage (`resolved`, `embedded`, `dangling`, `no_ref`, `unresolved_var`, `hidden_only`, `lcsc_cache_miss`, `lcsc_content_changed`, `placeholder`, `exempt`); `--env host\|pinned`, `--model-dir DIR`, `--format json`. A report: exits 0 regardless of coverage (see [3D model coverage](../guides/lcsc-3d-models.md#3d-model-coverage-audit)) |
 | `diff` | Geometric diff of two boards: which tracks, vias, pads, zones and outline changed (see below) |
+| `reinforce` | Place same-net PTH buttress-wire anchors on a routed net: by default two per single-layer wire leg, at its ends (see below) |
 
 **`add-zone` output-path behavior:** `-o`/`--output` is optional and
 **defaults to overwriting the input in place** — consistent with `zones add`,
@@ -294,6 +295,68 @@ entries with `status`, `kind`, `key`, `net`, `layer`, `before` and `after`
 Exit codes: `0` nothing differs (after filters), `2` something does, `1` a side
 could not be resolved or loaded. A CI step can therefore assert "this PR must
 not touch board X's copper".
+
+#### `kct pcb reinforce BOARD --net NET`
+
+Post-route buttress-wire reinforcement (#4218, #8741). The intended build: a
+hand-bent solid-core wire (default 16 AWG) is laid along a high-current trace
+and soldered to that trace along its whole length, held by **exactly two
+anchor holes, one at each end of the wire**. One wire stays on one copper
+layer, so a path that changes layer is two wires.
+
+```bash
+kct pcb reinforce board.kicad_pcb --net VBUS                        # ends mode (default)
+kct pcb reinforce board.kicad_pcb --net VBUS --current-paths current_paths.json
+kct pcb reinforce board.kicad_pcb --net VBUS --end-offset 2.0 --dry-run --format json
+kct pcb reinforce board.kicad_pcb --net VBUS --anchor-mode spaced --spacing 15
+```
+
+Two placement modes:
+
+- **`--anchor-mode ends`** (default, #8742) splits the net's copper into
+  *legs*: a run on one copper layer with no junction inside it, one wire each.
+  Every anchored leg gets exactly two anchors, one near each end, none in
+  between. Each anchor's pad edge sits at least `--end-offset` mm (default
+  1.0) clear, in straight-line distance, of the same-net copper the leg ends
+  on: a component pad (its real shape and rotation) or via that the end of
+  its track overlaps, even when the track centreline stops just short of it,
+  or, for a branch, the whole trunk (every trunk segment, not just the piece at
+  the junction). If the leg bends soon after leaving that copper, the
+  anchor moves further inward until the clearance holds. A free end measures
+  from the track end. Both anchors are decided together: a leg with no room
+  for two (too short, or folding back so the two would overlap) is reported
+  `too_short` and gets none, never one or three. A Y
+  junction becomes a `trunk` (the longest through-path, two end anchors) and
+  a `branch` (one anchor at its free end, one beside the trunk); loops and
+  higher-degree junctions are reported `unhandled`, not guessed.
+  With `--current-paths`, every leg of every resolved, reinforcement-eligible
+  path is anchored, on whichever copper layers the path uses (one leg per
+  layer). Without it, one layer is processed per call (`--layer`, else the
+  layer with the most routed length), only the longest leg unless
+  `--all-runs`, and copper on other layers is reported as unhandled.
+  A refused end anchor is nudged inward along the leg only, by at most
+  2 mm, and never past the other anchor; otherwise it is listed under
+  `refused` with the rule that refused it (including `hole_to_hole` /
+  `anchor_spacing` against another leg's anchor) and the leg is
+  `partial` (one anchor, the other rule-refused) or `unanchored`. One
+  anchor can't hold a two-ended wire, so treat `partial` as a placement to
+  fix.
+- **`--anchor-mode spaced`** keeps the pre-#8742 row of anchors at both run
+  ends and every `--spacing` mm (default 15) along the run. `--spacing` is
+  ignored, with a warning, in `ends` mode.
+
+Declared current paths that do not resolve (moved/removed pad, ambiguous
+loop) are listed under `unresolved_paths` and warned about on stderr; they
+get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
+`end_offset_mm`, `unresolved_paths` and `legs` (`net`, `layer`, `kind`,
+`length_mm`, `width_mm`, `anchors`, `status` in
+`full|partial|unanchored|too_short|unhandled`, `reason`, `paths`,
+`polyline`) to the existing keys; coordinates are sheet-absolute.
+
+Current limitation: until #8743 the anchors are plain same-net vias that
+inherit the board's via tenting, and no solder-mask opening is emitted along
+the run, so the trace is not yet exposed for soldering. Refill zone pours
+afterwards (`kicad-cli pcb drc --refill-zones`).
 
 ---
 

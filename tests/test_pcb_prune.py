@@ -1484,7 +1484,7 @@ def test_relative_wide_resolves_wide_net_and_reinforce_anchors(tmp_path):
     from dataclasses import replace
 
     spec = replace(spec, reinforcement_eligible=True)
-    out = reinforce_net(pcb, "SIG", spacing_mm=2.0, current_paths=[spec])
+    out = reinforce_net(pcb, "SIG", spacing_mm=2.0, current_paths=[spec], anchor_mode="spaced")
     assert len(out.placed) > 0
 
 

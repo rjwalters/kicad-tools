@@ -132,8 +132,17 @@ Use the existing 0.18 flow — no new flags here:
 
 ```bash
 kct route-auto <board.kicad_pcb>       # HV-outer + ampacity considerations apply
-kct pcb reinforce <board.kicad_pcb> --net <hv-net> --all-runs   # once per high-current net
+kct pcb reinforce <board.kicad_pcb> --net <hv-net> --current-paths <board>/current_paths.json   # once per high-current net
 ```
+
+`reinforce` places exactly two anchors per single-layer wire leg, at its
+ends (the default `--anchor-mode ends`): the buttress wire is soldered along
+the trace and held only at its ends. With `--current-paths` every eligible
+path leg is anchored on every layer it uses; without it, add `--all-runs` to
+anchor every leg on the chosen layer. Check `legs[]` and `unresolved_paths`
+in `--format json` for `too_short` / `unhandled` legs and paths that did not
+resolve. Until #8743 the anchors are still tented vias and no mask opening is
+emitted along the run.
 
 HV nets should route on outer layers (creepage is a surface path) and to their ampacity width. These are standard-flow considerations, referenced here, not new flags introduced by this skill.
 
