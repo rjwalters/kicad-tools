@@ -64,63 +64,63 @@ class BypassCapDistanceCheck:
             if not cap_power_net:
                 continue
 
-            # Find ICs that share this power net
+            # Pair the cap with the nearest power pad on its rail (any IC);
+            # one finding per cap (issue #8663).
+            best = None
             for ic in ics:
-                ic_power_pads = self._get_power_pads(ic, cap_power_net)
-                if not ic_power_pads:
-                    continue
-
-                # Check distance to each power pad
-                for pad in ic_power_pads:
-                    pad_pos = self._get_absolute_pad_position(ic, pad)
-                    cap_pos = cap.position
-                    dist = distance(cap_pos, pad_pos)
-
-                    if dist > BYPASS_WARNING_DISTANCE_MM:
-                        mistakes.append(
-                            Mistake(
-                                category=MistakeCategory.BYPASS_CAP,
-                                severity="warning",
-                                title="Bypass capacitor too far from power pin",
-                                components=[cap.reference, ic.reference],
-                                location=cap_pos,
-                                explanation=(
-                                    f"{cap.reference} is {dist:.1f}mm from {ic.reference} "
-                                    f"pin {pad.number} ({cap_power_net}). Bypass capacitors "
-                                    f"should be within {MAX_BYPASS_DISTANCE_MM}mm of the power "
-                                    f"pin they're decoupling. At {dist:.1f}mm, the inductance "
-                                    f"of the trace reduces filtering effectiveness."
-                                ),
-                                fix_suggestion=(
-                                    f"Move {cap.reference} to within {MAX_BYPASS_DISTANCE_MM}mm "
-                                    f"of {ic.reference} pin {pad.number}, with a short, wide "
-                                    f"trace to both {cap_power_net} and GND."
-                                ),
-                                learn_more_url="docs/mistakes/bypass-cap-placement.md",
-                                measurements={"distance_mm": round(dist, 1)},
-                            )
-                        )
-                    elif dist > MAX_BYPASS_DISTANCE_MM:
-                        mistakes.append(
-                            Mistake(
-                                category=MistakeCategory.BYPASS_CAP,
-                                severity="info",
-                                title="Bypass capacitor placement could be improved",
-                                components=[cap.reference, ic.reference],
-                                location=cap_pos,
-                                explanation=(
-                                    f"{cap.reference} is {dist:.1f}mm from {ic.reference} "
-                                    f"pin {pad.number}. Ideally, bypass capacitors should be "
-                                    f"within {MAX_BYPASS_DISTANCE_MM}mm for optimal decoupling."
-                                ),
-                                fix_suggestion=(
-                                    f"Consider moving {cap.reference} closer to {ic.reference} "
-                                    f"pin {pad.number} if space permits."
-                                ),
-                                learn_more_url="docs/mistakes/bypass-cap-placement.md",
-                                measurements={"distance_mm": round(dist, 1)},
-                            )
-                        )
+                for pad in self._get_power_pads(ic, cap_power_net):
+                    d = distance(cap.position, self._get_absolute_pad_position(ic, pad))
+                    if best is None or d < best[0]:
+                        best = (d, ic, pad)
+            if best is None:
+                continue
+            dist, ic, pad = best
+            cap_pos = cap.position
+            if dist > BYPASS_WARNING_DISTANCE_MM:
+                mistakes.append(
+                    Mistake(
+                        category=MistakeCategory.BYPASS_CAP,
+                        severity="warning",
+                        title="Bypass capacitor too far from power pin",
+                        components=[cap.reference, ic.reference],
+                        location=cap_pos,
+                        explanation=(
+                            f"{cap.reference} is {dist:.1f}mm from {ic.reference} "
+                            f"pin {pad.number} ({cap_power_net}). Bypass capacitors "
+                            f"should be within {MAX_BYPASS_DISTANCE_MM}mm of the power "
+                            f"pin they're decoupling. At {dist:.1f}mm, the inductance "
+                            f"of the trace reduces filtering effectiveness."
+                        ),
+                        fix_suggestion=(
+                            f"Move {cap.reference} to within {MAX_BYPASS_DISTANCE_MM}mm "
+                            f"of {ic.reference} pin {pad.number}, with a short, wide "
+                            f"trace to both {cap_power_net} and GND."
+                        ),
+                        learn_more_url="docs/mistakes/bypass-cap-placement.md",
+                        measurements={"distance_mm": round(dist, 1)},
+                    )
+                )
+            elif dist > MAX_BYPASS_DISTANCE_MM:
+                mistakes.append(
+                    Mistake(
+                        category=MistakeCategory.BYPASS_CAP,
+                        severity="info",
+                        title="Bypass capacitor placement could be improved",
+                        components=[cap.reference, ic.reference],
+                        location=cap_pos,
+                        explanation=(
+                            f"{cap.reference} is {dist:.1f}mm from {ic.reference} "
+                            f"pin {pad.number}. Ideally, bypass capacitors should be "
+                            f"within {MAX_BYPASS_DISTANCE_MM}mm for optimal decoupling."
+                        ),
+                        fix_suggestion=(
+                            f"Consider moving {cap.reference} closer to {ic.reference} "
+                            f"pin {pad.number} if space permits."
+                        ),
+                        learn_more_url="docs/mistakes/bypass-cap-placement.md",
+                        measurements={"distance_mm": round(dist, 1)},
+                    )
+                )
 
         return mistakes
 

@@ -6,6 +6,7 @@ excessive voltage drop or overheating.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
@@ -74,6 +75,19 @@ def decoupling_only_output_nets(pcb: PCB) -> set[str]:
     return has_output - has_load
 
 
+# A narrow segment this short, ending on a via, is a pad-to-via stub into a
+# plane (issue #8663), not a power distribution trace.
+MAX_PLANE_STUB_LENGTH_MM = 3.0
+
+
+def _is_via_stub(segment: Segment, vias: list[tuple[float, float]]) -> bool:
+    """True if *segment* is a short stub with an endpoint on a same-net via."""
+    length = math.dist(segment.start, segment.end)
+    if length > MAX_PLANE_STUB_LENGTH_MM:
+        return False
+    return any(math.dist(p, v) <= 0.05 for p in (segment.start, segment.end) for v in vias)
+
+
 class PowerTraceWidthCheck:
     """Check that power traces are wide enough.
 
@@ -112,6 +126,11 @@ class PowerTraceWidthCheck:
             if is_supply_net(net.name, evidence):
                 power_nets.add(net.number)
 
+        plane_nets = {z.net_name for z in pcb.zones if z.net_name and z.keepout is None}
+        via_points: dict[int, list[tuple[float, float]]] = defaultdict(list)
+        for via in pcb.vias:
+            via_points[via.net_number].append(via.position)
+
         # Group the narrow segments per net
         narrow: dict[str, list[Segment]] = defaultdict(list)
         for segment in pcb.segments:
@@ -121,6 +140,8 @@ class PowerTraceWidthCheck:
                 continue
             net = pcb.get_net(segment.net_number)
             net_name = net.name if net else f"Net {segment.net_number}"
+            if net_name in plane_nets and _is_via_stub(segment, via_points[segment.net_number]):
+                continue
             narrow[net_name].append(segment)
 
         mistakes: list[Mistake] = []
