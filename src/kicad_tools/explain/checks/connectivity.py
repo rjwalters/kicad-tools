@@ -69,10 +69,13 @@ class PullUpResistorCheck:
                 continue
             if self._has_pullup(pcb, net_name):
                 continue
+            # Most MCUs have an internal reset pull-up, so only I2C (which
+            # truly needs an external one) is a warning (issue #8663).
+            is_bus = any(p in net_name.upper() for p in _I2C_NET_PATTERNS)
             mistakes.append(
                 Mistake(
                     category=MistakeCategory.CONNECTIVITY,
-                    severity="warning",
+                    severity="warning" if is_bus else "info",
                     title="Missing pull-up resistor",
                     components=sorted(refs),
                     explanation=(
