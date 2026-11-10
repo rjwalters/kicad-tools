@@ -1004,6 +1004,8 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         return None, f"schematic not found: {schematic}"
 
     output_dir = Path(args.output).resolve() if args.output else pcb.parent / "manufacturing"
+    if args.output and not output_dir.is_relative_to(board_dir.resolve()):
+        return None, f"--output must be inside the board directory {board_dir}; got {output_dir}"
     evidence_dir = board_dir / "output" / _EVIDENCE_DIRNAME
     if not (board_dir / "output").is_dir():
         evidence_dir = board_dir / _EVIDENCE_DIRNAME
@@ -2285,23 +2287,14 @@ def _outside_root_message(what: str, kind: str, root_given: bool) -> str:
 
 def _schematic_hierarchy(schematic: Path, limit: Path, root_given: bool = True) -> list[Path]:
     """The schematic plus every sub-sheet it references, contained within *limit*."""
-    found: dict[Path, None] = {}
-    pending = [schematic.resolve()]
-    while pending:
-        sheet = pending.pop()
-        if sheet in found:
-            continue
-        if not sheet.resolve().is_relative_to(limit):
-            raise ValueError(_outside_root_message(str(sheet), "sheet", root_given))
-        if not sheet.is_file():
-            raise ValueError(f"Project dependency is missing: {sheet}")
-        found[sheet] = None
-        text = sheet.read_text(errors="replace")
-        for name in re.findall(r'\(property\s+"Sheet(?:file|name)"\s+"([^"\n]+\.kicad_sch)"', text):
-            pending.append((sheet.parent / name).resolve())
-        for name in re.findall(r'\(file\s+"([^"\n]+\.kicad_sch)"\)', text):
-            pending.append((sheet.parent / name).resolve())
-    return sorted(found)
+    from kicad_tools.report.utils import walk_schematic_hierarchy
+
+    walked = walk_schematic_hierarchy(schematic, lambda sheet: sheet.is_relative_to(limit))
+    if walked.outside:
+        raise ValueError(_outside_root_message(str(walked.outside[0]), "sheet", root_given))
+    if walked.missing:
+        raise ValueError(f"Project dependency is missing: {walked.missing[0]}")
+    return walked.sheets
 
 
 def _project_dependencies(
@@ -2313,6 +2306,8 @@ def _project_dependencies(
     ``${KIPRJMOD}/../...`` library reference may resolve outside the PCB
     directory only when it stays inside *limit* (Issue #5813).
     """
+    from kicad_tools.export.manufacturing import project_library_members
+
     root = pcb.parent
     boundary = (limit or root).resolve()
     real_root = root.resolve()
@@ -2332,7 +2327,7 @@ def _project_dependencies(
         if directory.is_dir() and (
             directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
         ):
-            files.update(p for p in directory.rglob("*") if p.is_file())
+            files.update(project_library_members(directory, real_root))
     for table in (root / "fp-lib-table", root / "sym-lib-table"):
         if not table.exists():
             continue

@@ -691,9 +691,11 @@ What is deferred until #2723 lands:
   for the DDR data byte (today's pre-pass and post-pass skews
   are identical because no tuning step runs)
 
-When #2723 lands, the `route_pcb` function's `# TODO Phase 3H
-(#2723): apply_match_group_tuning(router, ...)` marker should be
-replaced with the actual call.
+Status update: #2723 has since landed and is closed. `route_pcb` in
+`../generate_design.py` now passes `--length-match-groups` (#3098), so
+the deferral described above is historical. The `# TODO Phase 3H
+(#2723)` comment that remains there asks only to verify that the flag
+consumes the `net_class_map.json` sidecar.
 
 ## CI Gate (Phase 3N, #2726)
 

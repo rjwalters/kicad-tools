@@ -490,6 +490,15 @@ sources/sinks drive routing exercise only.
 
 [#2661]: https://github.com/rjwalters/kicad-tools/issues/2661
 
+## Other Contents
+
+- `synthetic-mains-complete/` — fully synthetic mains-style fixture for
+  `--complete` creepage verification (#8422). Not a demo board, so it is not in
+  the status table above; see its [README](synthetic-mains-complete/README.md).
+- `release_package.py` — shared plumbing for the per-board
+  `package_release.py` release scripts, which rebuild a board's shipped
+  manufacturing package through `kct readiness --generate`.
+
 ## External Boards (`external/`)
 
 `external/` holds **local-only symlinks** to consumer-repo board fixtures

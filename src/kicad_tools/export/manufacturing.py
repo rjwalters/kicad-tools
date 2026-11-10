@@ -322,6 +322,35 @@ def _project_symbol_files(project_dir: Path) -> list[Path]:
     return files
 
 
+def project_library_members(directory: Path, boundary: Path) -> list[Path]:
+    """Files under a library directory that stay inside *boundary* (#8763).
+
+    Shared by the project-zip exporter and ``kct readiness`` so both agree on
+    which library members ship.  A member (or a symlinked directory holding it)
+    whose real path leaves *boundary* is excluded with a warning naming it;
+    in-boundary symlinks are kept.  Broken links and symlink loops are skipped.
+    """
+    boundary = boundary.resolve()
+    members: list[Path] = []
+    for member in sorted(directory.rglob("*")):
+        try:
+            if not member.is_file():
+                continue
+            inside = member.resolve().is_relative_to(boundary)
+        except (OSError, RuntimeError):  # symlink loop / unreadable
+            logger.warning("Excluding unresolvable library member from project zip: %s", member)
+            continue
+        if inside:
+            members.append(member)
+        else:
+            logger.warning(
+                "Excluding library member resolving outside the project: %s -> %s",
+                member,
+                member.resolve(),
+            )
+    return members
+
+
 def _project_footprint_files(project_dir: Path) -> list[Path]:
     """Project-local footprint library inventory (#8727).
 
@@ -330,7 +359,8 @@ def _project_footprint_files(project_dir: Path) -> list[Path]:
     This mirrors the footprint half of ``kct readiness``'s dependency inventory
     so ``kct export`` writes every file readiness requires of
     ``kicad_project.zip``.  References leaving *project_dir* are skipped here
-    (archive names are project-relative); readiness collects those itself.
+    (archive names are project-relative); readiness collects those itself in
+    ``readiness_cmd._normalize_project_archive`` (Issue #8752).
     """
     root = project_dir.resolve()
     files: set[Path] = set()
@@ -341,7 +371,7 @@ def _project_footprint_files(project_dir: Path) -> list[Path]:
         if directory.is_dir() and (
             directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
         ):
-            files.update(p for p in directory.rglob("*") if p.is_file())
+            files.update(project_library_members(directory, root))
     if table.is_file():
         for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text(errors="replace")):
             if "${KIPRJMOD}" in uri:
@@ -354,7 +384,7 @@ def _project_footprint_files(project_dir: Path) -> list[Path]:
             if not dependency.exists() or not dependency.resolve().is_relative_to(root):
                 continue
             if dependency.is_dir():
-                files.update(p for p in dependency.rglob("*") if p.is_file())
+                files.update(project_library_members(dependency, root))
             else:
                 files.add(dependency)
     return sorted(files)
@@ -364,8 +394,15 @@ def _create_project_zip(
     pcb_path: Path,
     output_dir: Path,
     zip_name: str = "kicad_project.zip",
+    schematic_path: Path | None = None,
 ) -> Path:
     """Create a ZIP containing the KiCad project files.
+
+    Project inventory matches ``kct readiness`` (Issue #8752): only the
+    ``.kicad_pro`` named like the PCB and the root schematic's sub-sheet
+    hierarchy; sibling boards' project files and ``*_backup_*`` are excluded.
+    Libraries outside the PCB directory (``${KIPRJMOD}/../``) are not
+    collected here: ``readiness_cmd._normalize_project_archive`` owns them.
 
     Includes only the specific PCB being exported and its sibling .kicad_dru,
     plus .kicad_sch and .kicad_pro files and project-local symbol-table dependencies.
@@ -392,13 +429,29 @@ def _create_project_zip(
         if dru_path.is_file():
             project_files.append(dru_path)
 
-    # Include schematics and project files (not PCBs — only the exported one)
-    sch_pro_extensions = {".kicad_sch", ".kicad_pro"}
+    # Project file of this board only (sibling variants are not dependencies)
     project_files.extend(
         f
         for f in project_dir.iterdir()
-        if f.is_file() and f.suffix in sch_pro_extensions and "_backup_" not in f.stem
+        if f.is_file() and f.suffix == ".kicad_pro" and f.stem == pcb_path.stem
     )
+
+    # Schematics: the root's hierarchy.  An explicit root wins; an absent or
+    # ambiguous root contributes no schematics (never "zip everything").
+    from kicad_tools.report.utils import find_schematic, walk_schematic_hierarchy
+
+    root_sch = Path(schematic_path) if schematic_path else find_schematic(pcb_path)
+    if root_sch is not None and root_sch.is_file():
+        walked = walk_schematic_hierarchy(root_sch, lambda sheet: sheet.is_relative_to(project_dir))
+        project_files.extend(walked.sheets)
+        for sheet in walked.outside:
+            logger.warning("Sub-sheet outside the project directory not bundled: %s", sheet)
+    else:
+        logger.warning(
+            "No unambiguous root schematic for %s; project ZIP contains no schematics "
+            "(pass --sch to include them)",
+            pcb_path.name,
+        )
 
     if not project_files:
         raise FileNotFoundError(f"No KiCad project files found in {project_dir}")
@@ -2031,7 +2084,10 @@ class ManufacturingPackage:
         """Create ZIP of KiCad project files."""
         try:
             result.project_zip_path = _create_project_zip(
-                self.pcb_path, out_dir, self.config.project_zip_name
+                self.pcb_path,
+                out_dir,
+                self.config.project_zip_name,
+                schematic_path=self.schematic_path,
             )
         except Exception as e:
             result.errors.append(f"Project ZIP creation failed: {e}")

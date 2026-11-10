@@ -84,9 +84,14 @@ kct suggest alternatives schematic.kicad_sch # Part alternatives
 
 ## Fixtures
 
-The `fixtures/` directory contains sample KiCad files for running the demos.
-If empty, copy your own project files here or use the examples from other
-directories.
+No sample KiCad files ship with these demos, and the `fixtures/` directory
+the scripts look in does not exist until you create it. Each demo falls back to
+a built-in synthetic example when its input is missing. To analyze a real
+design, create `fixtures/` next to the scripts and copy your own project files
+(or the examples from other directories) in under the names the scripts load:
+`fixtures/dense_board.kicad_pcb` (`congestion_demo.py`),
+`fixtures/power_board.kicad_pcb` (`thermal_demo.py`), and
+`fixtures/project.kicad_pcb` + `fixtures/project.kicad_sch` (`cost_demo.py`).
 
 ## Agent Integration
 

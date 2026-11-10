@@ -65,10 +65,13 @@ class BoardIdRule(DRCRule):
         results.rules_checked = 1
         if not _populated_sides(pcb):
             return results
-        rev = (pcb.revision or "").strip().lower()
+        rev = (pcb.revision or "").strip()
+        rev_re = re.compile(
+            r"(?<![A-Za-z0-9])(?:rev\.?\s*)?" + re.escape(rev) + r"(?![A-Za-z0-9])", re.IGNORECASE
+        )
         for content in _silk_texts(pcb):
             if rev:
-                if rev in content.lower():
+                if rev_re.search(content):
                     return results
             elif _GENERIC_REV.search(content):
                 return results

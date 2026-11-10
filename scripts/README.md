@@ -22,6 +22,16 @@ Python helpers with `uv run python scripts/<name>.py`, from the repository root.
 | `verify-site-deployment.sh` | Standalone drift check: does the live kicad-tools.org deployment match the built site artifacts (uses `lib/site-verify.sh`). |
 | `regen_net_status_why_golden.py` | Regenerate the `net-status --why` golden fixtures (#5521). |
 | `routing_plan_fleet_table.py` | Fleet precision/recall table for the routing plan (#5521). |
+| `changelog_assemble.py` | Assemble `changelog.d/` fragments into a versioned CHANGELOG section (#5775). |
+| `ecosystem_refresh.py` | Report drift between the ecosystem registry (`src/kicad_tools/ecosystem/data/projects.toml`) and upstream reality; prints the TOML a human can apply and never writes the registry (#5839). |
+| `ecosystem_render.py` | Render the README's Related Projects block from the ecosystem registry; `--check` (the default) fails when the committed block differs from a fresh render, `--write` re-renders it (#5839). |
+| `ecosystem_reporecon_diff.py` | List RepoRecon repos missing from the ecosystem registry; reports only, never edits `projects.toml` (#6749). |
+| `measure_bundle_crossings.py` | Read-only fleet measurement for the bundle crossing report: hits, false alarms and misses against each committed routed board's unfinished nets (#6339). |
+| `release_plan.py` | Plan, gate and open the daily automated release PR; run by `.github/workflows/release-pr.yml` (#5776). |
+| `release_tag.py` | Tag a merged release, then create its GitHub Release once PyPI has it; called by `.github/workflows/release-tag.yml` (#5777). |
+| `render_agent_guidance.py` | Render the shared contributor guidance (`docs/contributing/agent-guidance.md`) into the marked blocks of `CLAUDE.md` and `AGENTS.md` (#5964). |
+| `sync_agent_skills.py` | Keep `.claude/commands/kct/` a byte-identical copy of the packaged skills in `src/kicad_tools/agent_skills/kct/` (`--write` after editing the package data; #5950). |
+| `update_3dmodel_manifest.py` | Regenerate `src/kicad_tools/data/kicad-3dmodels/manifest.json` from the stock 3D models that boards and package data reference; needs network (#7683). |
 
 ## Subdirectories
 
@@ -38,6 +48,14 @@ because the package is recipe-finalised or the report records board-specific che
 | `refresh_bundles_6404.py` | Refill, re-plot and re-pin a board's hash-bound bundle on a staged copy (boards 04 and 07), publishing nothing unless every gate passes; the tail is `refresh_readiness.repin_staged`. Board 04 re-plots only the copper and F.Silkscreen Gerbers, keeps its `check_manufacturing.py` gate, and captures the recipe's `run_drc` into `output/drc_report.json`; it replaces the former `regenerate_board_04_6269.py` / `regenerate_board_04_6404.py` (#6404, #7353, #7357). |
 | `generate_local_3d_bodies_7685.py` | Writes the project-local VRML bodies (board 03 J2; board 09 J1, RSH1, L1) whose STEP files do not exist upstream, plus each board's `output/3dshapes/local_models.json`, and attaches them with `kicad_tools.pcb.models3d.attach_local_models`. Generated from nominal envelopes, so they are ours to commit; idempotent (#7685). |
 | `render_modelgen_evidence_7687.py` | Generates `kct models generate` STEP bodies for board 03 J2 and board 09 RSH1/L1 on one-footprint scratch boards and renders their top views on the pinned evidence toolchain into `docs/guides/images/parametric-3d-models/`. Needs the `[models]` extra and `KCT_KICAD_DOCKER=1`; leaves the committed boards untouched (#7687). |
+| `annotate_pintypes_6025.py` | Carry schematic pad pin types onto boards 04-07's committed PCBs without re-routing (#6025). |
+| `declare_router_netclasses_6390.py` | Declare the router's net classes in the committed routed sidecars (`.kicad_pro` / `.kicad_dru`) without re-routing; `--refill` also recomputes the saved zone fills (#6390). |
+| `native_refill_board_04_7337.py` | Re-save board 04's zone fills as kicad-cli's own refill computes them (#7337). |
+| `refill_thermal_ladder_7295.py` | Re-fill boards 00/01/04 under the per-pad thermal-spoke ladder (#7295). |
+| `refresh_copper_gerbers_6404.py` | Replace only the copper-layer Gerbers of a committed bundle's `gerbers.zip`; every other member keeps its committed bytes (#6404). |
+| `regenerate_board_00_6076.py` | Deterministic-UUID regeneration of board 00-simple-led, with its package (#6076). |
+| `_bundle_links.py` | Helper module: keeps relative markdown links valid when a board file is copied into a bundle (#6899). |
+| `_cpl_frame.py` | Helper module: expected CPL coordinates in the Gerber/drill frame, computed independently of `kct export` (#7199). |
 
 ### `ci/`
 
@@ -57,6 +75,13 @@ end-to-end checks, the mypy baseline, and route determinism:
 `native_observer.md`, `native_observer.py`, `native_observer_pytest.py`,
 `net_class_map_resolver.py`, `normalize_copper.py`, `run_native_routed_drc.sh`,
 `run_observed.py`, `select_routed_pcbs.py`, `verify_changes_filter.mjs`.
+Also here: `board_05_unattended.py`, `check_board07_diffpair_baseline.py`,
+`check_copper_safety_drc.py`, `check_pr_checks_present.py`,
+`check_routed_drc_internal.py`, `compare_model_coverage.py`,
+`identity_allowance.py`, `model_coverage_report.py`, `site_drift.py`
+(warn-only drift check of the live kicad-tools.org against this repo, #7664),
+`update_ci_extended.py` (regenerates `tests/ci_extended.txt` from measured
+test times, #6013).
 `normalize_copper.py` is the routed-copper normalizer
 `board_route_determinism_smoke.sh` compares runs with: it reduces a
 `.kicad_pcb` to the sorted multiset of whole, paren-balanced
@@ -135,6 +160,9 @@ uv run python scripts/corpus/benchmark_readiness.py --no-manifest \
   --board boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb
 ```
 
+`corpus/hf_hub.py` is the shared Hugging Face dataset access module (retry/backoff)
+behind the probe, the manifest builder and the manifest runner (#4830).
+
 The pure helpers `corpus/parse_taxonomy.py` and `corpus/corpus_manifest.py` (no
 network, no CLI) are unit-tested by `tests/test_corpus_manifest.py`;
 `corpus/omnieda_sample.py` (offline) by `tests/test_corpus_omnieda.py`;
@@ -170,3 +198,11 @@ plus standalone router benchmark / profiling scripts (`bench_*.py`,
 [`docs/research/placement_score_calibration.md`](../docs/research/placement_score_calibration.md)),
 `profile_board06_rtree_deletes.py`, `run_phase0_corpus.sh`,
 `run_phase0_fast_corpus.sh`, `train_phase0_classifier.py`.
+
+Also here: `bench_collision_obstacle_scan.py`, `bench_sexp_traversal.py`,
+`diffpair_bench.py` (#6442, writes `data/research/diffpair_bench/`),
+`embedded_checksum_probe.py`, `escape_flow_experiment.py`,
+`expand_route_experiment.py`, `fom_decoupling_ab.py`, `krt_compare.py`,
+`measure_3d_catalog_coverage.py`, `net_order_experiment.py`,
+`nogood_cache_experiment.py`, `profile_route_obstacle_scan.py`,
+`ripup_experiment.py`, `route_phase_profile.py`, `shrink_experiment.py`.
