@@ -1910,6 +1910,8 @@ def _reinforce_ends(
                         result.placed.append(PlacedAnchor(x=a.x, y=a.y))
                     if len(leg.anchors) == 2:
                         leg.status = LEG_FULL
+                        # Two anchors imply a plan_pair result, so both are set.
+                        assert t0 is not None and t1 is not None
                         leg.wire_span_mm = t1 - t0
                         shifts = [
                             (name, d)
