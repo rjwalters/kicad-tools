@@ -888,6 +888,7 @@ class ReadinessResult:
     report: dict[str, Any]
     report_path: Path
     exit_code: int
+    baseline_record: dict[str, Any] | None = None
 
     @property
     def status(self) -> str:
@@ -1883,10 +1884,12 @@ def _baseline_candidates(options: ReadinessOptions) -> list[Path]:
 
 def _introduced_warning_counts(
     options: ReadinessOptions, engines: Engines, check_report: dict
-) -> tuple[dict[str, int] | None, str | None]:
-    """Per-rule count of warnings introduced since ``options.baseline``.
+) -> tuple[tuple[dict[str, int], dict[str, int]] | None, str | None]:
+    """Per-rule warnings introduced since ``options.baseline``.
 
-    Returns ``(counts, error)``; exactly one is non-``None``.
+    Returns ``((introduced, baseline_counts), error)``; exactly one of the two
+    is non-``None``. ``baseline_counts`` is the baseline's own per-rule warning
+    count (Issue #8673), not back-computed from the introduced rows.
     """
     from kicad_tools.cli.check_diff import diff_reports
 
@@ -1908,7 +1911,7 @@ def _introduced_warning_counts(
         if row.get("severity") == "warning":
             rule = str(row.get("rule_id") or "unknown")
             counts[rule] = counts.get(rule, 0) + 1
-    return dict(sorted(counts.items())), None
+    return (dict(sorted(counts.items())), _warning_counts(old)), None
 
 
 def _gate_warning_review(
@@ -1930,12 +1933,12 @@ def _gate_warning_review(
                 ),
                 counts,
             )
-        introduced = found
-        old_counts = {r: counts.get(r, 0) - n for r, n in introduced.items()}
+        introduced, old_counts = found
         options.baseline_record = {
             "baseline": str(options.baseline),
             "introduced": introduced,
             "previous_counts": old_counts,
+            "current_counts": counts,
         }
     else:
         candidates = _baseline_candidates(options)
@@ -3774,7 +3777,12 @@ def _run_readiness_candidate(
         report_path.write_text(json.dumps(report, indent=2) + "\n")
 
     exit_code = 0 if report["status"] == STATUS_READY else 1
-    return ReadinessResult(report=report, report_path=report_path, exit_code=exit_code)
+    return ReadinessResult(
+        report=report,
+        report_path=report_path,
+        exit_code=exit_code,
+        baseline_record=options.baseline_record,
+    )
 
 
 def _write_known_issues_evidence(options: ReadinessOptions) -> None:
@@ -3806,14 +3814,14 @@ def _print_report(result: ReadinessResult, options: ReadinessOptions) -> None:
     print()
     for check in report["checks"]:
         print(f"  [{check['status']:>8s}] {check['name']}: {check['detail']}")
-    base = options.baseline_record
+    base = result.baseline_record or options.baseline_record
     if base is not None:
         print()
         print(f"  Warnings introduced since baseline {base['baseline']}:")
         for rule, n in base["introduced"].items():
             print(
                 f"    {rule}: +{n} ({base['previous_counts'].get(rule, 0)} -> "
-                f"{base['previous_counts'].get(rule, 0) + n})"
+                f"{base['current_counts'].get(rule, 0)})"
             )
         if not base["introduced"]:
             print("    none")
