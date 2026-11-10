@@ -1006,6 +1006,8 @@ class CppGrid:
         # Track synced route count for incremental stored segment/via updates
         # (Issue #2439: C++ geometric validation)
         self._synced_route_count: int = 0
+        # Issue #8769: authored route-floor version last synced to C++.
+        self._stored_route_floor_version: int = 0
         # Issue #6243: what ``sync_authored_floors`` last installed.
         self._authored_key: tuple | None = None
 
