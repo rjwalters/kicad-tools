@@ -14,6 +14,7 @@ from unittest.mock import patch
 from kicad_tools.router.access_ripup import (
     KNOWN_FAILURE_BACKOFF_AFTER,
     KNOWN_FAILURE_BACKOFF_FLOOR_S,
+    KNOWN_FAILURE_MIN_SEARCH_SLICE_S,
     RipupCycleGuard,
 )
 
@@ -298,3 +299,82 @@ def test_copper_key_survives_nudges_but_not_a_new_foreign_net():
     entered = dict(base)
     entered[3] = [seg(3, 9.0, 30.0)]  # net 3 enters the window
     assert router._failure_neighbourhood_print(VICTIM, entered) != key
+
+
+# --- setup-bound back-off floor (issue #8644) ---------------------------------
+
+
+def test_floor_rises_above_setup_cost_so_a_backed_off_net_reaches_the_search():
+    """A net whose search keeps stopping in mask setup at the floor is given
+    setup time + a minimum search slice next time, until setup completes."""
+    setup_s = 6.0  # HV mask setup cost, a little above the 5 s floor
+    g = RipupCycleGuard()
+    caps: list[float | None] = []
+    reached_search = False
+    for it in range(1, 9):
+        g.begin_iteration(it, {7: SEAL})
+        used = g.search_cap(7, it, 30.0)
+        caps.append(used)
+        assert used is not None
+        stopped = used < setup_s  # setup eats the whole budget
+        if not stopped:
+            assert used - setup_s >= KNOWN_FAILURE_MIN_SEARCH_SLICE_S or used == 30.0
+            reached_search = True
+            break
+        g.note_search(7, it, used, used, routed=False, setup_stopped=True)
+    assert reached_search, f"never reached A*: caps={caps}"
+    assert caps[-1] > KNOWN_FAILURE_BACKOFF_FLOOR_S
+
+
+def test_floor_is_unchanged_without_a_setup_stop_and_never_exceeds_cap():
+    g = RipupCycleGuard()
+    for it in (1, 2, 3, 4, 5):
+        _fail_capped(g, it, 30.0)
+    assert g.search_cap(7, 6, 30.0) == KNOWN_FAILURE_BACKOFF_FLOOR_S
+    g.begin_iteration(6, {7: SEAL})
+    g.note_search(7, 6, 5.0, 5.0, routed=False, setup_stopped=True)
+    g.begin_iteration(7, {7: SEAL})
+    assert g.search_cap(7, 7, 6.0) <= 6.0
+    assert g.search_cap(7, 7, None) is None
+
+
+def test_reroute_wrapper_reports_a_setup_stop_to_the_guard():
+    router, _neg, _net_routes, _pads = _fixture()
+    g = RipupCycleGuard()
+    router.router = SimpleNamespace(last_route_deadline_hit=True, last_route_deadline_iterations=0)
+    clock = [0.0]
+
+    def fake_route(net, pf, per_net_timeout=None):
+        clock[0] += per_net_timeout or 0.0
+        return []
+
+    with (
+        patch.object(router, "_route_net_negotiated", side_effect=fake_route),
+        patch("kicad_tools.router.core.time", SimpleNamespace(time=lambda: clock[0])),
+    ):
+        for it in (1, 2, 3, 4):
+            g.begin_iteration(it, {VICTIM: SEAL})
+            router._route_net_known_failure_aware(VICTIM, 1.0, 30.0, g, it)
+    assert g.setup_floor_s[VICTIM] > KNOWN_FAILURE_BACKOFF_FLOOR_S
+
+
+def test_reroute_wrapper_reads_setup_stop_from_cpp_backend_py_router():
+    """CppPathfinder-shaped stub: the flags exist only on ``_py_router``."""
+    router, _neg, _net_routes, _pads = _fixture()
+    g = RipupCycleGuard()
+    py_router = SimpleNamespace(last_route_deadline_hit=True, last_route_deadline_iterations=0)
+    router.router = SimpleNamespace(_py_router=py_router)
+    clock = [0.0]
+
+    def fake_route(net, pf, per_net_timeout=None):
+        clock[0] += per_net_timeout or 0.0
+        return []
+
+    with (
+        patch.object(router, "_route_net_negotiated", side_effect=fake_route),
+        patch("kicad_tools.router.core.time", SimpleNamespace(time=lambda: clock[0])),
+    ):
+        for it in (1, 2, 3, 4):
+            g.begin_iteration(it, {VICTIM: SEAL})
+            router._route_net_known_failure_aware(VICTIM, 1.0, 30.0, g, it)
+    assert g.setup_floor_s[VICTIM] > KNOWN_FAILURE_BACKOFF_FLOOR_S

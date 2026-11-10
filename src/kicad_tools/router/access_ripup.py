@@ -87,6 +87,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 __all__ = [
     "KNOWN_FAILURE_BACKOFF_AFTER",
     "KNOWN_FAILURE_BACKOFF_FLOOR_S",
+    "KNOWN_FAILURE_MIN_SEARCH_SLICE_S",
     "MAX_PAIR_RIPUPS",
     "MAX_TARGETING_EVALUATIONS",
     "RIPPABLE_CLOSING_KINDS",
@@ -116,6 +117,11 @@ KNOWN_FAILURE_BACKOFF_AFTER = 2
 #: seconds (nor raises a cap that was already smaller).  Matches the negotiated
 #: loop's own remaining-budget floor (``PER_NET_CAP_FLOOR_S``).
 KNOWN_FAILURE_BACKOFF_FLOOR_S = 5.0
+
+#: Issue #8644: HV pairwise-mask setup shares the per-net wall budget with the
+#: search.  When a backed-off search stopped in setup (zero A* expansions), the
+#: net's next floor is that setup time plus this slice, so the search starts.
+KNOWN_FAILURE_MIN_SEARCH_SLICE_S = 2.0
 
 #: Issue #8486: a search that returned no path after at least this fraction of
 #: its cap counts as "ran to the cap" (the C++ wall clock is checked between
@@ -662,6 +668,10 @@ class RipupCycleGuard:
     """``net -> iteration`` in which its futile rescue was last actually run
     (not skipped); drives the :data:`KNOWN_FAILURE_REPROBE_EVERY` re-probe."""
 
+    setup_floor_s: dict[int, float] = field(default_factory=dict)
+    """``net -> seconds`` (issue #8644): floor for its next cap after a search
+    stopped in pre-search setup; setup time spent plus a minimum search slice."""
+
     backoffs: list[tuple[int, int, float]] = field(default_factory=list)
     """``(iteration, net, cap)`` for every search the back-off shortened."""
 
@@ -683,6 +693,7 @@ class RipupCycleGuard:
             self.capped_streak,
             self.futile_rescue,
             self.last_fail_s,
+            self.setup_floor_s,
             self.futile_rescue_iter,
         ):
             for net in [n for n in memo if n not in self.entry_signature]:
@@ -716,7 +727,8 @@ class RipupCycleGuard:
         last = self.last_fail_s.get(int(net))
         if last is not None:
             shrunk = min(shrunk, last)
-        reduced = max(min(cap, KNOWN_FAILURE_BACKOFF_FLOOR_S), shrunk)
+        floor = max(KNOWN_FAILURE_BACKOFF_FLOOR_S, self.setup_floor_s.get(int(net), 0.0))
+        reduced = max(min(cap, floor), shrunk)
         if reduced < cap:
             self.backoffs.append((int(iteration), int(net), reduced))
         return reduced
@@ -728,8 +740,13 @@ class RipupCycleGuard:
         cap: float | None,
         elapsed: float,
         routed: bool,
+        setup_stopped: bool = False,
     ) -> None:
         """Feed one negotiated search back (issue #8486).
+
+        ``setup_stopped`` (issue #8644): the search ended in pre-search mask
+        setup without expanding A*; the net's next floor then rises above the
+        setup time it just spent (see :data:`KNOWN_FAILURE_MIN_SEARCH_SLICE_S`).
 
         A search that routed, or ran with no entry signature, resets the net's
         streak; a no-path search extends it whether or not it reached its cap
@@ -745,8 +762,13 @@ class RipupCycleGuard:
         if routed or cap is None or sig is None:
             self.capped_streak.pop(net, None)
             self.last_fail_s.pop(net, None)
+            self.setup_floor_s.pop(net, None)
             return
         self.last_fail_s[net] = float(elapsed)
+        if setup_stopped:
+            self.setup_floor_s[net] = float(elapsed) + KNOWN_FAILURE_MIN_SEARCH_SLICE_S
+        else:
+            self.setup_floor_s.pop(net, None)
         streak = prev[2] + 1 if prev is not None else 1
         self.capped_streak[net] = (iteration, sig, streak)
 
@@ -788,6 +810,7 @@ class RipupCycleGuard:
             self.capped_streak,
             self.no_path_seen,
             self.last_fail_s,
+            self.setup_floor_s,
             self.futile_rescue_iter,
         ):
             memo.pop(int(net), None)
