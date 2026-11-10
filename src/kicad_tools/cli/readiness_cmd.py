@@ -342,7 +342,13 @@ def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
     return result
 
 
-def _run_export(pcb: Path, manufacturer: str, output_dir: Path, assembly: bool) -> EngineRun:
+def _run_export(
+    pcb: Path,
+    manufacturer: str,
+    output_dir: Path,
+    assembly: bool,
+    merge_lcsc_from: Path | None = None,
+) -> EngineRun:
     """Generate a generic bundle without changing the already-checked project rules."""
     from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
 
@@ -352,6 +358,7 @@ def _run_export(pcb: Path, manufacturer: str, output_dir: Path, assembly: bool) 
             include_bom=assembly,
             include_pnp=assembly,
             emit_drc_constraints=False,
+            merge_lcsc_from=merge_lcsc_from,
         )
         with stdout_to_stderr_when(True):
             result = ManufacturingPackage(
@@ -518,7 +525,7 @@ class Engines:
 
     kct_check: Callable[[Path, str, Path, Sequence[str]], EngineRun] = _run_kct_check
     native_drc: Callable[[Path, Path], EngineRun] = _run_native_drc
-    export: Callable[[Path, str, Path, bool], EngineRun] = _run_export
+    export: Callable[..., EngineRun] = _run_export
     refill: Callable[[Path], EngineRun] = _refill_and_save
     schematic_pdf: Callable[[Path, Path], EngineRun] = _export_schematic_pdf
     assembly_pdf: Callable[[Path, Sequence[str], Path], EngineRun] = _export_assembly_pdf
@@ -879,6 +886,9 @@ class ReadinessOptions:
     # board directory or bundle.  ``baseline_record`` is filled in by Gate 4b.
     baseline: Path | None = None
     baseline_record: dict[str, Any] | None = None
+    # Seed BOM whose verified LCSC numbers ``generate`` merges (Issue #8762),
+    # the same merge as ``kct export --merge-lcsc-from``.
+    merge_lcsc_from: Path | None = None
     # The ``.kct`` spec resolved from the ORIGINAL board before staging (#8727);
     # the staged candidate cannot see a spec above ``board_dir``.
     bom_spec_file: Path | None = None
@@ -1042,6 +1052,17 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         if not baseline.exists():
             return None, f"--baseline path not found: {baseline}"
 
+    merge_lcsc_from: Path | None = None
+    if getattr(args, "merge_lcsc_from", None):
+        if not args.generate:
+            return (
+                None,
+                "--merge-lcsc-from only applies to --generate; --verify never rebuilds the BOM",
+            )
+        merge_lcsc_from = Path(args.merge_lcsc_from).resolve()
+        if not merge_lcsc_from.is_file():
+            return None, f"--merge-lcsc-from file not found: {merge_lcsc_from}"
+
     ack_trace: dict[str, str] = {}
     for item in getattr(args, "ack_trace_quality", None) or []:
         rule, _, reason = item.partition("=")
@@ -1088,6 +1109,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             skip_fiducials=bool(getattr(args, "skip_fiducials", False)),
             skip_board_info=bool(getattr(args, "skip_board_info", False)),
             ack_trace_quality=ack_trace,
+            merge_lcsc_from=merge_lcsc_from,
         ),
         None,
     )
@@ -2866,7 +2888,16 @@ def _gate_artifacts(
         return _verify_finished_artifacts(options)
 
     options.output_dir.mkdir(parents=True, exist_ok=True)
-    run = engines.export(options.pcb, options.manufacturer, options.output_dir, options.assembly)
+    export_args: tuple[Any, ...] = (
+        options.pcb,
+        options.manufacturer,
+        options.output_dir,
+        options.assembly,
+    )
+    if options.merge_lcsc_from is not None:
+        run = engines.export(*export_args, merge_lcsc_from=options.merge_lcsc_from)
+    else:
+        run = engines.export(*export_args)
     if not run.ok:
         return CheckOutcome(
             name="artifacts",
@@ -3062,6 +3093,11 @@ def _gate_bom(
         )
     if unresolved:
         shown = ", ".join(unresolved[:8]) + (" ..." if len(unresolved) > 8 else "")
+        hint = ""
+        if options.operation == "generate" and options.merge_lcsc_from is None:
+            hint = (
+                " No --merge-lcsc-from source was supplied, so no existing BOM was merged (#8762)."
+            )
         note = f" ({spec_note})" if spec_note else ""
         if spec_note:
             logger.warning("bom gate: %s", spec_note)
@@ -3070,7 +3106,7 @@ def _gate_bom(
             status=FAILED,
             detail=f"{len(unresolved)} BOM line(s) lack a procurement identifier: {shown}{note}.",
             blockers=[
-                f"{len(unresolved)} BOM line(s) require human part selection: {shown}{note}."
+                f"{len(unresolved)} BOM line(s) require human part selection: {shown}{note}.{hint}"
             ],
         )
 
@@ -3804,6 +3840,10 @@ def _run_readiness_candidate(
     prep = _assembly_prep(options)
     options = replace(options, assembly_prep_record=prep)
     metrics["assembly_prep"] = prep
+    if options.operation == "generate":
+        metrics["lcsc_merge_source"] = (
+            str(options.merge_lcsc_from) if options.merge_lcsc_from else "none"
+        )
 
     if options.operation == "generate":
         preparation = engines.refill(options.pcb)
@@ -4215,6 +4255,16 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Per-layer filled-copper area tolerance in mm^2 for the "
             f"saved-vs-refilled equivalence check (default: {DEFAULT_FILL_TOLERANCE_MM2})"
+        ),
+    )
+    parser.add_argument(
+        "--merge-lcsc-from",
+        dest="merge_lcsc_from",
+        metavar="PATH",
+        default=None,
+        help=(
+            "With --generate: merge verified LCSC numbers from a previous BOM CSV, "
+            "as `kct export --merge-lcsc-from` does; the source is recorded in the report"
         ),
     )
     parser.add_argument(

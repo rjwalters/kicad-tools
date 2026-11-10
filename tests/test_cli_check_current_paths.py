@@ -307,6 +307,8 @@ class TestErrorPaths:
 
 @pytest.mark.parametrize("bridge", [False, True])
 def test_cli_cross_layer_path_requires_via(tmp_path, bridge):
+    # The bridging via is deliberately oversized (Issue #8745: an undersized
+    # via is now a path_ampacity finding; see test_path_ampacity_check.py).
     board = tmp_path / "layers.kicad_pcb"
     copper = _T_NETWORK_PCB_TEMPLATE.format(
         trunk_width=ADEQUATE_TRUNK_WIDTH_MM, sense_width=SENSE_WIDTH_MM
@@ -319,7 +321,7 @@ def test_cli_cross_layer_path_requires_via(tmp_path, bridge):
     if bridge:
         copper = (
             copper.rstrip()[:-1]
-            + '(via (at 60 50) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1))\n)\n'
+            + '(via (at 60 50) (size 8.5) (drill 8.0) (layers "F.Cu" "B.Cu") (net 1))\n)\n'
         )
     board.write_text(copper)
     before = board.read_bytes()

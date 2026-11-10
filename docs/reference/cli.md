@@ -345,6 +345,19 @@ Two placement modes:
   ends and every `--spacing` mm (default 15) along the run. `--spacing` is
   ignored, with a warning, in `ends` mode.
 
+**Wire list sidecar (#8744).** Each non-dry-run `ends` pass writes or updates
+`<board>.reinforcement.json` (next to the `-o` output when given), `version: 1`,
+one entry per leg: `net`, `layer`, `kind`, `path` (first declared current path,
+else null; `paths` lists all), `leg_start`/`leg_end`, `anchors` (two `{x,y}`,
+sheet-absolute), `length_mm` (along the leg), `straight_line_mm` (between the
+anchors), `wire_gauge_awg`, `bare_diameter_mm`, `mask_opening` (null until
+#8743) and `status` (legs that are `too_short`/`unhandled` are listed with no
+anchors). Re-running replaces a wire with the same net + layer + leg ends,
+keeps other nets' wires and never duplicates; output is sorted and has no
+timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
+embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
+[--format json]` prints it read-only from the sidecar.
+
 Declared current paths that do not resolve (moved/removed pad, ambiguous
 loop) are listed under `unresolved_paths` and warned about on stderr; they
 get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
