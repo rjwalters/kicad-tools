@@ -12,6 +12,7 @@ filling zones using kicad-cli:
 import argparse
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 from kicad_tools.cli.format_options import add_format_flag, emit_json
 
@@ -27,7 +28,8 @@ def _thermal_asymmetry_count(pcb_path: Path) -> int | None:
         from kicad_tools.schema.pcb import PCB
         from kicad_tools.validate.rules.thermal_asymmetry import ThermalAsymmetryRule
 
-        results = ThermalAsymmetryRule().check(PCB.load(pcb_path), None)
+        # The rule ignores ``design_rules`` (it ``del``s it), so None is safe.
+        results = ThermalAsymmetryRule().check(PCB.load(pcb_path), cast(Any, None))
         return len(list(results))
     except Exception:
         return None
@@ -1143,7 +1145,7 @@ def _run_relieve(args) -> int:
     except Exception as e:
         return _fail(args, f"Error: {e}")
 
-    payload = {"pcb": str(pcb_path), "output": str(target)}
+    payload: dict[str, Any] = {"pcb": str(pcb_path), "output": str(target)}
     _warn_if_asymmetry_rose(asym_before, target, payload)
     if json_mode:
         emit_json(payload)
