@@ -4057,7 +4057,10 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         "-o",
         "--output",
         default=None,
-        help="Manufacturing bundle directory (default: <pcb-dir>/manufacturing/)",
+        help=(
+            "Manufacturing bundle directory (default: <pcb-dir>/manufacturing/); "
+            "must be inside the board directory"
+        ),
     )
     parser.add_argument(
         "--sch",

@@ -7290,7 +7290,10 @@ def _add_readiness_parser(subparsers) -> None:
         dest="readiness_output",
         metavar="DIR",
         default=None,
-        help="Manufacturing bundle directory (default: <pcb-dir>/manufacturing/)",
+        help=(
+            "Manufacturing bundle directory (default: <pcb-dir>/manufacturing/); "
+            "must be inside the board directory"
+        ),
     )
     rd_parser.add_argument(
         "--sch",
