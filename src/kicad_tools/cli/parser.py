@@ -2509,18 +2509,32 @@ def _add_pcb_parser(subparsers) -> None:
     # pcb reinforce (issue #4220 -- Unit A of #4218)
     pcb_reinforce = pcb_subparsers.add_parser(
         "reinforce",
-        help="Emit a spaced same-net PTH anchor row along a routed net",
-        description="Post-route buttress-wire reinforcement (Unit A of #4218). "
-        "Walks a routed net's segments into ordered polylines and emits a "
-        "spaced row of same-net plated through-hole (PTH) anchor vias along the "
-        "longest run, sized to a wire gauge and respecting the annular-ring "
-        "floor. A solid-core wire is later soldered through the anchor row to "
-        "carry additional current. Anchors are same-net (no shorts); a candidate "
-        "that would collide with a DIFFERENT net is refused and reported, not "
-        "placed. NOTE: anchors are same-net vias -- existing zone pours must be "
-        "refilled afterward (e.g. `kicad-cli pcb drc --refill-zones`) so the "
-        "pours knock out around them. In-place by default; use -o to write "
-        "elsewhere.",
+        help="Place same-net PTH buttress-wire anchors at the ends of a routed net's wire legs",
+        description="Post-route buttress-wire reinforcement (#4218, #8741). The "
+        "intended build: a hand-bent solid-core wire is laid along a "
+        "high-current trace and soldered to that trace along its whole length, "
+        "held by exactly two anchor holes, one at each end of the wire. One wire "
+        "stays on one copper layer. The default --anchor-mode ends splits the "
+        "net's routed copper into legs (a run on one copper layer with no "
+        "junction inside it) and places exactly two same-net plated through-hole "
+        "(PTH) anchor vias per leg, one near each end, none in between, each "
+        "at least --end-offset mm clear (straight-line) of the same-net copper "
+        "the leg ends on: a pad or via its track overlaps, or the whole trunk a "
+        "branch tees off. A leg with no room for two such anchors (too short, or "
+        "folding back so they would overlap) gets none and is reported "
+        "too_short; a leg gets ONE anchor only when a clearance or hole-to-hole "
+        "rule refused the other (partial, listed under refused). A Y junction "
+        "becomes a trunk plus a branch; loops and "
+        "higher-degree junctions are reported as unhandled. --anchor-mode "
+        "spaced keeps the old row of anchors every --spacing mm. Anchors are "
+        "sized to the wire gauge, respect the annular-ring floor and are "
+        "same-net (no shorts); a candidate that would collide with a DIFFERENT "
+        "net is refused and reported, not placed. LIMITATION until #8743: the "
+        "anchors are still plain vias that inherit the board's via tenting, and "
+        "no solder-mask opening is emitted along the run, so the trace is not "
+        "yet exposed for soldering. NOTE: existing zone pours must be refilled "
+        "afterward (e.g. `kicad-cli pcb drc --refill-zones`) so the pours knock "
+        "out around the anchors. In-place by default; use -o to write elsewhere.",
     )
     pcb_reinforce.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_reinforce.add_argument(
@@ -2535,31 +2549,55 @@ def _add_pcb_parser(subparsers) -> None:
         help="Buttress-wire gauge in AWG (default: 16; also supports 14, 12)",
     )
     pcb_reinforce.add_argument(
+        "--anchor-mode",
+        dest="anchor_mode",
+        choices=["ends", "spaced"],
+        default="ends",
+        help="ends (default): exactly two anchors per single-layer wire leg, one "
+        "at each end, none mid-run. spaced: the pre-#8742 row of anchors every "
+        "--spacing mm along the run.",
+    )
+    pcb_reinforce.add_argument(
+        "--end-offset",
+        dest="end_offset",
+        type=float,
+        default=1.0,
+        metavar="MM",
+        help="ends mode: minimum straight-line clearance in mm from each end "
+        "anchor's pad edge to the same-net component pad (or via, or the whole "
+        "trunk) "
+        "the leg ends on (default: 1.0); a leg that bends near its end moves "
+        "the anchor further inward. A leg too short for two anchors at this "
+        "offset is reported too_short and gets none.",
+    )
+    pcb_reinforce.add_argument(
         "--spacing",
         type=float,
-        default=15.0,
-        help="Arc-length spacing between mid-run anchors, in mm (default: 15.0)",
+        default=None,
+        help="spaced mode only: arc-length spacing between mid-run anchors, in "
+        "mm (default: 15.0). Ignored, with a warning, in ends mode.",
     )
     pcb_reinforce.add_argument(
         "--layer",
         help="Restrict to a copper layer (default: layer with the most "
-        "cumulative routed length for the net)",
+        "cumulative routed length for the net; with --current-paths in ends "
+        "mode, every layer the declared paths use)",
     )
     pcb_reinforce.add_argument(
         "--all-runs",
         dest="all_runs",
         action="store_true",
-        help="Anchor EVERY chained run on the target layer (multi-branch HV "
-        "nets), not just the single longest run. Default anchors only the "
-        "longest run.",
+        help="Anchor EVERY chained run (ends mode: every leg) on the target "
+        "layer, not just the single longest one. With --current-paths in ends "
+        "mode every eligible leg is anchored regardless.",
     )
     pcb_reinforce.add_argument(
         "--min-run-length",
         dest="min_run_length",
         type=float,
         default=None,
-        help="Only anchor runs at least this long, in mm. Shorter runs are "
-        "reported but not anchored. Composes with --all-runs.",
+        help="Only anchor runs (ends mode: legs) at least this long, in mm. "
+        "Shorter ones are reported but not anchored. Composes with --all-runs.",
     )
     pcb_reinforce.add_argument(
         "--current-paths",
@@ -2568,10 +2606,12 @@ def _add_pcb_parser(subparsers) -> None:
         help="Path to a JSON sidecar declaring branch-specific current-path "
         "intent (Issue #4980; see kicad_tools.router.current_paths."
         "CurrentPathSpec). When any declared path targets --net, reinforcement "
-        "gates to an allow-list: only runs fully covered by a resolved, "
-        "reinforcement-eligible path are anchored -- a declared sense/Kelvin "
+        "gates to an allow-list: only copper covered by a resolved, "
+        "reinforcement-eligible path is anchored -- a declared sense/Kelvin "
         "branch (reinforcement_eligible=false) is never anchored or bridged, "
-        "even with --all-runs.",
+        "even with --all-runs. In ends mode each such path gets one leg per "
+        "copper layer it uses, each with its own two anchors. Unresolved or "
+        "ambiguous declarations are reported (unresolved_paths), not skipped.",
     )
     pcb_reinforce.add_argument(
         "--voltage-map",
