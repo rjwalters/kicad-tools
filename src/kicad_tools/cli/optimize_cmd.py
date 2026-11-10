@@ -203,6 +203,25 @@ def _make_opens_verifier(rules_from: Path):
     return verify
 
 
+def _make_drc_verifier(rules_from: Path):
+    """Board-text -> ``{rule type: count}`` via kicad-cli (Issue #8720).
+
+    Counts every violation type (plus ``unconnected``) under the project's
+    ``.kicad_pro``/``.kicad_dru``, so a rewrite that raises any rule count the
+    in-process referee cannot model is rolled back.  ``None`` when kicad-cli
+    cannot run.
+    """
+    import tempfile
+
+    def verify(board_text: str) -> dict[str, int] | None:
+        with tempfile.TemporaryDirectory(prefix="kct_optdrc_") as td:
+            probe = Path(td) / "drc.kicad_pcb"
+            probe.write_text(board_text)
+            return _kicad_cli_drc_counts(probe, rules_from=rules_from)
+
+    return verify
+
+
 def _make_creepage_verifier(args):
     """Board-text -> ``{"netA|netB|layer": 1}`` for un-waived failing pairs.
 
@@ -978,9 +997,11 @@ Examples:
     # creepage), so the "clean" report cannot hide a regression the per-net
     # guards missed.
     if args.drc_aware:
-        config.output_verifiers["opens"] = _make_opens_verifier(
-            Path(args.project) if args.project else pcb_path
-        )
+        verifier_rules = Path(args.project) if args.project else pcb_path
+        config.output_verifiers["opens"] = _make_opens_verifier(verifier_rules)
+        # Issue #8720: any kicad-cli rule count rising (project .kicad_dru
+        # included) rolls the offending nets back.
+        config.output_verifiers["drc"] = _make_drc_verifier(verifier_rules)
     if args.voltage_map is not None:
         config.output_verifiers["creepage"] = _make_creepage_verifier(args)
 

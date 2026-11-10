@@ -26,7 +26,10 @@ Binding constraints (each is enforced in code and covered by a test):
   (``--guided``). The driver never retries and never submits after an abort.
 
 Selectors in :data:`SELECTORS` are UNVERIFIED against the live site: they were
-written without a recorded page. Tests run against synthetic page-state
+written without a recorded page, and a first live run (issue #8629) found the
+page has no ``[data-kct]`` attributes and no ``<select>``: every option is a
+chip/button, which :class:`_PlaywrightPage` models through the same
+``options``/``select``/``value`` seam (read-back = the chip's selected state). Tests run against synthetic page-state
 fixtures, which prove the abort/gate logic but not the live selectors; a live
 attended run is tracked separately.
 """
@@ -499,11 +502,20 @@ def connect_attended_page(
         pw.stop()
         raise DriverAbort(
             "connect",
-            f"no Chrome on port {port}; start it with --remote-debugging-port={port} "
-            "--user-data-dir=<dedicated profile dir>, sign in, open the quote page",
+            f"cannot attach to Chrome on port {port}. Start it with "
+            f"--remote-debugging-port={port} --user-data-dir=<dedicated profile dir>, "
+            "sign in, and make sure a tab is open on the quote page (a Chrome with "
+            "every window closed has no tab and CDP attach fails; issue #8629)",
         ) from exc
-    page = browser.contexts[0].pages[0]
-    return _PlaywrightPage(page), pw.stop
+    pages = [pg for ctx in browser.contexts for pg in ctx.pages]
+    if not pages:
+        pw.stop()
+        raise DriverAbort(
+            "connect",
+            f"the debug Chrome on port {port} has no open tab; open a tab in it "
+            "and navigate to the quote page",
+        )
+    return _PlaywrightPage(pages[0]), pw.stop
 
 
 class _PlaywrightPage:  # pragma: no cover - thin adapter, exercised only in a live attended run
@@ -517,21 +529,44 @@ class _PlaywrightPage:  # pragma: no cover - thin adapter, exercised only in a l
     def exists(self, selector: str) -> bool:
         return bool(self._p.query_selector(selector))
 
+    # JLC's options are chip/button groups, not <select>s (issue #8629). A
+    # ``<select>`` is still handled; otherwise the selector names the chip group
+    # container and each child is a chip. The chip structure and the "selected"
+    # markers below are UNVERIFIED until recorded from a live attended run.
     def options(self, selector: str) -> Sequence[str]:
         return list(
-            self._p.eval_on_selector_all(
-                f"{selector} option", "o => o.map(x => x.textContent.trim())"
+            self._p.eval_on_selector(
+                selector,
+                "e => (e.tagName==='SELECT' ? [...e.options] : [...e.children])"
+                ".map(x => x.textContent.trim())",
             )
         )
 
     def select(self, selector: str, value: str) -> None:
-        self._p.select_option(selector, label=value)
+        is_select = self._p.eval_on_selector(selector, "e => e.tagName==='SELECT'")
+        if is_select:
+            self._p.select_option(selector, label=value)
+            return
+        chips = self._p.query_selector(selector).query_selector_all(":scope > *")
+        for chip in chips:
+            if chip.text_content().strip() == value:
+                chip.click()
+                return
+        raise DriverAbort("select", f"no chip {value!r} under {selector}")
 
     def value(self, selector: str) -> str:
         return str(
             self._p.eval_on_selector(
                 selector,
-                "e => (e.tagName==='SELECT' ? e.selectedOptions[0].textContent : (e.value || e.textContent || e.href || '')).trim()",
+                """e => {
+                  if (e.tagName==='SELECT') return e.selectedOptions[0].textContent.trim();
+                  const on = [...e.children].find(c =>
+                    c.getAttribute('aria-pressed')==='true' ||
+                    c.getAttribute('aria-checked')==='true' ||
+                    /(^|[-_\\s])(active|selected|checked)([-_\\s]|$)/i.test(c.className));
+                  return on ? on.textContent.trim()
+                            : (e.value || e.textContent || e.href || '').trim();
+                }""",
             )
         )
 
