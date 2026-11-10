@@ -48,9 +48,7 @@ def _copy_board(src: Path, dest: Path) -> Path:
     return dest
 
 
-_FIDUCIAL_BLOCK = re.compile(
-    r'^\t\(footprint "Fiducial:.*?^\t\)\n', re.M | re.S
-)
+_FIDUCIAL_BLOCK = re.compile(r'^\t\(footprint "Fiducial:.*?^\t\)\n', re.M | re.S)
 
 
 def _copy_routed_without_fiducials(dest: Path) -> Path:
