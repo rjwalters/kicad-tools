@@ -2362,6 +2362,163 @@ def test_cli_json_reports_audit_rejection_reason(tmp_path, capsys, forced_loopin
     assert "resolved to ambiguous" in out["rejected_by_drc"][0]["reject_reason"]
 
 
+# --- issue #8734: sub-0.03 mm same-layer loop the check flags -------------
+
+_LOOP_A = (161.863, 122.713)
+_LOOP_B = (161.850, 122.700)
+_LOOP_C = (161.950, 122.600)
+_LOOP_D = (161.863, 122.688)
+_LOOP_END = (162.650, 122.600)
+_LOOP_E = (160.0, 122.713)
+
+
+def _thin_loop_board(
+    tmp_path: Path,
+    w2: float = 0.1524,
+    *,
+    ws: float | None = None,
+    a_pad: float | None = 0.05,
+    upstream: bool = False,
+    via_at_a: bool = False,
+) -> Path:
+    """Thin loop: path 1 A-B-C, path 2 A-D-C (``t`` = A-D, ``s`` = D-C).
+
+    ``w2`` is ``t``'s width and ``ws`` ``s``'s (default ``w2``).  ``a_pad`` sizes
+    the pad at A (``None`` = no pad); ``upstream`` adds a track E->A with a pad at
+    E (A is a track joint); ``via_at_a`` puts a via at A.
+    """
+    ws = w2 if ws is None else ws
+    segs = [
+        (_LOOP_A, _LOOP_B, "F.Cu", 0.1524),
+        (_LOOP_B, _LOOP_C, "F.Cu", 0.1524),
+        (_LOOP_A, _LOOP_D, "F.Cu", w2),
+        (_LOOP_D, _LOOP_C, "F.Cu", ws),
+        (_LOOP_C, _LOOP_END, "F.Cu", 0.1524),
+    ]
+    pads = [("B", *_LOOP_END, 0.05, 0.05)]
+    if a_pad is not None:
+        pads.append(("A", *_LOOP_A, a_pad, a_pad))
+    if upstream:
+        segs.append((_LOOP_E, _LOOP_A, "F.Cu", 0.1524))
+        pads.append(("E", *_LOOP_E, 0.05, 0.05))
+    vias = [_LOOP_A] if via_at_a else []
+    return _board(tmp_path, pads, segs, vias=vias)
+
+
+def _covered_findings(pcb) -> int:
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+    res = RedundantCopperRule().check(pcb, None)
+    return sum(1 for v in res.violations if v.rule_id == "redundant_copper_covered")
+
+
+def test_thin_same_layer_loop_is_pruned_and_check_goes_quiet(tmp_path):
+    p = _thin_loop_board(tmp_path)
+    from kicad_tools.schema.pcb import PCB
+
+    assert _covered_findings(PCB.load(str(p))) == 1
+    pcb, res = _run(p)
+    assert res.stats["segments_removed"] >= 1
+    assert _covered_findings(pcb) == 0
+    assert _connected(pcb, _LOOP_A, _LOOP_END)
+
+
+def test_thin_loop_wider_second_path_is_not_removed(tmp_path):
+    # path 2 wider than path 1: removing it would drop copper width.
+    pcb, res = _run(_thin_loop_board(tmp_path, w2=0.3))
+    assert res.stats["segments_removed"] == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"a_pad": 0.01},  # pad at A too small to reach B
+        {"a_pad": None, "upstream": True},  # A is a track joint
+        {"a_pad": 0.01, "upstream": True},
+        {"a_pad": None, "upstream": True, "via_at_a": True},  # via at A + track
+    ],
+    ids=["small-pad", "track-joint", "pad-and-track", "via-and-track"],
+)
+def test_thin_loop_prunes_whatever_sits_at_the_far_end(tmp_path, kwargs):
+    # t's far end stays joined to u at A once t goes, so nothing at A needs to
+    # reach the container.
+    p = _thin_loop_board(tmp_path, **kwargs)
+    from kicad_tools.schema.pcb import PCB
+
+    assert _covered_findings(PCB.load(str(p))) == 1
+    pcb, res = _run(p)
+    assert _covered_findings(pcb) == 0
+    assert _connected(pcb, _LOOP_A, _LOOP_END)
+    if kwargs.get("upstream"):
+        assert _connected(pcb, _LOOP_E, _LOOP_END)
+
+
+def test_thin_loop_wider_t_alone_is_not_removed(tmp_path):
+    # s no wider than c (so it is "covered"); only t is wider than the path it
+    # would hide under: dropping it would lose copper width.
+    _pcb, res = _run(_thin_loop_board(tmp_path, w2=0.3, ws=0.1524))
+    assert res.stats["segments_removed"] == 0
+
+
+def test_thin_loop_t_wider_than_u_but_not_c_is_not_removed(tmp_path):
+    # c wider than u; t fits under c but not under u.
+    segs = [
+        (_LOOP_A, _LOOP_B, "F.Cu", 0.1524),
+        (_LOOP_B, _LOOP_C, "F.Cu", 0.4),
+        (_LOOP_A, _LOOP_D, "F.Cu", 0.25),
+        (_LOOP_D, _LOOP_C, "F.Cu", 0.25),
+        (_LOOP_C, _LOOP_END, "F.Cu", 0.1524),
+    ]
+    p = _board(tmp_path, [("A", *_LOOP_A, 0.05, 0.05), ("B", *_LOOP_END, 0.05, 0.05)], segs)
+    _pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+
+
+def test_thin_loop_t_wider_than_c_but_not_u_is_not_removed(tmp_path):
+    # u wider than c; t fits under u but is wider than the container it is
+    # being removed against.
+    segs = [
+        (_LOOP_A, _LOOP_B, "F.Cu", 0.4),
+        (_LOOP_B, _LOOP_C, "F.Cu", 0.1524),
+        (_LOOP_A, _LOOP_D, "F.Cu", 0.25),
+        (_LOOP_D, _LOOP_C, "F.Cu", 0.1524),
+        (_LOOP_C, _LOOP_END, "F.Cu", 0.1524),
+    ]
+    p = _board(tmp_path, [("A", *_LOOP_A, 0.05, 0.05), ("B", *_LOOP_END, 0.05, 0.05)], segs)
+    _pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+
+
+def test_thin_loop_t_far_from_path_one_is_not_removed(tmp_path):
+    # t bows 0.028 mm off u + c (> PARALLEL_PATH_TOL_MM): not "the same copper".
+    a, b, c_, d, end = (100, 100), (101, 100.05), (110, 100), (105, 100.0278), (111, 100)
+    segs = [
+        (a, b, "F.Cu", 0.2),
+        (b, c_, "F.Cu", 0.2),
+        (a, d, "F.Cu", 0.2),
+        (d, c_, "F.Cu", 0.2),
+        (c_, end, "F.Cu", 0.2),
+    ]
+    p = _board(tmp_path, [("A", *a, 0.05, 0.05), ("B", *end, 0.05, 0.05)], segs)
+    _pcb, res = _run(p)
+    assert res.stats["segments_removed"] == 0
+
+
+def test_prune_covers_at_the_checks_tolerance(tmp_path):
+    # tail end 0.7 um off the container: the check flags it, so prune must act.
+    segs = [
+        ((100, 100), (110, 100)),
+        ((102, 100.0007), (105, 100)),
+    ]
+    p = _board(tmp_path, [("A", 100, 100), ("B", 110, 100)], segs)
+    from kicad_tools.schema.pcb import PCB
+
+    assert _covered_findings(PCB.load(str(p))) == 1
+    pcb, _res = _run(p)
+    assert _covered_findings(pcb) == 0
+    assert _connected(pcb, (100, 100), (110, 100))
+
+
 def test_cli_prune_reaches_a_fixed_point_in_one_invocation(tmp_path):
     """Issue #8730: two T-joint covered tracks sharing a container's end; a
     split container piece is frozen for the rest of its pass, so the second

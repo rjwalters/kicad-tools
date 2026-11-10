@@ -112,6 +112,7 @@ def test_covered_segment_reported():
     assert ids.count("redundant_copper_covered") == 1
     v = next(v for v in res.violations if v.rule_id == "redundant_copper_covered")
     assert v.severity == "warning" and "kct pcb prune" in v.message
+    assert "within the copper" in v.message
     assert v.location == (2, 0)
 
 
