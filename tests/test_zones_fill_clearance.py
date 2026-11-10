@@ -1066,3 +1066,55 @@ class TestThermalSpokeLadder7295:
         # Third flag: ladder exhausted -> solid.
         assert force_solid_on_pads_by_uuid(doc, {"p0"}) == 1
         assert pad.find("zone_connect").get_int(0) == 2
+
+
+class TestRevisitSolidPadOverrides:
+    """Issue #8659: stale ``(zone_connect 2)`` overrides are dropped selectively."""
+
+    @staticmethod
+    def _pad(num: str, kind: str, uuid: str, zc: int | None) -> str:
+        zcs = f"(zone_connect {zc})" if zc is not None else ""
+        return (
+            f'(pad "{num}" {kind} rect (at 0 0) (size 1 1) (layers "F.Cu") '
+            f'(net 1 "GND") {zcs} (uuid "{uuid}"))'
+        )
+
+    def _doc(self):
+        p = self._pad
+        return parse_string(
+            '(kicad_pcb (net 1 "GND")'
+            f' (footprint "lib:c" (layer "F.Cu") {p("1", "smd", "c1", 2)} {p("2", "smd", "c2", 2)})'
+            f' (footprint "lib:j" (layer "F.Cu") {p("1", "thru_hole", "j1", 2)}'
+            f" {p('2', 'thru_hole', 'j2', 3)} {p('3', 'thru_hole', 'j3', None)})"
+            f' (footprint "lib:u" (layer "F.Cu") {p("1", "smd", "u1", 2)}'
+            f" {p('2', 'smd', 'u2', 2)} {p('3', 'smd', 'u3', 2)}))"
+        )
+
+    @staticmethod
+    def _zc(doc, uuid):
+        for pad in doc.find_all("pad") + [
+            q for fp in doc.find_all("footprint") for q in fp.find_all("pad")
+        ]:
+            u = pad.find("uuid")
+            if u is not None and u.get_string(0) == uuid:
+                zc = pad.find("zone_connect")
+                return None if zc is None else zc.get_int(0)
+        raise AssertionError(uuid)
+
+    def test_removes_only_two_pad_and_tht_solid(self):
+        from kicad_tools.zones.fill_clearance import revisit_solid_pad_overrides
+
+        doc = self._doc()
+        assert revisit_solid_pad_overrides(doc) == 3
+        assert self._zc(doc, "c1") is None
+        assert self._zc(doc, "c2") is None
+        assert self._zc(doc, "j1") is None
+        assert self._zc(doc, "j2") == 3  # deliberate non-solid choice kept
+        assert self._zc(doc, "u1") == 2  # multi-pin SMD untouched
+        assert self._zc(doc, "u3") == 2
+
+    def test_no_overrides_is_noop(self):
+        from kicad_tools.zones.fill_clearance import revisit_solid_pad_overrides
+
+        doc = parse_string('(kicad_pcb (net 1 "GND"))')
+        assert revisit_solid_pad_overrides(doc) == 0
