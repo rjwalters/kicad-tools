@@ -16,6 +16,14 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8678**: fix: derive --complete links from kept-copper islands
+- **PR #8677**: fix: block NPTH holes on every copper layer in the grid router
+- **PR #8667**: feat(readiness): diff warnings against a previous revision with --baseline
+- **PR #8661**: feat(zones): add 'zones relieve' fixer and gate thermal_asymmetry at tapeout
+- **Issue #8676** (closed): route --complete: requests every link of an open net, including pads already joined by kept copper
+- **Issue #8675** (closed): route: non-plated holes (np_thru_hole pads) are not obstacles; tracks are routed across them (kicad-cli hole_clearance)
+- **Issue #8664** (closed): Sign-off never compares warnings against the previous revision: wire kct check --diff into readiness and tapeout
+- **Issue #8659** (closed): thermal_asymmetry: forced solid pad overrides are never revisited, have no fixer, and are not gated at tapeout
 - **PR #8668**: feat(check): report segments covered by a longer collinear segment
 - **PR #8662**: fix: key kept copper on name-only boards by its real net
 - **Issue #8665** (closed): check: report segment wholly covered by collinear same-net segment as redundant copper
