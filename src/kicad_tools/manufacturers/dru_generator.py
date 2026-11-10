@@ -367,6 +367,8 @@ def generate_dru(
     rules: DesignRules,
     manufacturer_name: str = "",
     net_classes: Sequence[NetClassRouting] | None = None,
+    max_ampacity_width_mm: float | None = None,
+    route_edge_clearance_mm: float | None = None,
 ) -> str:
     """
     Generate KiCad .kicad_dru file content from a DesignRules instance.
@@ -538,6 +540,22 @@ def generate_dru(
         f"  (constraint edge_clearance (min {rules.min_copper_to_edge_mm}mm)))"
     )
 
+    # --- Route edge clearance (Issue #8674) ---
+    # The clearance the router kept tracks and vias from the board edge.  Scoped
+    # to tracks and vias: the board-wide rule above also covers pads and pours,
+    # so raising it would fail a board whose edge connector sits inside the
+    # route's value.  Emitted after the board-wide rule because KiCad lets the
+    # last matching rule win.  Never loosens the tier floor.
+    if (
+        route_edge_clearance_mm is not None
+        and route_edge_clearance_mm > rules.min_copper_to_edge_mm
+    ):
+        lines.append(
+            f'(rule "Route Edge Clearance{label_suffix}"\n'
+            f"  (condition \"A.Type == 'track' || A.Type == 'via'\")\n"
+            f"  (constraint edge_clearance (min {route_edge_clearance_mm:.4f}mm)))"
+        )
+
     # --- Hole to Edge ---
     lines.append(
         f'(rule "Hole to Edge{label_suffix}"\n'
@@ -604,6 +622,14 @@ def generate_dru(
                 else 0.0
             )
 
+            # #8612: a minimum wider than the board can never be met; skip it.
+            skip_external = (
+                max_ampacity_width_mm is not None and external_width_mm > max_ampacity_width_mm
+            )
+            skip_internal = (
+                max_ampacity_width_mm is not None and internal_width_mm > max_ampacity_width_mm
+            )
+
             # Per-net targets are scoped to their nets (#8527); a class-wide
             # target keeps the ``A.NetClass`` scope.
             net_scope = tuple(getattr(nc, "net_scope", ()) or ())
@@ -616,13 +642,14 @@ def generate_dru(
                 label = nc.name
 
             # External copper: front and back layers.
-            lines.append(
-                f'(rule "Ampacity Min Width ({label}, external){label_suffix}"\n'
-                f"  (condition \"{scope_cond} && A.Type == 'track'"
-                f" && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')\")\n"
-                f"  (constraint track_width (min {external_width_mm:.4f}mm)))"
-            )
-            if not has_inner:
+            if not skip_external:
+                lines.append(
+                    f'(rule "Ampacity Min Width ({label}, external){label_suffix}"\n'
+                    f"  (condition \"{scope_cond} && A.Type == 'track'"
+                    f" && (A.Layer == 'F.Cu' || A.Layer == 'B.Cu')\")\n"
+                    f"  (constraint track_width (min {external_width_mm:.4f}mm)))"
+                )
+            if not has_inner or skip_internal:
                 continue
             # Internal copper: any track that is not on an external layer.
             lines.append(

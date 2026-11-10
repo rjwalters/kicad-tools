@@ -24,6 +24,22 @@ def _args(out: Path, **overrides) -> argparse.Namespace:
     return argparse.Namespace(**base)
 
 
+class _CleanByDefault(dict):
+    """Generic DRC record (Issue #8695) where an unrecorded board reads as clean.
+
+    Keeps the stubbed inner passes below, which never run a DRC, focused on what
+    they test; the #8695 tests install a plain dict to exercise "not audited".
+    """
+
+    def get(self, key, default=None):
+        return super().get(key, frozenset())
+
+
+@pytest.fixture(autouse=True)
+def _drc_record(monkeypatch):
+    monkeypatch.setattr(route_cmd, "_drc_error_findings", _CleanByDefault())
+
+
 @pytest.fixture
 def board(tmp_path: Path) -> Path:
     out = tmp_path / "out.kicad_pcb"
@@ -296,3 +312,362 @@ def test_placement_invalid_nets_forwarded_as_exclusions(board, monkeypatch):
     argv = seen["argv"]
     assert argv.count("--complete-exclude-nets") == 1
     assert argv[argv.index("--complete-exclude-nets") + 1] == "BAD,GND"
+
+
+# --- Issue #8674: layer, HV, edge and current-path constraints -----------------
+
+
+def _chain_argv(tmp_path, outer, **stamped):
+    args = _route_parser().parse_args(outer)
+    for name, value in stamped.items():
+        setattr(args, name, value)
+    return route_cmd._chain_complete_argv(
+        args, outer, tmp_path / "o.kicad_pcb", tmp_path / "o.chain.kicad_pcb"
+    )
+
+
+def test_constraint_flags_reach_inner_argv(tmp_path):
+    outer = [
+        "in.kicad_pcb",
+        "--layers", "4",
+        "--voltage-map", "volts.json",
+        "--creepage-standard", "iec62368",
+        "--pollution-degree", "3",
+        "--material-group=II",
+        "--hv-threshold", "0",
+        "--edge-clearance", "1.6",
+        "--current-paths", "paths.json",
+    ]  # fmt: skip
+    argv = _chain_argv(tmp_path, outer)
+    for flag, value in (
+        ("--layers", "4"),
+        ("--voltage-map", "volts.json"),
+        ("--creepage-standard", "iec62368"),
+        ("--pollution-degree", "3"),
+        ("--material-group", "II"),
+        ("--hv-threshold", "0.0"),
+        ("--edge-clearance", "1.6"),
+        ("--current-paths", "paths.json"),
+    ):
+        assert argv[argv.index(flag) + 1] == value
+    inner = _route_parser().parse_args(argv)
+    assert inner.complete and inner.layers == "4" and inner.edge_clearance == 1.6
+    assert inner.hv_threshold == 0.0 and inner.pollution_degree == 3
+
+
+def test_unset_constraint_flags_leave_inner_argv_unchanged(tmp_path):
+    """No constraint passed: the inner argv is exactly what it was before #8674."""
+    assert _chain_argv(tmp_path, ["in.kicad_pcb"]) == [
+        str(tmp_path / "o.kicad_pcb"),
+        "-o",
+        str(tmp_path / "o.chain.kicad_pcb"),
+        "--complete",
+        "--manufacturer",
+        "jlcpcb",
+        "--backend",
+        "auto",
+    ]
+
+
+def test_layers_auto_is_not_forwarded(tmp_path):
+    assert "--layers" not in _chain_argv(tmp_path, ["in.kicad_pcb", "--layers", "auto"])
+
+
+def test_manufacturer_filled_edge_clearance_is_not_forwarded(tmp_path):
+    """args.edge_clearance is filled from the manufacturer when omitted; the
+    inner pass must resolve that itself rather than see it as an explicit flag."""
+    argv = _chain_argv(tmp_path, ["in.kicad_pcb"], edge_clearance=0.3)
+    assert "--edge-clearance" not in argv
+
+
+def test_voltage_map_settings_at_their_defaults_are_not_forwarded(tmp_path):
+    argv = _chain_argv(tmp_path, ["in.kicad_pcb", "--voltage-map", "volts.json"])
+    assert argv[argv.index("--voltage-map") + 1] == "volts.json"
+    for flag in ("--creepage-standard", "--pollution-degree", "--material-group", "--hv-threshold"):
+        assert flag not in argv
+
+
+def test_auto_discovered_current_paths_are_forwarded(tmp_path):
+    """The sidecar is discovered beside the INPUT board; the inner pass reads -o."""
+    found = tmp_path / "current_paths.json"
+    argv = _chain_argv(tmp_path, ["in.kicad_pcb"], _current_paths_input_path=found)
+    assert argv[argv.index("--current-paths") + 1] == str(found)
+
+
+def test_no_current_paths_is_forwarded(tmp_path):
+    argv = _chain_argv(tmp_path, ["in.kicad_pcb", "--no-current-paths"])
+    assert "--no-current-paths" in argv and "--current-paths" not in argv
+    assert _route_parser().parse_args(argv).no_current_paths
+
+
+def _pass_recording_ampacity(monkeypatch, staged_errors: set[str] | None):
+    """Stub the inner pass: write the staged board, exit 8, and record its
+    path_ampacity audit -- or, with ``None``, record nothing (audit never ran)."""
+
+    def fake_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("completed")
+        if staged_errors is not None:
+            route_cmd._path_ampacity_errors[str(staged.resolve())] = frozenset(staged_errors)
+        return 8
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    monkeypatch.setattr(route_cmd, "_path_ampacity_errors", {})
+
+
+def _paths_args(board: Path, **overrides) -> argparse.Namespace:
+    return _args(board, current_paths="paths.json", **overrides)
+
+
+def _assert_kept(board: Path) -> None:
+    assert board.read_text() == "negotiated"
+    assert not list(board.parent.glob("*.chain*"))
+
+
+def test_pass_adding_a_path_ampacity_error_is_refused(board, monkeypatch, capsys):
+    """Declared current paths are audited, not planned: copper that adds a
+    path_ampacity error is not promoted, even on an accepted inner exit."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, {"old", "too narrow for 10A"})
+    route_cmd._path_ampacity_errors[str(board.resolve())] = frozenset({"old"})
+    assert _chain_complete_pass(_paths_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    out = capsys.readouterr().out
+    assert "refused" in out and "added 1 path_ampacity error(s)" in out
+    assert "--current-paths" in out
+
+
+def test_pass_adding_no_path_ampacity_error_is_promoted(board, monkeypatch):
+    """Errors the negotiated board already had do not block the pass."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, {"old"})
+    route_cmd._path_ampacity_errors[str(board.resolve())] = frozenset({"old", "gone"})
+    assert _chain_complete_pass(_paths_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_unaudited_pass_is_refused_not_promoted(board, monkeypatch, capsys, quiet):
+    """A pass that wrote its board and exited 8 but whose current-path audit
+    never ran (no record: DRC skipped for --timeout) is not "clean"."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
+    route_cmd._path_ampacity_errors[str(board.resolve())] = frozenset()
+    assert _chain_complete_pass(_paths_args(board, quiet=quiet), None, 2) == 2
+    _assert_kept(board)
+    out = capsys.readouterr().out
+    assert "refused" in out and "not audited" in out and "--current-paths" in out
+    assert "added" not in out and "closed" not in out
+
+
+def test_unaudited_pass_is_refused_for_auto_discovered_paths(board, monkeypatch, capsys):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
+    args = _args(board, _current_paths_input_path=board.with_name("current_paths.json"))
+    assert _chain_complete_pass(args, None, 2) == 2
+    _assert_kept(board)
+    assert "not audited" in capsys.readouterr().out
+
+
+def test_unaudited_pass_without_current_paths_is_promoted(board, monkeypatch):
+    """No declared paths in force: there is nothing to audit, as before #8674."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
+    assert _chain_complete_pass(_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+    _pass_recording_ampacity(monkeypatch, None)
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    board.write_text("negotiated")
+    assert _chain_complete_pass(_args(board, no_current_paths=True), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_unaudited_negotiated_board_is_not_reported_as_added(board, monkeypatch, capsys):
+    """No record for -o: the pass's errors may pre-exist.  Still refused
+    (fail-closed), but as "could not be compared", never as "added"."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, {"e1", "e2", "e3"})
+    assert _chain_complete_pass(_paths_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    out = capsys.readouterr().out
+    assert "refused" in out and "3 path_ampacity error(s)" in out
+    assert "negotiated board was not audited" in out and "could not be compared" in out
+    assert "copper added" not in out
+
+
+def test_clean_pass_over_unaudited_negotiated_board_is_promoted(board, monkeypatch):
+    """The pass's own audit ran and found nothing: there is nothing to compare."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, set())
+    assert _chain_complete_pass(_paths_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_skip_drc_promotes_with_an_unaudited_note(board, monkeypatch, capsys):
+    """--skip-drc audits nothing, in the outer run and the pass alike; say so."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
+    assert _chain_complete_pass(_paths_args(board, quiet=False, skip_drc=True), None, 2) == 2
+    assert board.read_text() == "completed"
+    out = capsys.readouterr().out
+    assert "--skip-drc" in out and "NOT audited" in out and "refused" not in out
+
+
+def test_skip_drc_note_needs_current_paths(board, monkeypatch, capsys):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
+    assert _chain_complete_pass(_args(board, quiet=False, skip_drc=True), None, 2) == 2
+    assert "NOT audited" not in capsys.readouterr().out
+
+
+def _pass_recording_drc(monkeypatch, staged_errors: set[str] | None, outer: set[str] | None):
+    """Stub the inner pass; record the generic DRC findings (None = never ran)."""
+
+    def fake_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("completed")
+        if staged_errors is not None:
+            route_cmd._drc_error_findings[str(staged.resolve())] = frozenset(staged_errors)
+        return 8
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    monkeypatch.setattr(route_cmd, "_drc_error_findings", {})
+
+
+def test_pass_adding_a_non_ampacity_error_is_refused(board, monkeypatch, capsys):
+    """Issue #8695: no --current-paths, a geometric error added by the pass."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, {"clearance|gap @ (1, 2)", "old|x @ (0, 0)"}, None)
+    route_cmd._drc_error_findings[str(board.resolve())] = frozenset({"old|x @ (0, 0)"})
+    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    out = capsys.readouterr().out
+    assert "refused" in out and "1 blocking DRC error(s) [clearance]" in out
+
+
+def test_pass_adding_no_error_is_promoted(board, monkeypatch):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, {"old|x @ (0, 0)"}, None)
+    route_cmd._drc_error_findings[str(board.resolve())] = frozenset(
+        {"old|x @ (0, 0)", "gone|y @ 1"}
+    )
+    assert _chain_complete_pass(_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_unaudited_pass_is_refused_without_current_paths(board, monkeypatch, capsys):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, None, None)
+    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    assert "not audited" in capsys.readouterr().out
+
+
+def test_errors_over_unaudited_negotiated_board_are_refused(board, monkeypatch, capsys):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, {"short|s @ 1"}, None)
+    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    assert "could not be compared" in capsys.readouterr().out
+
+
+def test_clean_pass_over_unaudited_negotiated_board_promoted_generic(board, monkeypatch):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, set(), None)
+    assert _chain_complete_pass(_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_skip_drc_skips_generic_audit(board, monkeypatch):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_drc(monkeypatch, None, None)
+    assert _chain_complete_pass(_args(board, skip_drc=True), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def _stranded(net: str, stranded: int, total: int, pad: str, at: tuple[float, float]):
+    from kicad_tools.validate.violations import DRCViolation
+
+    return DRCViolation(
+        rule_id="connectivity",
+        severity="error",
+        message=(
+            f"Net '{net}' is partially routed: {stranded} of {total} pads stranded "
+            f"(connected island has {total - stranded} pads)"
+        ),
+        location=at,
+        items=(pad,),
+        nets=(net,),
+    )
+
+
+def _via_error(net: str, at: tuple[float, float]):
+    from kicad_tools.validate.violations import DRCViolation
+
+    return DRCViolation(
+        rule_id="dimension_via_drill",
+        severity="error",
+        message="Via drill 0.2mm < 0.3mm",
+        location=at,
+        nets=(net,),
+    )
+
+
+def _record(board: Path, violations) -> None:
+    route_cmd._drc_error_findings[str(board.resolve())] = frozenset(
+        route_cmd._drc_error_finding_key(v) for v in violations
+    )
+
+
+def test_pass_advancing_an_open_net_is_not_read_as_an_added_error(board, monkeypatch):
+    """Issue #8702: measured on boards/04 -- a pass that connects one more pad of
+    a net it does not finish re-reports that net's connectivity error with new
+    counts (and, when it connects the first stranded pad, a new location and
+    pad).  The same open net must keep its key, so the pass is promoted."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    old_via = _via_error("C", (1.0, 1.0))
+    baseline = [_stranded("B", 2, 3, "U1.4", (1.0, 2.0)), old_via]
+    post = [_stranded("B", 1, 3, "U1.7", (5.0, 6.0)), old_via]
+
+    def fake_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("completed")
+        _record(staged, post)
+        return 8
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    monkeypatch.setattr(route_cmd, "_drc_error_findings", {})
+    _record(board, baseline)
+    assert _chain_complete_pass(_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_pass_stranding_a_net_is_still_refused(board, monkeypatch, capsys):
+    """A connectivity error on a net that had none is still an added error."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+
+    def fake_main(argv):
+        staged = Path(argv[argv.index("-o") + 1])
+        staged.write_text("completed")
+        _record(
+            staged, [_stranded("B", 1, 3, "U1.7", (5.0, 6.0)), _stranded("D", 1, 2, "R1.1", (0, 0))]
+        )
+        return 8
+
+    monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
+    monkeypatch.setattr(route_cmd, "_drc_error_findings", {})
+    _record(board, [_stranded("B", 2, 3, "U1.4", (1.0, 2.0))])
+    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    assert "1 blocking DRC error(s) [connectivity]" in capsys.readouterr().out
+
+
+def test_other_classes_keep_their_location_in_the_key():
+    """Two via errors on one net and layer stay distinct (DRCViolation.key would
+    collapse them and mask a second one added by the pass)."""
+    a, b = _via_error("C", (1.0, 1.0)), _via_error("C", (2.0, 2.0))
+    assert a.key == b.key
+    assert route_cmd._drc_error_finding_key(a) != route_cmd._drc_error_finding_key(b)
+    assert route_cmd._drc_error_finding_key(
+        _stranded("B", 2, 3, "U1.4", (1.0, 2.0))
+    ) == route_cmd._drc_error_finding_key(_stranded("B", 1, 3, "U1.7", (5.0, 6.0)))

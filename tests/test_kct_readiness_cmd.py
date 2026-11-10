@@ -143,7 +143,7 @@ class FakeEngines:
     def kct_check(self, pcb: Path, mfr: str, report_path: Path, extra) -> EngineRun:
         self.calls.append("kct_check")
         violations = [
-            {"rule_id": rule, "severity": "warning", "message": rule}
+            {"rule_id": rule, "key": rule, "severity": "warning", "message": rule}
             for rule, count in self.warnings.items()
             for _ in range(count)
         ]
@@ -585,6 +585,116 @@ def test_acknowledged_warnings_pass_and_become_accepted_risk_lines(tmp_path):
         "silk_over_copper": 31,
         "trace_width_advisory": 4,
     }
+
+
+# -- Baseline comparison (Issue #8664) ---------------------------------------
+
+
+def _baseline_engines(board: Path, new: dict, old: dict):
+    """FakeEngines whose kct check reports ``old`` warnings for the baseline board."""
+    fake = FakeEngines(board, warnings=new)
+    real = fake.kct_check
+
+    def kct_check(pcb, mfr, report_path, extra):
+        if pcb.name == "old.kicad_pcb":
+            saved, fake.warnings = fake.warnings, old
+            try:
+                return real(pcb, mfr, report_path, extra)
+            finally:
+                fake.warnings = saved
+        return real(pcb, mfr, report_path, extra)
+
+    fake.kct_check = kct_check
+    return fake
+
+
+def _make_baseline(tmp_path: Path) -> Path:
+    prev = tmp_path / "prev"
+    prev.mkdir()
+    (prev / "old.kicad_pcb").write_text("(kicad_pcb old)\n")
+    return prev
+
+
+def test_baseline_introduced_assembly_warnings_block_until_acked(tmp_path):
+    board = make_board(tmp_path)
+    prev = _make_baseline(tmp_path)
+    # Rule is acked-by-count in neither run: 14 -> 40 is a regression.
+    fake = _baseline_engines(board, {"silk_over_copper": 40}, {"silk_over_copper": 14})
+
+    code, report = run(board, fake, "--baseline", str(prev), "--ack-warnings", "")
+    # silk_over_copper was already unacknowledged in total, so it blocks either way;
+    # the introduced-count message must be the one reported.
+    assert code != 0
+    assert any(
+        "introduced since baseline" in b and "silk_over_copper +26" in b for b in report["blockers"]
+    )
+
+    fake = _baseline_engines(board, {"silk_over_copper": 40}, {"silk_over_copper": 14})
+    code, report = run(board, fake, "--baseline", str(prev), "--ack-warnings", "silk_over_copper")
+    assert code == 0
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "silk_over_copper: +26 (14 -> 40) [assembly-affecting]" in readme
+
+
+def test_baseline_introduced_advisory_warnings_list_but_do_not_block(tmp_path):
+    board = make_board(tmp_path)
+    prev = _make_baseline(tmp_path)
+    fake = _baseline_engines(board, {"trace_width_advisory": 9}, {"trace_width_advisory": 2})
+
+    code, report = run(board, fake, "--baseline", str(prev))
+
+    assert code == 0
+    assert check_status(report, "warning_review") == "passed"
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "trace_width_advisory: +7 (2 -> 9) [advisory]" in readme
+
+
+def test_baseline_identical_introduces_nothing(tmp_path):
+    board = make_board(tmp_path)
+    prev = _make_baseline(tmp_path)
+    fake = _baseline_engines(board, {"trace_width_advisory": 4}, {"trace_width_advisory": 4})
+
+    code, _ = run(board, fake, "--baseline", str(prev))
+
+    assert code == 0
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "Warnings introduced since baseline" in readme
+    assert "  none" in readme
+
+
+def test_baseline_unreadable_fails_loudly(tmp_path):
+    board = make_board(tmp_path)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    fake = FakeEngines(board)
+
+    code, report = run(board, fake, "--baseline", str(empty))
+
+    assert code != 0
+    assert any("Baseline comparison failed" in b for b in report["blockers"])
+
+
+def test_missing_baseline_path_is_refused(tmp_path):
+    board = make_board(tmp_path)
+    code, _ = run(board, FakeEngines(board), "--baseline", str(tmp_path / "nope"))
+    assert code != 0
+
+
+def test_no_baseline_notice_names_sibling_board(tmp_path, capsys):
+    board = make_board(tmp_path)
+    (board / "output" / "old.kicad_pcb").write_text("(kicad_pcb old)\n")
+
+    run(board, FakeEngines(board))
+
+    assert "old.kicad_pcb" in capsys.readouterr().err
+
+
+def test_no_baseline_no_candidate_prints_no_notice(tmp_path, capsys):
+    board = make_board(tmp_path)
+
+    run(board, FakeEngines(board))
+
+    assert "--baseline" not in capsys.readouterr().err
 
 
 def test_first_signoff_is_not_blocked_by_the_not_yet_existing_bundle(tmp_path):
@@ -1908,8 +2018,124 @@ def test_copper_cleanup_runs_dedupe_and_records_counts(tmp_path, monkeypatch):
             saved.append(path)
 
     monkeypatch.setattr(pcb_mod.PCB, "load", classmethod(lambda cls, p: _P()))
+    monkeypatch.setattr(
+        readiness_cmd, "_cleanup_prune_step", lambda o: {"status": "applied", "segments_removed": 4}
+    )
+    monkeypatch.setattr(
+        readiness_cmd, "_cleanup_optimize_step", lambda o: {"status": "applied", "corners_after": 2}
+    )
     gen = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path, operation="generate"))
     assert gen["removed"] == {"segments": 15, "vias": 1} and saved
+    assert list(gen["steps"]) == ["dedupe", "prune", "optimize_traces"]
+    assert gen["steps"]["prune"]["segments_removed"] == 4
     saved.clear()
     ver = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path))
     assert ver["copper_cleanup"] == "verify-count-only" and not saved
+
+
+def test_copper_cleanup_step_failure_is_recorded(tmp_path, monkeypatch):
+    from kicad_tools.schema import pcb as pcb_mod
+
+    class _P:
+        def dedupe_copper(self):
+            return {"segments": 0, "vias": 0}
+
+        def save(self, path):
+            pass
+
+    def boom(options):
+        raise RuntimeError("no kicad-cli")
+
+    monkeypatch.setattr(pcb_mod.PCB, "load", classmethod(lambda cls, p: _P()))
+    monkeypatch.setattr(readiness_cmd, "_cleanup_prune_step", boom)
+    monkeypatch.setattr(readiness_cmd, "_cleanup_optimize_step", lambda o: {"status": "applied"})
+    rec = readiness_cmd._copper_cleanup(_cleanup_options(tmp_path, operation="generate"))
+    assert rec["steps"]["prune"] == {"status": "failed", "detail": "no kicad-cli"}
+    assert rec["removed"] == {"segments": 0, "vias": 0}  # 0 is a valid result
+
+
+def test_trace_quality_rule_classifier():
+    f = readiness_cmd.is_trace_quality_rule
+    assert f("redundant_copper_detour") and f("via_dangling")
+    assert not f("silk_overlap")
+
+
+def _review(tmp_path, ack=None):
+    report = {
+        "violations": [
+            {"severity": "warning", "rule_id": "redundant_copper_detour"},
+            {"severity": "warning", "rule_id": "via_dangling"},
+        ]
+    }
+    opts = _cleanup_options(tmp_path, ack_trace_quality=ack or {})
+    return readiness_cmd._gate_warning_review(opts, report)[0]
+
+
+def test_trace_quality_unacknowledged_refuses(tmp_path):
+    outcome = _review(tmp_path)
+    assert outcome.status == readiness_cmd.FAILED
+    assert "redundant_copper_detour=1" in outcome.detail and "via_dangling=1" in outcome.detail
+
+
+def test_trace_quality_acknowledged_with_reason_passes(tmp_path):
+    outcome = _review(
+        tmp_path, {"redundant_copper_detour": "intentional length match", "via_dangling": "stitch"}
+    )
+    assert outcome.status == readiness_cmd.PASSED
+
+
+def test_optimize_stackup_defaults_from_board_and_project(tmp_path):
+    from kicad_tools.cli.optimize_cmd import resolve_board_stackup
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("not a pcb")
+    assert resolve_board_stackup(pcb) == (2, 1.0)  # unreadable: historical defaults
+    (tmp_path / "b.kicad_pro").write_text('{"meta": {"copper_oz": 2.0}}')
+    assert resolve_board_stackup(pcb) == (2, 2.0)
+
+
+def test_optimize_stackup_reports_provenance(tmp_path):
+    from kicad_tools.cli.optimize_cmd import resolve_board_stackup_with_source
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text("not a pcb")
+    layers, oz, src = resolve_board_stackup_with_source(pcb)
+    assert (layers, oz) == (2, 1.0)
+    assert src == {"layers": "default (undetermined)", "copper_oz": "default (undetermined)"}
+    # Project metadata supplies weight only; layers stay undetermined.
+    (tmp_path / "b.kicad_pro").write_text('{"meta": {"copper_oz": 2.0}}')
+    _, oz, src = resolve_board_stackup_with_source(pcb)
+    assert oz == 2.0
+    assert src == {"layers": "default (undetermined)", "copper_oz": "board"}
+
+
+def test_optimize_stackup_readable_board_reports_board(tmp_path):
+    from kicad_tools.cli.optimize_cmd import resolve_board_stackup_with_source
+
+    pcb = tmp_path / "b.kicad_pcb"
+    pcb.write_text(
+        '(kicad_pcb (version 20240108) (generator "t") '
+        '(layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user)))'
+    )
+    layers, _, src = resolve_board_stackup_with_source(pcb)
+    assert layers == 2
+    assert src["layers"] == "board"
+
+
+def test_baseline_counts_use_baseline_report_when_findings_resolved(tmp_path, capsys):
+    """Issue #8673: previous count comes from the baseline, not current - introduced."""
+    board = make_board(tmp_path)
+    prev = _make_baseline(tmp_path)
+    # Baseline: 14 silk_over_copper + 3 trace_width_advisory (resolved in new run).
+    # Current: 16 silk_over_copper -> true transition is 14 -> 16.
+    fake = _baseline_engines(
+        board,
+        {"silk_over_copper": 16},
+        {"silk_over_copper": 14, "trace_width_advisory": 3},
+    )
+
+    run(board, fake, "--baseline", str(prev), "--ack-warnings", "silk_over_copper")
+
+    readme = (board / "output" / "manufacturing" / "README.txt").read_text()
+    assert "silk_over_copper: +2 (14 -> 16)" in readme
+    assert "silk_over_copper: +2 (14 -> 16)" in capsys.readouterr().out

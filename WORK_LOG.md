@@ -14,8 +14,109 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-10
+
+- **PR #8715**: feat(sync): report and remove copper left on pads removed by a footprint swap
+- **Issue #8705** (closed): sync: report (and optionally remove) copper stranded by a pad-net change
+- **PR #8713**: feat: report and optionally remove copper stranded by pad-net changes in kct sync
+- **PR #8711**: chore(board-07): prune reviewed copper and re-derive authored escapes
+- **PR #8710**: fix: forward --length-match-groups to the chained completion pass
+- **PR #8709**: test: remove stale strict xfail on lattice hole-clearance test
+- **PR #8708**: feat: add circuit-review skill for schematic-vs-datasheet review
+- **PR #8707**: feat(sync): detect and fix pad-net mismatches on shared components
+- **PR #8701**: fix: write route edge clearance to .kicad_dru as a track/via-scoped rule
+- **PR #8700**: fix: forward copper-rule flags to the chained completion pass
+- **PR #8699**: fix: refuse chained completion copper that adds any blocking DRC error
+- **PR #8698**: fix: read KiCad 10 zone nets in detect_layer_stack
+- **PR #8697**: fix: drop stale path_ampacity audit record before post-route DRC early exits
+- **PR #8691**: chore(loom): resync installed Loom to v0.19.1283
+- **PR #8690**: fix: gate prune plans on the current-path audit
+- **PR #8689**: fix: widen pin-1 marker search radius to the package body edge
+- **PR #8686**: fix(router): grow lattice NPTH pad keep-out to hole clearance
+- **PR #8685**: test(router): kicad-cli hole_clearance check for an NPTH between pads
+- **Issue #8712** (closed): Follow-on from PR #8707: kct sync stranded copper and footprint-swap placement (#8703 items 3, 4)
+- **Issue #8706** (closed): main CI red: stale strict xfail on test_lattice_engine_has_no_hole_clearance_violation (XPASS after #8686)
+- **Issue #8704** (closed): Feature: a circuit-review skill/check — schematic against datasheet, before layout
+- **Issue #8703** (closed): sync: no pad-net reconciliation — rewired pins on unchanged parts are not reported or applied
+- **Issue #8695** (closed): route: chained completion pass accepts inner exit 8 without consulting its DRC beyond path_ampacity
+- **Issue #8694** (closed): route: review copper-affecting options the chained completion pass does not forward (NOT_FORWARDED_UNREVIEWED)
+- **Issue #8693** (closed): route: chained completion pass re-detects the stack under --layers auto; detect_layer_stack misses KiCad 10 zone nets
+- **Issue #8692** (closed): route: path_ampacity audit record for a board can go stale when a later post-route DRC is skipped or fails
+- **Issue #8688** (closed): pin1_marker_missing: false positive when the library marker sits at the body edge more than 2.5 mm from pad 1 (HLK-PMxx)
+- **Issue #8687** (closed): pcb prune: snap stubs close loops on current-path nets; current-paths-audit drops from resolved to ambiguous
+- **Issue #8684** (closed): bug(router): lattice engine routes tracks inside NPTH hole clearance (2 hole_clearance in kicad-cli DRC)
+- **Issue #8681** (closed): Live kicad-cli verification of NPTH hole clearance after #8677
+- **Issue #8674** (closed): route: chained --complete pass ignores --layers, --voltage-map, --edge-clearance and --current-paths
+- **Issue #8602** (closed): Board 07: DRC-verified prune and re-derive authored escapes so validate.py passes (part of #8399)
+
+- **PR #8679**: fix: forward layer, HV, edge and current-path constraints to the chained completion pass
+- **PR #8682**: fix: take readiness baseline warning counts from the baseline report
+- **Issue #8673** (closed): readiness --baseline: previous_counts misreports old->new when findings were also resolved
+- **PR #8678**: fix: derive --complete links from kept-copper islands
+- **PR #8677**: fix: block NPTH holes on every copper layer in the grid router
+- **PR #8667**: feat(readiness): diff warnings against a previous revision with --baseline
+- **PR #8661**: feat(zones): add 'zones relieve' fixer and gate thermal_asymmetry at tapeout
+- **Issue #8676** (closed): route --complete: requests every link of an open net, including pads already joined by kept copper
+- **Issue #8675** (closed): route: non-plated holes (np_thru_hole pads) are not obstacles; tracks are routed across them (kicad-cli hole_clearance)
+- **Issue #8664** (closed): Sign-off never compares warnings against the previous revision: wire kct check --diff into readiness and tapeout
+- **Issue #8659** (closed): thermal_asymmetry: forced solid pad overrides are never revisited, have no fixer, and are not gated at tapeout
+- **PR #8668**: feat(check): report segments covered by a longer collinear segment
+- **PR #8662**: fix: key kept copper on name-only boards by its real net
+- **Issue #8665** (closed): check: report segment wholly covered by collinear same-net segment as redundant copper
+- **Issue #8658** (closed): route --complete: kept copper on name-only (KiCad 10) boards is keyed to net 0, so the short check reports phantom shorts
+- **PR #8670**: fix(audit): keep netted MountingHoles footprints and treat NC nets as equivalent
+- **PR #8666**: fix: cut false-positive noise in detect-mistakes checks
+- **PR #8660**: fix(router): make _dilate_blocked independent of scipy
+- **Issue #8669** (closed): audit sync: a header footprint with 'MountingHoles' in its name is dropped as a mounting hole and reported schematic-only; no-connect pins reported as net mismatches
+- **Issue #8663** (closed): detect-mistakes: 208 of 209 warnings on a clean board are noise (bypass cross-product, duplicates, 90° reported as acute, supply net as crystal trace)
+- **Issue #8657** (closed): route: _dilate_blocked uses scipy when importable — 8-17x slower and different results at the grid edge
+- **PR #8655**: chore(release): v0.29.0
+- **PR #8654**: test: cover project_rules call sites in kct check and readiness report
+- **PR #8626**: chore(deps): bump astral-sh/setup-uv from 10.3.0 to 10.3.2 in the github-actions group across 1 directory
+- **Issue #8652** (closed): test: cover kct check stderr warning and readiness 'warnings' wiring for project_rules (follow-up to #8648)
+- **PR #8651**: fix: route-link honours project netclass clearances
+- **PR #8647**: fix: share setup/search deadline budget and bound blocked-mask dilation
+- **PR #8646**: fix: raise back-off floor above HV mask setup time so backed-off nets reach A*
+- **Issue #8650** (closed): route-link ignores project netclass clearances (only --clearance / --net-clearance / voltage-map floors); per-link DRC gate doesn't catch it
+- **Issue #8645** (closed): route: HV mask setup runs on a 1x deadline before the 3x escape hint, and compute_expanded_blocked ignores the deadline
+- **Issue #8644** (closed): route: HV mask setup may consume the #8486 5 s back-off floor, so backed-off HV nets never reach the A* search
+- **Issue #8414** (closed): Post-negotiation sweep overruns its announced 60 s bound until the global timeout
+
+### 2026-11-09
+
+- **PR #8648**: feat: warn on missing or stock-default DRC project rules
+- **PR #8642**: fix: report undetermined stack_source when board lacks stackup
+- **Issue #8643** (closed): Warn when a board is checked without its paired .kicad_pro/.kicad_dru (kicad-cli silently uses default rules)
+- **Issue #8639** (closed): optimize-traces: drop dead _infer_board_stack and restore 'undetermined' stack_source
+- **PR #8636**: feat: run dedupe, prune and optimize-traces in tapeout cleanup with trace-quality gate
+- **Issue #8633** (closed): tapeout/readiness: make trace optimization a standard step (dedupe → prune → optimize-traces) and gate redundant_copper_* instead of reporting it as advisory
+- **PR #8631**: fix: place-silk-refs avoids NPTH holes and prefers own-courtyard association
+- **Issue #8628** (closed): place-silk-refs: kicad-cli still finds silk issues at default clearance, and labels end up nearer another part than their own
+- **PR #8635**: fix: roll back optimize-traces nets that open connectivity or regress creepage
+- **Issue #8632** (closed): optimize-traces --drc-aware: reports 0 DRC errors but disconnects a mains net and introduces a creepage violation (caught by kicad-cli and kct creepage)
+- **PR #8625**: chore(deps): bump astro from 7.4.1 to 7.4.2 in /site
+- **PR #8624**: chore(deps): bump the uv-minor-patch group across 1 directory with 3 updates
+- **PR #8611**: fix(router): force NumPy grid arrays for pure-Python A*; platform-mark cupy
+- **Issue #8609** (closed): Routing ~10-12x slower on Apple Silicon with the metal (mlx) extra; uv sync --all-extras fails on macOS
+
+### 2026-11-08
+
+- **PR #8618**: fix(router): charge HV mask setup to the Python fallback's budget; O(N) exact dilation
+- **PR #8617**: fix(waivers): warn on unmatched --waive keys and keep approval on same-digest rebind
+- **PR #8616**: perf(router): coarse copper key and sub-cap back-off for known-failing nets
+- **PR #8615**: fix(export): skip waived, oversize and designer-DRU ampacity floors
+- **Issue #8614** (closed): waivers: --waive aborts the whole batch on one unmatched key; orphan waivers unreported
+- **Issue #8612** (closed): export still appends ampacity track_width floors to the designer .kicad_dru (per-net after #8528)
+- **PR #8608**: chore(release): v0.28.1
+- **Issue #8396** (closed): route --complete commits cross-footprint copper that fails pairwise HV creepage (+16 pairs, down to 0.40 mm vs 1.6 mm) that the negotiated pass respects
+
 ### 2026-11-07
 
+- **PR #8606**: chore(loom): resync installed Loom to v0.19.1275
+- **PR #8605**: test: verify --complete creepage rollback on a synthetic mains fixture
+- **PR #8601**: fix(router): bound pad-escape and sub-grid retries in the post-negotiation sweep
+- **PR #8600**: chore(release): v0.28.0
+- **Issue #8422** (closed): Live-verify --complete creepage rollback on a real mains board (follow-up to #8396)
 - **PR #8595**: chore(loom): resync installed Loom to v0.19.1273
 - **PR #8594**: fix(readiness): accept non-output bundle layout and --verify receipt in tapeout sign-off
 - **PR #8593**: fix(stitch): ignore foreign inner-layer fill as via/stub obstacle
@@ -3425,62 +3526,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #4898** (closed): Explore Konnect item 3: durable multi-file write transactions for .kicad_pcb/.kicad_sch/.kicad_pro writers
 - **Issue #4888** (closed): panel.py: _remap_reference silently no-ops on fp_text-format (KiCad 7 / legacy module) reference designators
 
-### 2026-09-10
-
-- **PR #5104**: docs: audit Konnect item 8 natural-language design-rule store, decline
-- **PR #5099**: ci: temporarily suspend dedicated Board 07 gates
-- **Issue #5097** (closed): Temporarily suspend dedicated Board 07 CI gates
-- **Issue #5057** (closed): pcb: added footprints lack unique persistent pad UUIDs for native DRC correlation
-- **Issue #5053** (closed): check_mypy_baseline.py fails on main with 3 errors beyond the baseline
-- **Issue #5049** (closed): pcb: newly added footprint pad mutations are silently omitted by save()
-- **Issue #5047** (closed): board05: R10-R12 current-sense shunt and U1 buck regulator LCSC assignments don't match required parts
-- **Issue #5046** (closed): board03: U1 MCU footprint mismatch — TQFP-32 7x7mm required, C44854 is a QFP-44 10x10mm ATMEGA32U4-AU
-- **PR #5045**: fix(ci): restore demo-board integration checks after redesign
-- **Issue #5044** (closed): main CI broadly red as of 2026-09-10 (d95b6eff): board readiness status='partial', new ruff-format drift, cascading E2E failures
-- **PR #5040**: fix(parts): exclude unpopulated symbols from sourcing preflight
-- **PR #5038**: fix(cli): handle suppressed format defaults in help
-- **Issue #5028** (closed): parts CLI crashes on Python 3.14: SUPPRESS default interpolated in format help
-- **PR #5026**: fix(router): count only fully routed nets in negotiated progress line
-- **Issue #5023** (closed): export/check: preserve reviewed native rule floors to keep exported plane copper reproducible
-- **Issue #5022** (closed): ci: synthetic routing recipes can check or overwrite assembled demo outputs
-- **Issue #5019** (closed): pcb-modify flip reports success while leaving pads on front layers; modern references are not found
-- **Issue #5018** (closed): Stripline geometry treats intervening signal copper as a reference plane and reverses upper/lower gaps
-- **Issue #5017** (closed): PCB stackup parser drops native addsublayer dielectric strata and material properties
-- **Issue #5016** (closed): physics: asymmetric stripline formula overestimates a verified six-layer geometry by about 42 percent
-- **Issue #5012** (closed): via-in-pad DRC misses drill holes that partially cut across SMT soldering lands
-- **Issue #5011** (closed): board04: schematic mirrors invalid AMS1117 power pin mapping, allowing false clean LVS
-- **Issue #5007** (closed): check: copper-pour keepout rule areas falsely report disabled fill and missing net
-- **Issue #5005** (closed): Off-grid pad-edge A* seeds ignore trace radius and repeat invalid escape tails
-- **PR #5003**: chore(deps): bump @vitest/mocker and vitest in /site
-- **Issue #5002** (closed): Router impedance synthesis ignores explicit PCB stackup and blocks fine-pitch escapes
-- **Issue #5001** (closed): stitch: inner-plane targets create partial-stack spans on standard through vias
-- **Issue #4998** (closed): JLCPCB profiles need layer-specific PTH annular-ring floors separate from vias
-- **Issue #4997** (closed): physics: bottom microstrip reads exterior paste instead of inward substrate
-- **Issue #4996** (closed): check: exact-minimum PTH annular rings fail due to floating-point rounding
-- **Issue #4993** (closed): board05: DRV8301 power/charge-pump topology contains electrical shorts and unrealizable power footprints
-- **Issue #4992** (closed): LVS: round header pad bounding boxes create false shorts across plane antipads
-- **Issue #4990** (closed): parts suggest preflight counts BOM-excluded symbols as missing LCSC parts
-- **Issue #4988** (closed): route: main CLI rejects supported --no-auto-pour option
-- **Issue #4976** (closed): label LVS loses pad bindings after KiCad 10 saves name-only net syntax
-- **Issue #4975** (closed): router: size final diffpair trombone to deficit instead of always adding a full loop
-- **Issue #4974** (closed): Export includes through-hole parts in SMT CPL when footprint assembly attributes are absent
-- **Issue #4972** (closed): route: cache ignores net-class sidecar and coupled-routing mode, replays invalid copper
-- **Issue #4970** (closed): Gallery: require current manufacturing evidence for Ready and distinguish Gerbers from KiCad project downloads
-- **Issue #4967** (closed): router progress counts empty and partial routes as completed nets
-- **PR #4965**: chore(deps): bump astro from 7.2.1 to 7.2.8 in /site
-- **PR #4964**: chore(deps): bump svgo from 4.0.2 to 4.1.0 in /site
-- **PR #4961**: chore(deps): bump the python-minor-patch group across 1 directory with 9 updates
-- **PR #4960**: chore(deps-dev): bump fast-uri from 3.1.5 to 3.1.7 in /site
-- **PR #4958**: chore(deps-dev): bump the site-minor-patch group across 1 directory with 2 updates
-- **Issue #4927** (closed): Lint & Format CI check fails on main: 58 pre-existing UP038 ruff errors
-- **PR #4924**: chore(deps): bump rich from 14.2.0 to 15.0.0
-- **PR #4921**: chore(deps): bump weasyprint from 68.1 to 69.0
-- **PR #4918**: chore(deps): bump astral-sh/setup-uv from 9.0.0 to 10.0.1
-- **Issue #4906** (closed): Explore Konnect item 12: IPC-API edit patterns as mocked-IPC test-harness reference
-- **Issue #4904** (closed): Explore Konnect item 10: manufacturing pre-flight shape + offline JLCPCB catalog vs kct:tapeout
-- **Issue #4902** (closed): Explore Konnect item 8: layered config with natural-language design rules vs manufacturer profiles/recipes
-- **PR #4835**: chore(deps): bump nanoid from 3.3.12 to 3.3.18 in /site
-
 ### 2026-07-20 (evening)
 
 - **Release**: v0.19.0 — feature release centered on the **HV-isolation design loop** and **via-in-pad manufacturability**: `kct creepage --voltage-map` per-net voltage model (#4371), `kct zones hv-keepout` plane voids (#4372), HV-aware placement with creepage-keepout feasibility (#4373), the `/kct:hv-isolation-loop` orchestration skill (#4374), `kct analyze electrical-rating` advisory LED/capacitor rating lint (#4381), `kct check --emit-dru`/`--emit-drc-constraints` rule-identity sidecars (#4375), `kct fix-vias` off-pad relocation (#4363/#4376/#4377), and a `kct doctor` version-record drift check (#4349). Plus correctness fixes across creepage, netlist-sync, router, and writer subsystems. No breaking changes. Version bumped 0.18.0 → 0.19.0; tag `v0.19.0` → `publish.yml` to PyPI.
@@ -3516,3 +3561,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 ## 2026-10-31 — v0.27.0 release cut
 
 - v0.27.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8119, #8174, #8173, #8164, #8172, #8167, #8150, #8171, #8160, #8163, #8161, #8165, #8139, #8170, #8169, #8162, #8152, #8166, #8151, #8146, #8147, #8138, #8145, #8137, #8136, #8143, #8141, #8140, #8142.
+
+## 2026-11-07 — v0.28.0 release cut
+
+- v0.28.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8599, #8596, #8593, #8535, #8595, #8594, #8590, #8589, #8588, #8586, #8583, #8582, #8567, #8528, #8541, #8584, #8574, #8575, #8557, #8558, #8556, #8578, #8572, #8554, #8536, #8568, #8565, #8576, #8543, #8560, #8544, #8562, #8542, #8555, #8553, #8552, #8524, #8534, #8522, #8520, #8512, #8526, #8521, #8515, #8516, #8514, #8513, #8510, #8508, #8509, #8507, #8504, #8489, #8499, #8506, #8496, #8497, #8500, #8498, #8490, #8483, #8491, #8484, #8487, #8479, #8482, #8476, #8477, #8475, #8470, #8474, #8464, #8473, #8472, #8461, #8462, #8463, #8471, #8469, #8456, #8400, #8455, #8449, #8454, #8453, #8451, #8452, #8450, #8448, #8444, #8445, #8432, #8443, #8423, #8441, #8442, #8447, #8428, #8446, #8420, #8431, #8429, #8426, #8430, #8412, #8416, #8421, #8410, #8418, #8405, #8407, #8394, #8424, #8403, #8401, #8387, #8415, #8398, #8391, #8402, #8392, #8409, #8389, #8390, #8388, #8384, #8381, #8383, #8380, #8382, #8378, #8373, #8379, #8371, #8372, #8374, #8376, #8375, #8365, #8320, #8364, #8362, #8317, #8359, #8360, #8355, #8350, #8354, #8345, #8257, #8353, #8339, #8351, #8348, #8352, #8349, #8340, #8319, #8342, #8307, #8316, #8328, #8318, #8335, #8338, #8330, #8344, #8306, #8343, #8334, #8326, #8341, #8329, #8304, #8305, #8315, #8336, #8280, #8294, #8290, #8324, #8283, #8331, #8302, #8293, #8291, #8287, #8289, #8284, #8276, #8266, #8273, #8281, #8265, #8264, #8272, #8263, #8252, #8253, #8268, #8251, #8254, #8247, #8244, #8240, #8246, #8245, #8241, #8242, #8243, #8227, #8238, #8223, #8229, #8237, #8230, #8233, #8228, #8235, #8226, #8234, #8224, #8212, #8225, #8231, #8213, #8205, #8210, #8206, #8222, #8211, #8105, #8201, #8202, #8200, #8197, #8196, #8199, #8198, #8195, #8193, #8192, #8190, #8188, #8186, #8187, #8183, #8182, #8180, #8178, #8179, #8177, #8176.
+
+## 2026-11-08 — v0.28.1 release cut
+
+- v0.28.1 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8607, #8601, #8605, #8606.
+
+## 2026-11-09 — v0.29.0 release cut
+
+- v0.29.0 release PR opened by the automated daily release workflow (`release-pr.yml`, #5776); PRs merged since the previous tag: #8649, #8641, #8636, #8638, #8631, #8637, #8635, #8634, #8627, #8624, #8625, #8622, #8611, #8621, #8619, #8618, #8617, #8615, #8616, #8613.

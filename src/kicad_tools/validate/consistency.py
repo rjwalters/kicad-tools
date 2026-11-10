@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kicad_tools.validate.netlist import is_unconnected_pad_net
+
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.schema.schematic import Schematic
@@ -816,10 +818,27 @@ class SchematicPCBChecker:
         sch_refs = set(sch_pin_nets.keys())
         pcb_refs = {ref for ref, _ in pcb_pad_nets.keys()}
 
+        # Pin count per schematic net, to recognise single-pin default nets
+        sch_net_pin_counts: dict[str, int] = {}
+        for pins in sch_pin_nets.values():
+            for net in pins.values():
+                if net:
+                    sch_net_pin_counts[net] = sch_net_pin_counts.get(net, 0) + 1
+
         for ref in sch_refs & pcb_refs:
             sch_pins = sch_pin_nets.get(ref, {})
             for pin, sch_net in sch_pins.items():
                 pcb_net = pcb_pad_nets.get((ref, pin))
+                if (
+                    pcb_net
+                    and sch_net
+                    and sch_net.startswith("Net-(")
+                    and sch_net_pin_counts.get(sch_net, 0) == 1
+                    and is_unconnected_pad_net(pcb_net, ref, pin)
+                ):
+                    # Unconnected pin: schematic's single-pin default net is
+                    # equivalent to KiCad's PCB no-connect sentinel (#8669).
+                    continue
                 if pcb_net and sch_net and sch_net != pcb_net:
                     # Net name mismatch
                     issues.append(

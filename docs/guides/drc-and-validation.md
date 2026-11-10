@@ -557,6 +557,20 @@ declared to verify or it was deselected. The table output prints every
 change. Sign-off (`kct readiness`, `/kct:tapeout`) refuses while any
 **blocking** check is `unknown` or any waiver is stale.
 
+## Project rules: missing or stock-default `.kicad_pro` (Issue #8643)
+
+`kicad-cli pcb drc` silently uses KiCad's default rules when no
+`<stem>.kicad_pro` / `.kicad_dru` sits beside the board. Worse,
+`pcbnew.SaveBoard` writes a **stock default** `.kicad_pro` next to its output
+when none exists, so a script that saves a work copy produces a project that
+looks real but carries none of the board's rules. Scripts that save copies must
+call `kicad_tools.sidecars.copy_project_sidecars(src, dst)` (#8366) first.
+
+`kct check` now prints a `project_missing` / `project_default` warning to stderr
+and lists it in the top-level `project_rules` array of `--format json` (always
+present, empty when clean). Findings are warnings: they do not change the exit
+code. `kct readiness` records `project_default` under `warnings`.
+
 ## CLI: Compare Manufacturer Rules
 
 See how different fabs compare:

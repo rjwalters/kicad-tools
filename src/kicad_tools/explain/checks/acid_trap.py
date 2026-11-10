@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 # Minimum angle to avoid acid traps (degrees)
 MIN_TRACE_ANGLE_DEG = 90
 
+# Tolerance below the minimum before a joint is reported (degrees).  A joint
+# at 89.7 deg is a rounded right angle, not an acid trap (issue #8663).
+ANGLE_TOLERANCE_DEG = 1.0
+
+# Angles below this are collinear overlaps (a segment doubling back on
+# another), not corners; they are a separate defect class (issue #8663).
+MIN_CORNER_ANGLE_DEG = 1.0
+
 
 class AcidTrapCheck:
     """Check for acute angles in traces (acid traps).
@@ -62,7 +70,12 @@ class AcidTrapCheck:
                         continue
 
                     angle = self._calculate_angle(seg1, seg2, junction)
-                    if angle is not None and angle < MIN_TRACE_ANGLE_DEG:
+                    if (
+                        angle is not None
+                        and MIN_CORNER_ANGLE_DEG
+                        <= angle
+                        < MIN_TRACE_ANGLE_DEG - ANGLE_TOLERANCE_DEG
+                    ):
                         net = pcb.get_net(net_num)
                         net_name = net.name if net else f"Net {net_num}"
 
@@ -74,7 +87,7 @@ class AcidTrapCheck:
                                 components=[net_name, layer],
                                 location=junction,
                                 explanation=(
-                                    f"Trace on {net_name} ({layer}) has a {angle:.0f}° angle. "
+                                    f"Trace on {net_name} ({layer}) has a {angle:.1f}° angle. "
                                     f"Angles less than 90° can trap etchant during PCB "
                                     f"manufacturing, causing over-etching at the vertex. "
                                     f"This can weaken the trace and cause reliability issues."
@@ -85,7 +98,7 @@ class AcidTrapCheck:
                                     "at the junction to eliminate the sharp corner."
                                 ),
                                 learn_more_url="docs/mistakes/acid-traps.md",
-                                measurements={"angle_deg": float(round(angle))},
+                                measurements={"angle_deg": round(angle, 1)},
                             )
                         )
 

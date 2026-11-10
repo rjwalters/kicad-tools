@@ -7289,6 +7289,29 @@ def _add_readiness_parser(subparsers) -> None:
         ),
     )
     rd_parser.add_argument(
+        "--baseline",
+        dest="readiness_baseline",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Previous revision (.kicad_pcb, board directory or bundle) to diff "
+            "against (Issue #8664). Introduced assembly-affecting warnings block "
+            "unless acknowledged with --ack-warnings"
+        ),
+    )
+    rd_parser.add_argument(
+        "--ack-trace-quality",
+        dest="readiness_ack_trace_quality",
+        action="append",
+        default=[],
+        metavar="RULE=REASON",
+        help=(
+            "Accept a nonzero redundant_copper_* / via_dangling count remaining after "
+            "cleanup; the reason is mandatory and is recorded in README.txt and the "
+            "manifest.  Repeatable"
+        ),
+    )
+    rd_parser.add_argument(
         "--known-issue",
         dest="readiness_known_issue",
         action="append",
@@ -10006,6 +10029,12 @@ def _add_export_parser(subparsers) -> None:
         dest="export_no_project_zip",
         action="store_true",
         help="Skip KiCad project ZIP creation",
+    )
+    export_parser.add_argument(
+        "--no-ampacity-rules",
+        dest="export_no_ampacity_rules",
+        action="store_true",
+        help="Do not emit ampacity track_width floors into the sibling .kicad_dru",
     )
     export_parser.add_argument(
         "--auto-lcsc",

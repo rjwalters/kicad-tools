@@ -7,6 +7,616 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-09
+
+### Upgrade notes / behaviour changes
+
+- **Exported `.kicad_dru` ampacity floors change** (Issue #8612). Waived/reinforced nets and oversize minimums are no longer emitted, and designer DRUs with `Reviewed clearance` rules get none; re-run `kicad-cli pcb drc` against the shipped DRU. Use `--no-ampacity-rules` to emit none (previously generated ampacity rules in the managed floors block are then removed on rewrite).
+
+- **`kct optimize-traces` may now roll back more nets** (Issue #8632): nets whose rewrite opens a connection or adds an un-waived creepage pair are reverted, and `--layers`/`--copper` default to the board's values instead of 2 / 1.0 oz.
+
+- **A tapeout can newly refuse** (Issue #8633): nonzero `redundant_copper_*` / `via_dangling` warnings remaining after cleanup now fail the warning review unless acknowledged with `kct readiness --ack-trace-quality RULE=REASON`.
+
+### Fixed
+
+- **The pure-Python fallback search now charges its HV mask setup to its per-net
+  budget, and builds those masks in O(N)** (Issue #8414). On HV boards the
+  pairwise-widening masks used to be built before `Router._route_impl` started
+  its clock, so a 10 s fallback call could take ~128 s. The clock now starts at
+  the top of the call, and an expired budget returns a deadline stop
+  (`last_route_deadline_hit`) without caching a partial mask. The zero-padded
+  disc dilation behind those masks is now an exact separable distance
+  transform: byte-identical output, ~0.13 s per mask on a 15.9 M-cell grid at
+  any radius, down from 1.2-15 s.
+
+- **Pure-Python router no longer runs on MLX/CuPy grid arrays** (Issue #8609). `Router` now moves a GPU-backed grid to NumPy up front (speedup not measured here), and `RoutingGrid._select_backend` reports the real backend type for `ArrayBackend` (it previously logged `cpu` for an MLX grid). The default `kct route` path builds grids without a `PerformanceConfig`, so this is a defensive guard there; the cause of the reported slowdown is not established by this change. `cupy-cuda12x` carries a `sys_platform != 'darwin'` marker so `uv sync --all-extras` resolves on macOS.
+
+- **`kct export` no longer writes unmeetable or waived ampacity floors into the designer `.kicad_dru`** (Issue #8612). Nets with a waived `ampacity`/`path_ampacity` finding or a current-path record get no `Ampacity Min Width` rule, minimums wider than the board are skipped with a warning, and a designer DRU carrying its own clearance rules is left without ampacity floors. Export now reports whenever it modifies the `.kicad_dru`. New `--no-ampacity-rules` flag.
+
+- **`--waive` no longer fails wholesale on one unmatched key; same-digest re-binds keep the original approval** (Issue #8614). `kct check --waive` and `kct detect-mistakes --waive` record the keys that match and warn about the rest (exit 1 only when no key matches). Re-waiving a key whose evidence digest is unchanged under a new `evN:` prefix keeps the original `reviewer`, `date`, `reason` and `issue` and adds `rebound_at`. `kct check` summaries gain `orphan_waivers` beside `stale_waivers`.
+
+- **`kct place-silk-refs` now agrees better with `kicad-cli pcb drc` and keeps labels with their own part** (Issue #8628). NPTH mounting holes are obstacles, the planner adds a measured 0.225 mm slack for KiCad's larger stroke-font text extents (planner-only; `kct check` is unchanged), and candidates are chosen to be at least 0.4 mm nearer their own courtyard than any other part's. When no clear position reaches that margin the best one is used and the placement is reported as `low_association`.
+
+- **`kct optimize-traces` no longer reports a clean result over a newly opened net or creepage violation** (Issue #8632). With `--drc-aware` the written board is re-checked with kicad-cli (zone/via-aware unconnected items per net) and, with `--voltage-map`, with the `kct creepage` audit; nets that regress are rolled back and listed under `output_verify_rolled_back`. `creepage_gate` is `active` only when the whole-board audit ran. `--layers`/`--copper` now default to the board's own layer count and outer copper weight (`stack_source` in the JSON report).
+
+### Changed
+
+- **Tapeout/readiness cleanup now runs dedupe, prune and `optimize-traces --drc-aware`, and gates on trace quality** (Issue #8633). `kct readiness --generate` records per-step counts in README.txt and the manifest, and `optimize-traces` reads layer count and copper weight from the board/project when `--layers`/`--copper` are not given.
+
+### Performance
+
+- **Negotiated routing stops re-probing known-failing signal nets** (Issue #8486). The no-sealed-pad
+  fallback key is now the set of foreign `(net, layer)` pairs near the failed net instead of exact
+  geometry, so the rescue memo survives a re-route pass (re-probed every 3 iterations), and the
+  per-net search back-off also applies to nets that fail before reaching 90 % of their cap.
+
+## [0.28.1] - 2026-11-08
+
+### Fixed
+
+- **Post-negotiation sweep stops at its bound inside pad-escape and sub-grid
+  retries** (Issue #8414). A stranded wide power net whose edges fail on pin
+  access no longer runs pad-escape generation, the sub-grid retry or the
+  via/trace conflict resolver on an already-spent per-net or whole-sweep
+  budget: each step checks the remaining budget before it starts, escape
+  generation stops between pads, nested retries get the remainder, and the
+  rescue DRC pre-check stops at the sweep deadline (rolling the rescue back).
+  The sweep's timing line now says what it enforces, and a net that runs more
+  than 1 s past its per-net bound is named with where the time went.
+  Unbudgeted / deterministic-budget runs are unchanged.
+
+## [0.28.0] - 2026-11-07
+
+### Upgrade notes / behaviour changes
+
+- **`kct export` can newly exit non-zero** (Issue #8203). Environments without the `report` extra must install `kicad-tools[report]` or pass `--no-report`.
+
+- **`kct optimize-traces` now loads the board for collision checking** (Issue #8214). A board the router loader cannot handle (for example one with no Edge.Cuts outline) now exits 1 with a clear error instead of being optimized unchecked; the loader's cost is also paid on `--dry-run`.
+
+- **New `redundant_copper` warnings; readiness cleanup step** (Issue #8218). Boards may newly show `redundant_copper_*` warnings (never errors). `kct readiness --generate` now mutates the candidate PCB by removing exact-duplicate copper; pass `--skip-cleanup` to opt out (the skip is recorded in `README.txt`).
+
+- **`kct creepage --waive-same-footprint` can newly fail** (Issue #8232). Net pairs whose minimum is `same_footprint` now carry an extra `board` row; if that board-level approach is below the requirement the gate fails despite the waiver. JSON/table output may contain two rows for one net pair.
+
+- **`--waive-attach-zone` can now fail boards that passed** (Issue #8292). Foreign copper outside a part's attach zone that is closer than the requirement to the part's in-zone pad now gates the pair. Move that copper or review the new `residual_witness_mm`.
+
+- **`kct optimize-traces --net` is now an exact, case-sensitive match** (Issue #8299). It previously matched any net whose name contained the text, case-insensitively. Scripts relying on that should switch to `--net-pattern '*GND*'` (`--net` and `--net-pattern` are mutually exclusive).
+
+- **`kct route-link` commit mode now needs the pinned kicad-cli** (Issue #8314). Without `--probe` it refuses (exit 2, nothing written) when the pinned KiCad toolchain is unavailable; set `KCT_KICAD_DOCKER=1` to use the pinned image. `--probe` is unchanged.
+
+- **`kct optimize-traces --drc-aware` can now exit 2** (Issue #8322) when kicad-cli reports more clearance errors on the written board than on the input. The board is still written.
+
+- `pcb prune --current-paths` default changed: `--wide` is now net-relative when omitted (was an absolute 0.5 mm). Pass `--wide 0.5` to restore the old behaviour.
+
+- **Action needed if you run `pcb prune`, `optimize-traces --drc-aware` or `stitch --drc` on a board with no `.kicad_pro`/`.kicad_dru` beside it** (Issue #8369). They now fail instead of silently checking against KiCad default rules. Pass `--project PATH.kicad_pro`, or `--allow-default-rules` to keep the old behavior.
+
+- **`pour_slot` is a new `kct check` warning category and never fails strict board gates** (Issue #8435). It is listed in `NON_GATING_RULE_PREFIXES` alongside `redundant_copper`, so board gates that fail on any warning (board 04, board 05) count it as an advisory. Run `kct check --skip pour_slot` to silence it; board 04's two current hits (`USER_LED`/`NRST`, `GND`/`SWDIO` on F.Cu, 0.31–0.33 mm gaps) are ordinary track spacing, not a missing plane.
+
+- **Pour-slot packing is now opt-in** (Issue #8457). Add `--pour-slots-pack` to `kct optimize-traces --pour-slots` (or `pack=True` to `cleanup_pour_slots`) to keep the old pack fallback.
+
+- **Recorded waivers go stale once** (Issue #8517). `EVIDENCE_HASH_VERSION` is
+  now `ev3` (mistake hashes `ev3.m1`), so every `ev2` waiver reports
+  `STALE waiver (outdated evidence version)`, even on boards whose origin is
+  (0, 0). Re-review and re-record with `kct check --waive`.
+
+- **Ampacity rules in the exported `.kicad_dru` change shape** (Issue #8527). Per-net targets now emit `A.NetName == '...'` rules rather than one `A.NetClass` rule at the class maximum, and widths follow the stackup copper weight. Re-run `kicad-cli pcb drc` against the shipped DRU after re-exporting.
+
+- Regenerate any dual-row header footprint previously made with `kct footprint generate pin-header --rows 2`: its pad numbering was column-major and is now row-major (stock KiCad numbering). (Issue #8529)
+
+### Fixed
+
+- **`kct export` fails when the `report` extra is missing** (Issue #8203). A missing report dependency used to log one warning and exit 0 with no `report.md`/`images/`; it now records an error naming the module that failed to import plus the `kicad-tools[report]` install hint, and exits non-zero.
+
+- **`kct report generate` now loads the committed net-class-map sidecar** (Issue #8204). Sidecar-gated DRC rules (`diffpair_length_skew`, `diffpair_routing_continuity`, `diffpair_uncoupled_length`, `match_group_length_skew`) no longer run inactive in the report's DRC section, matching `kct export` and `kct check`.
+
+- **`kct optimize-traces --drc-aware` reports attempted vs kept nets and why nets rolled back** (Issue #8207). Summary now reads "Nets attempted: N (kept: K, rolled back: R)"; `-v` and `--format json` list per-net `new_violations` by rule id, the failsafe warning names the rules above baseline, and a fully reverted run writes the input board byte-for-byte.
+
+- **`kct parts availability` now matches `kct export` and accounts for every BOM line** (Issue #8208). LCSC-less lines are auto-matched like export (opt out with `--no-auto-lcsc`; matches are labelled `lcsc_source` in JSON and `[auto-matched]` in the table), and the table/summary now report and list stock-unverified, lookup-unavailable and discontinued parts so the counts sum to the total.
+
+- **`kct optimize-traces` now works on KiCad-10 name-only boards** (Issue #8209).
+  On a board with no `(net N "name")` header table, `replace_segments` removed
+  none of the original segments and appended the optimized copper as `(net 0)`
+  no-net segments, which created shorts. Under `--drc-aware`, every net was
+  rolled back. Segments are now matched by resolved net name and written in the
+  board's own `(net "NAME")` dialect.
+
+- **`kct optimize-traces` collision-checks every rewrite on finished boards** (Issue #8214). The CLI now builds a collision checker from the board's own copper and clearances, so unsafe chamfers/zigzag/staircase rewrites are skipped individually instead of `--drc-aware` rolling back whole nets. Each net's accepted rewrite is synced into the checker's grid before the next net is checked, and KiCad-10 name-only boards are keyed to the grid's net ids. If the checker cannot be built the command fails instead of falling back to unchecked rewrites.
+
+- **Via minimisation no longer strands pad/pour connections** (Issue #8215). `kct route` now gives the via optimiser pad positions and same-net zone layers, and via-pair elimination is connectivity-checked. `kct optimize-traces` never runs via minimisation.
+
+- **`kct optimize-traces` now shortens detours between fixed points** (Issue #8217). The `shorten_detour_pass` that `kct route` already ran now also runs from `optimize-traces` (incl. `--net`), using the loaded board's pads and vias as anchors and its copper as the obstacle model. Length-matched nets are skipped.
+
+- **`kct optimize-traces` off-angle warnings name the net and no longer repeat** (Issue #8219). `OffAngleSegmentWarning` now reports `net GND` instead of `net 0` on name-only boards, and intermediate DRC-trial serializations no longer re-warn for each segment.
+
+- **`deploy-site.sh` leaves a clean git tree** (Issue #8220). Tracked renders
+  rewritten by `kct render` are restored after the site build (published bytes
+  unchanged), `.wrangler/` is gitignored, and a warn-level check reports any
+  remaining uncommitted paths so Pages commit provenance stays accurate.
+
+- **`kct creepage` no longer hides board-level approaches behind a `same_footprint` row** (Issue #8232). When a net pair's minimum gap is component-internal, the census now also emits a second `board` row with the smallest residual board-level creepage (sharing footprint's pads masked out), so `--waive-same-footprint` waives only the intra-footprint row.
+
+- **`PCB.save` no longer adds a numbered net table to name-only boards** (Issue #8239). Loading and saving a KiCad-10 board with no `(net N "name")` header now leaves it header-less; `kct pcb prune` inherits the fix.
+
+- **`kct pcb prune --no-drc --unverified` no longer leaves a dangling end or cuts an arc-fed pad** (Issue #8249). Removal now rejects groups that strand a neighbouring track end resting on a removed body, and copper arcs protect any segment whose body reaches them.
+
+- **`kct optimize-traces` no longer breaks connectivity on finished boards** (Issue #8250). The 45° pass leaves corners that a via, pad or T-junction branch attaches to; keepout rule areas and NPTH holes are now honoured by the collision check; a net whose rewrite would split previously-joined pads is discarded and reported (`nets_connectivity_discarded`); and `--drc-aware` no longer rolls nets back on `clearance_segment_zone`, which is measured against stale stored zone fills. Pad-to-zone connections are not covered by the connectivity gate.
+
+- **`kct route --timeout` report no longer names a moved checkpoint** (Issue #8258). With a relative `-o`, `<stem>.timeout.json` `checkpoint` now points at the quarantined `_timeout_unverified_` file, and `--export-failed-nets` records in the report when it was skipped on timeout. The report names the search-failures sidecar only if one was written before the deadline, and gives a reason otherwise.
+
+- **`kct pcb prune` removes a redundant branch whose free end rests on a via by overlap only** (Issue #8259). An anchorless track end whose capsule overlaps a same-net via/pad is now *overlap-held* (soft protection) instead of a hard free end; the overlap is still never counted as a join. When the branch goes, the inner-layer end that shared the overlap is moved onto the via/pad centre, or, if that would tilt a 45-degree track, gets a short same-layer stub from the centre (new `stubs_added` stat).
+
+- **`kct check --output` JSON now carries `summary.attach_zone_exemption`** (Issue #8262). The file report previously omitted the attach-zone exemption state (and `_reason` / `_unexempted` when suppressed) that the stdout JSON emits, so gates reading the file (tapeout, readiness) could not see a suppressed exemption.
+
+- **`kct optimize-traces` no longer strands T-joined branches or mid-chain pads** (Issue #8269, part of #8250). After every pass, a chain's rewrite is kept only if it still touches every anchor it touched before: the net's pads and vias, and the endpoints of the net's other chains on that layer. On a finished board `compress_staircase` had collapsed a chain 0.34 mm off a same-net branch that ended on its body, leaving the branch dangling (`track_dangling` in kicad-cli). The detour and jog passes use the same anchors.
+- **`kct optimize-traces` checks rewrites against the board's declared clearance** (Issue #8269). The collision checker was built from the `.kicad_pcb` alone, so a KiCad 6+ board (netclasses in `.kicad_pro`, rules in `.kicad_dru`) was checked at the 0.20 mm dataclass default. The router's own name-based net classes were also merged in as per-net floors, though the board's files never declared them. On a 0.1016 mm board both made the checker reject even unchanged copper. It now resolves the base from the project, DRU and `project.kct` fab floor (`resolve_routing_clearances`, zero target), keeps only the project's own stricter netclasses as floors (`load_pcb_for_routing(router_class_floors=False)`, default unchanged for `kct route`), and leaves a board that declares nothing on the old behaviour.
+
+- **Timeout/best-so-far checkpoints are editable** (Issue #8270). All three
+  checkpoint writers now fuse collinear same-width/same-layer per-grid-cell
+  segments (copper unchanged, live routes untouched) before serialising, so a
+  17k-segment checkpoint no longer needs hand-merging in KiCad.
+  The `_partial` interrupt/timeout output is merged the same way, route ends
+  that reached a pad through a sub-grid jog now join the exact pad centre
+  (only when clearance-legal), and the `.timeout.json` `partial-save` stage
+  lists dangling stubs of partially routed nets as `partial_net_stubs` (ends
+  matched within 1e-3 mm; a via only connects when same-net copper meets it on
+  another layer).
+
+- **`kct optimize-traces` no longer emits exact-duplicate segments** (Issue #8271). Duplicates introduced by a rewrite are dropped per net before output; the count is reported as `duplicates_removed` in `--format json` stats and in the text summary.
+
+- **`kct route` HV pairwise gate no longer waives traces that leave a rated footprint's attach zone** (Issue #8277). The in-run audit tested the attach-zone exemption on the closest-gap midpoint only, so a segment running past a rated connector pad (e.g. 0.85 mm from a neutral pin against a 1.6 mm requirement) was waived while `kct creepage --waive-attach-zone` failed it. The gate now applies the census rule: both nearest points must lie in the zone and the copper outside it must still clear. `kct creepage` also prints why an `attach-zn` row that still gates is not waived. Each verdict is taken on fused collinear trace runs, so the route-time check judges the same copper as the final gate (a trace split into grid-step fragments is no longer rejected for a fragment that ends just outside the zone).
+
+- **`kct export` / `kct audit` ampacity follows the board's declared stackup copper** (Issue #8278). The audit's DRC pass ignored `(setup (stackup ...))` and evaluated inner layers at the fab profile's 0.5 oz default, so a 1 oz-inner board such as Board 05 showed 1186 spurious `ampacity` errors and a NOT_READY report that `kct check` did not.
+
+- **`kct pcb prune` now clears router grid-step copper it used to leave behind** (Issue #8278).
+  On Board 05, `redundant_copper_*` warnings went from 372 to 4 (the remaining
+  four track detours were re-routed in #8308); native DRC stayed 0/0 and LVS
+  stayed clean.
+  - A straight run is no longer skipped when the only copper touching its body
+    is already joined to it through modelled joins (for example the diagonal
+    corner of a staircase).
+  - A second, validated pass merges runs whose joints also sit on a via, pad or
+    zone. It collapses the run on the model and keeps the merge only if the
+    terminal partition is unchanged, every touched item stays joined, every
+    zone keeps an anchor and no via/pad loses a centred track end.
+  - Runs that a longer track already spans are dropped instead of duplicated.
+    Runs that form a loop to nowhere are kept.
+  - Loop removal no longer deletes a via's only centred joint on a layer
+    (which created a `redundant_copper_via_offcentre` finding).
+  - Locked tracks are now honoured. `Segment` never read `(locked yes)` (or
+    KiCad 6's `(segment locked ...)`), so prune's "never touch a locked track"
+    guard was dead and a locked track could be removed, snapped or merged.
+
+- **Exempt BOM refs no longer pick up an LCSC from the CSV merge source** (Issue #8282). Refs declared `exempt:` in the spec are excluded from the existing-BOM / `--merge-lcsc-from` merge in both export and preflight, and from sibling propagation in the default `--auto-lcsc` enrichment. Exclusions where the source would have supplied a number are logged and printed by `kct export`.
+
+- **`kct optimize-traces` refills zones after writing** (Issue #8286). The rewritten board no longer carries a stale zone fill that made `kct check` report phantom `clearance_segment_zone` errors. Output (text and JSON `zones_refilled` / `zones_refill_error`) states whether the refill ran; without kicad-cli a warning is printed and the exit code is unchanged.
+
+- **`kct creepage --waive-attach-zone` no longer hides out-of-zone approaches to in-zone pads** (Issue #8292). The attach-zone residual now also measures each copper item whose nearest point to the other net lies outside the zone (e.g. a via or trace stub skimming the zone edge), matching the router's pairwise audit; an attach trace approaching its own pad inside the zone stays waived.
+
+- **`_partial` checkpoints no longer contain off-angle pad joins** (Issue #8296). The pad-centre join now emits a 45-aligned dogleg for the end jog only, never re-angles a merged run, and skips the join when it would not clear; strict 45-degree mode no longer loses the partial copper.
+
+- **`kct optimize-traces` writes a reproducible board** (Issue #8297). Segments and vias the optimizer emits now get deterministic UUIDs (seeded from the input board and `--net` filter, so a filtered re-run on optimized output never duplicates UUIDs), so the post-write zone refill (which re-saves items in UUID order) no longer makes the output differ between runs.
+
+- **`optimize-traces` / `pcb prune` leave fewer wiggles** (Issue #8298). A net whose rewrite fails the pad-connectivity check now keeps each independent safe edit (reported as "Partly kept"); `pcb prune` models KiCad's anchor-in-body joins (track end or via/pad centre inside a track body).
+
+- **`kct creepage --waive-attach-zone` verdict no longer depends on trace segmentation** (Issue #8303). The census cross terms now fuse contiguous collinear same-width trace runs before judging item pairs, sharing the router's collinearity test, so a straight HV trace split into fragments is waived exactly like the unsplit trace.
+
+- **Board 05 ships with zero manufacturer-check warnings and an in-stock D3** (Issue #8308).
+  The four router track detours left after #8278's copper cleanup
+  (`redundant_copper_detour` on +5V x2, VM and MOSI) are re-routed in
+  `redesign/routing.json` instead of being recorded as known issues: MOSI
+  crosses RUN under U1's TQFP body and joins the J4 run directly (copper on
+  the net ~46 mm -> 24 mm), U3.8 gets its own via onto the B.Cu VM feed, and
+  the redundant +5V loops between In2-plane vias are removed. D3 is now
+  `NCD0805R1` / C84256 (Issue #8267), so the bundle exports under
+  `--strict-preflight` again. Native refill DRC 0/0, LVS clean, `kct check
+  --mfr jlcpcb` 0 errors / 0 warnings.
+
+- **`kct` pcb retune no longer reissues UUIDs already on the board** (Issue #8321). The deterministic UUID seed is now derived from the input board hash and the selected nets instead of a constant, so retuning a second selection on an already-retuned board cannot duplicate UUIDs; identical input and selection still give byte-identical output. `settings.uuid_seed` in the provenance JSON reports the derived seed.
+
+- **`kct optimize-traces --drc-aware` no longer claims "no regressions" on the in-process referee alone** (Issue #8322). It now runs kicad-cli on the input and on the written board and reports `kicad-cli clearance errors: before -> after` (text and `kicad_cli_drc` in `--format json`). A kicad-cli increase prints a REGRESSION line and exits 2; when kicad-cli is unavailable and the board has a `.kicad_dru`, the summary says the referee does not evaluate project `.kicad_dru` rules.
+
+- **`kct pcb prune` DRC referee no longer masks a new rule violation behind a fixed one** (Issue #8323). Violations are now compared by rule and nets, not just type, so a new custom-`.kicad_dru` clearance error cannot hide behind an unrelated fix; when no `.kicad_dru`/`.kicad_pro` sits next to the board, `drc_note` now says custom rules were not evaluated.
+
+- **`kct optimize-traces` straightens a sidestep just before a pad** (Issue #8325). A new pad-entry pass extends the run into the pad when a short two-piece jog (at most half the trace width off the pad centre) precedes it, and the connectivity gate's free-end check now uses the same `max(tolerance, w/2)` pad-touch radius as its component labelling, so the edit is no longer discarded. Board 06 drops from 165 to 152 segments; 05 and 07 are unchanged or better.
+
+- **HV `kct route --complete` no longer strands a net at a rated
+  two-terminal part's own pad** (Issue #8327). The search-time attach-zone
+  waiver added by #8277 skipped `roundrect` pads (nearly every SMD pad) and
+  fell back to "the whole segment must sit inside one zone", so an edge
+  entering a rated footprint's zone near that footprint's other pad was
+  refused although the commit gate accepts it. Roundrect pads are now
+  measured with their corner radius (or as their rectangle when the ratio is
+  unknown), and the waiver clips the zone exactly as the trace-vs-pad gate
+  does (no end-cap overhang). On the softstart rev-D HV-scoped run the AC/HV
+  nets routed go from 7/11 to 10/11, inside the link budget.
+
+- **`kct creepage --waive-attach-zone` classifies the same-footprint residual row** (Issue #8332). The #8232 `board` residual row emitted after a `same_footprint` minimum now gets the same `attach_zone` classification and residual fields as a primary `board` minimum when its witness lies in an exempting #4506 zone, so the census agrees with the router kernel.
+
+- **`kct pcb prune` no longer deletes every track on a one-pad net** (Issue #8333). Loop removal is now skipped for nets with fewer than two terminals, where the "partition unchanged" safety check was vacuous; snap and collinear-merge still run.
+
+- **`kct pcb strip --from-report` now accepts real `kct creepage --witness` output** (Issue #8346). Rows are located from `witness.point_a_mm` / `point_b_mm` (side A first) instead of all being skipped as `no location`; passing and waived pairs are no longer treated as cut requests.
+
+- **`kct pcb strip --from-report` no longer refuses its own clearance fix** (Issue #8347). The post-edit DRC gate now ignores `track_dangling` / `via_dangling` growth on the nets the strip cut (cutting copper leaves stubs that `--dangling` removes) and, in `--from-report` mode only, `unconnected` growth; the old `unconnected` exemption silently matched nothing since #8323 widened the signature key. Dangling growth on untouched nets, `unconnected` growth in `--dangling` mode, and growth in any other violation type still refuse the write.
+
+- **`kct pcb prune` merges collinear runs across sub-micron end gaps** (Issue #8356). Straight-through track ends up to 0.75 µm apart (router float noise, 250x the 2 nm join tolerance) are now treated as one joint when planning collinear merges; `JOIN_TOL` is unchanged.
+
+- **Board 05's committed `.kicad_dru` is what its recipe emits** (Issue #8357).
+  `boards/05-bldc-motor-controller` now ships the #8048 attach-zone
+  router-class exemptions (42 `kct attach zone - <ref>` rules) that
+  `design.py` writes, with zone fills and readiness evidence re-pinned on the
+  pinned KiCad image. A new test replays the recipe's three `.kicad_dru`
+  writes on the committed board and fails if the two ever drift again.
+
+- **`kct pcb prune --current-paths` no longer leaves a via held only off-centre** (Issue #8358). The declared-net / via-closed loop cut now applies the same via-side centring guard as the generic loop pass: when breaking a loop would remove a via's only centred track end on a layer, that cut is refused and the loop is broken elsewhere. Previously this could leave a `redundant_copper_via_offcentre` joint.
+
+- **`-o` outputs now carry the input's `.kicad_pro` / `.kicad_dru`** (Issue #8366). `stitch` (previously `.kicad_pro` only), `pcb dedupe|prune|reinforce|strip` and `optimize-traces` copy both project sidecars verbatim via a shared `copy_project_sidecars` helper, so later kicad-cli DRC stages no longer fall back to default rules. An existing, differing destination sidecar is kept, not overwritten.
+
+- **`optimize-traces --drc-aware` no longer reverts every net when the per-net rollback cannot reach the DRC baseline** (Issue #8367). It now re-admits changed nets one at a time and rejects only those whose own edits add errors; the all-revert fail-safe fires only if no net survives.
+- **`optimize-traces --drc-aware` no longer discards every net when the in-process referee cannot see `.kicad_dru` rules** (Issue #8367). When a project `.kicad_dru` exists and the in-process re-admit keeps 0 changed nets, kicad-cli (`--refill-zones`, project rules) arbitrates: all changed nets are tried, then the set is bisected so only genuinely bad nets are rolled back. Without a rules file or kicad-cli, behaviour is unchanged.
+
+- **`pcb prune --current-paths` now works on wide power nets by default** (Issue #8368). Without `--wide`, each loop's narrowest segment is cut whatever its width, provided the branch left behind still meets the declared current's IPC-2221 width; refused loops are reported with the reason. An explicit `--wide MM` keeps the absolute behaviour. `pcb current-paths-audit` now names a witness segment/via (text and `witness` JSON field) for every loop/parallel ambiguity.
+
+- **`pcb prune --current-paths` and `pcb current-paths-audit` agree on loops**
+  (Issue #8368). Prune now removes a track lying wholly inside a collinear,
+  no-narrower same-net track (covered copper the audit read as a parallel
+  path) -- but never when that would leave another track's end landing
+  mid-span on the remaining track, which kicad-cli reports as dangling; it
+  then keeps the track and reports the loop. It also treats a track end on another track's centreline and a via centred
+  on a track as joins, sees mid-span same-layer crossings when looking for
+  loops, and reports any loop the audit still finds with the audit's witness
+  instead of claiming none remain. The net-relative `--wide` ampacity check
+  now sizes each branch for its own layer (external for `F.Cu`/`B.Cu`) at the
+  board stackup's copper weight, instead of internal-layer 1 oz everywhere.
+
+- **Python-fallback repeat skip is keyed per pad-pair, not per net** (Issue #8377). A drained pair on a multi-pad net no longer suppresses the first Python fallback attempt of a never-tried pair on the same net.
+
+- **Board 01 commits the `.kicad_dru` its recipe emits** (Issue #8385). The
+  routed DRU now carries the #8048 attach-zone block (4 rules) along with the
+  current fab-floor rules (`Max Hole Size`, front and back silkscreen text),
+  and the zones were refilled against it. Copper is unchanged and the evidence
+  was re-pinned on the pinned KiCad 10.0.6 toolchain. A new replay test guards
+  boards 01, 02 and 04. Boards 02, 04 and 07 are blocked on #8399.
+
+- **`optimize-traces` cuts chains at interior vias again** (Issue #8386), so detour shortening replaces a 45-degree tent that ends at a through-via. Layer-aware chain sorting (#8330) had stopped cutting a route at a via it passes straight through on one layer. Pad centres are not cut.
+
+- **`kct export` keeps net-class-map ampacity rules in the shipped `.kicad_dru`** (Issue #8393). Export now loads the same net-class-map sidecar as `kct check --emit-dru`, so the exported file no longer drops the per-class `track_width` floors.
+
+- **`kct pcb prune` and `kct optimize-traces` honour `KCT_KICAD_DOCKER=1`** (Issue #8395). Their kicad-cli DRC referee/summary now runs on the pinned KiCad image instead of the host kicad-cli; unchanged when the variable is unset. A missing Docker is an error, not a silent host fallback.
+
+- **`kct route --complete` rolls back links that break pairwise HV creepage** (Issue #8396). With `--voltage-map`, any completion link whose copper adds a pairwise shortfall (the gate `kct creepage` is scored against) is dropped before the board is written, and `--complete-report` lists it as `creepage-rolled-back` with the blocking net pair and required vs measured mm.
+
+- **Router and `pcb dedupe` no longer keep zero-length copper segments** (Issue #8397).
+  `PCB.dedupe_copper` (reported under `removed.segments`), the optimizer's
+  `dedupe_segments` and the route consolidation pass now drop segments whose
+  start equals their end (to ~1 µm). Staircase compression is covered under `--timeout` pressure by the entry below.
+- **`kct route --timeout` no longer writes grid staircases** (Issue #8397).
+  When the time budget makes the full trace optimizer skip, a cheap
+  staircase-only compression pass still runs before the board is saved.
+- **`kct route --complete` no longer writes grid staircases on the added links** (Issue #8397).
+  The lattice engine skips the geometric post-passes, so completion links kept
+  one-cell staircases; the staircase-only pass now runs on them, with the new and
+  preserved copper marked into the grid so its collision checks see real obstacles.
+
+- **Boards 02 and 04 no longer carry avoidable `redundant_copper_*` router copper** (Issue #8399). Their recipes now run a new `kicad_tools.pcb_prune.cleanup_copper` (dedupe + DRC-verified prune to a fixed point) and the committed routed PCBs and readiness evidence were re-pinned; the three residual genuine detours are recorded as reviewed `known_issues` warning allowances. Board 07's hash-bound reviewed routing is unchanged (see the PR).
+
+- **Board 06 (`06-diffpair-test`) is regenerated from `assembled-demo/build.py` on the pinned toolchain** (Issue #8404). The committed routed board, `.kicad_dru` (now carrying the #8048 attach-zone block), Gerbers, renders and the hash-bound manufacturing bundle are the recipe's own output (100% routed, native DRC 0, LVS pass), the board is covered by `tests/test_board_recipe_dru_reproduces_8385.py`, and `refresh_bundles_6404.py` gains a board-06 configuration. The board's pour-escape search now ignores the (relax-only) attach-zone block instead of failing closed. The recipe also writes board 06's native LVDS pair gap/skew block (`kct router diff-pair gaps`) from the board's own pairs, since `build.py` routes only IN/OUT and `kct route` never engages them; the committed DRU keeps the four `kct diff pair skew` rules from #6443/#7894.
+
+- **Lattice trace/via attach-zone waivers now match the HV gate** (Issue #8408). `exempt_seg_seg`, `exempt_seg_pt` and `exempt_pt_pt` waive a pair only when both nearest points lie in one zone and the copper outside it still clears, so the search stops committing copper the end-of-run pairwise audit rejects.
+
+- **Timeout receipt keeps the fallback diagnostics when no snapshot is saved** (Issue #8413). `.timeout.json` now always carries `python_fallback_top_nets`, `python_fallback_repeat_skips`, `python_fallback_proven_skips`, `python_fallback_seconds_saved` and `fallback_count` (`null` when unavailable), even with `snapshot_saved: false`.
+
+- **Post-negotiation sweep now honours its announced bound** (Issue #8414). The `PIN_ACCESS` sub-grid and via-conflict retries inside `route_net` run on the remaining per-net budget instead of unbudgeted, the whole sweep is installed as a `wall_deadline` so nested searches clamp to it, and the log prints the measured sweep time next to the bound. Deterministic-budget runs are unchanged.
+
+- **Post-negotiation sweep no longer runs its DRC pre-check past the sweep bound** (Issue #8414). Once the sweep budget is spent, a rescued net is rolled back instead of paying for an uncapped geometry scan.
+
+- **`kct route --complete` no longer emits zero-length link tracks** (Issue #8417). The link router drops start == end segments and its exact clearance check measures a degenerate segment as a disc of the trace width.
+
+- **`kct optimize-traces` no longer disconnects fine-pitch pads** (Issue #8419). The
+  connectivity guard now measures pad copper (not just the pad centre), so a track that
+  ends at a pad edge is recognised as attached and edits that would detach it are dropped.
+  The `DRC errors:` line is labelled as an in-process advisory count, instead of `N new
+  errors`, when kicad-cli arbitrated and reports no regression.
+
+- **`kct pcb prune` finds loops closed by a trace overlapping a same-net via or pad** (Issue #8436). A trace body that overlaps a via disc or pad shape with its centre outside the body now counts toward loop detection (cycle-finding only), so the redundancy is reported. It never justifies a removal.
+
+- **`kct prune` joins off-centre ends with an on-grid stub** (Issue #8437). When snapping a track end onto a via/pad centre would tilt it off the 0/45/90° set, prune now adds a one- or two-piece 0/45/90° stub to the centre instead of leaving the end overlap-held, so `redundant_copper_via_offcentre` no longer rises.
+
+- **`kct build-native --check` reports placement/DRC backends clearly** (Issue #8439). An unbuilt backend now reads `not built (build with: kct build-native)` with the reason `extension <name> not built` instead of the misleading "partially initialized module / circular import" text, and `--format json` gains `placement` and `drc` keys (router keys unchanged).
+
+- **`kct route` no longer turns a converged route into a timeout via placement-delta feedback** (Issue #8480). Each placement-delta trial now re-reads the stage time left, is skipped (`pd_budget_exhausted`) when too little remains, and is abandoned after iteration 0 when it routes more than 3 nets fewer than the accepted result, so the stage ends normally instead of exit 124 / `partial`.
+
+- **`kct route` no longer fuses a vertical/horizontal run with a 1 µm jog into an off-angle segment** (Issue #8488). `merge_collinear_same_width` now fuses a chain only when the fused segment is 45°-legal, so `OffAngleSegmentWarning` is not raised for the fused copper.
+
+- **`kct optimize-traces` no longer renames nets on name-only KiCad 10 boards** (Issue #8492). A numeric `(net N)` reference with no header table to resolve it was re-serialized as an invented `(net "Net<N>")`; such blocks are now left untouched with a warning.
+
+- **`kct check` and `kct pcb reinforce` report coordinates in one frame** (Issue #8493).
+  `netclass_clearance_copper` locations, via messages (`via_in_pad`,
+  `via_type_capability`, silkscreen via labels) and `pcb reinforce` refusal
+  coordinates are now sheet-absolute KiCad coordinates, matching kicad-cli DRC,
+  on boards whose Edge.Cuts does not start at (0, 0).
+
+- **`kct pcb reinforce` honours `.kicad_dru` conditional clearance rules** (Issue #8494). Anchor-via candidates are now checked against the board's custom rules (e.g. a `A.NetClass == 'HV'` clearance) with kicad-cli semantics; refusals report the new `dru_conditional` rule.
+
+- **`kct route --complete` no longer writes zero-length tracks** (Issue #8495). The
+  closer's degenerate-segment guard now compares coordinates after the board file's
+  0.01 mm rounding, so a sub-resolution sliver can't be serialized as a point
+  segment that kicad-cli reports as `tracks_crossing`.
+
+- **`kct pcb prune` reaches a fixed point: it no longer re-adds a via/pad stub
+  that already exists** (Issue #8501). Stub pieces are now checked against the
+  net's existing copper by distance (either direction), so a coordinate on a
+  half-quantum of the dedup rounding no longer reads as new copper, and a
+  plan whose stubs are all present is no longer reported as accepted. Board
+  05's copper cleanup converges again.
+
+- **`pour_slot` no longer reports a slot once per copy of duplicated copper**
+  (Issue #8503). Exact duplicate segments (already flagged by
+  `redundant_copper_duplicate`) are collapsed before pairing, so each distinct
+  track pair is reported once; board 03 drops from 82 to 39 findings.
+
+- **`kct route` no longer emits a same-net stub twice** (Issue #8505). When two routes of one net ran the same pad-to-via stretch, both copies survived trace optimization, duplicating copper and inflating `Total length`. Board 02 NODE_A drops 1.18 mm of duplicate copper (316.39 -> 315.21 mm).
+
+- **Evidence hash version bumped to `ev3`** (Issue #8517). Locations for
+  `netclass_clearance_copper`, via and silkscreen findings became
+  sheet-absolute in #8493, which moved their evidence hashes on origin-offset
+  boards. Old waivers now report `outdated_evidence_version` instead of a
+  misleading `evidence_changed`.
+
+- **`kct parts availability` refetches stale-unverified stock and gains `--no-cache`** (Issue #8518). Cache entries older than the 24 h verification window are refetched live instead of reported `unknown`; refetch failures are named per item; `summary.low_stock`/`available` now match per-item statuses.
+
+- **`kct build-native` no longer leaves placement/DRC silently unbuilt** (Issue #8519).
+  A build that finishes with placement/DRC source present but no installed
+  extension now warns (router-only fallback vs. compile failure), and the
+  `--check` hint says "optional; Python fallback in use" when `kct build-native`
+  cannot build that backend.
+
+- **`kct route-link` writes `(net "name")` refs on name-only boards and merges staircases** (Issue #8523). Link copper no longer carries bare numeric `(net N)` refs that `optimize-traces` skips (#8492), and collinear runs / grid staircases are collapsed before commit (falling back to the raw route if the DRC gate refuses the collapsed one).
+
+- **`kct route-link` DRC gate now refills zones** (Issue #8525). The per-link gate ran
+  DRC against the stale plane fill, so every new via on a board with filled inner
+  planes was rolled back with phantom `clearance`/`hole_clearance` findings. Baseline
+  and candidate are now checked with `--refill-zones` (KiCad 10+), and the rollback
+  reason names the first few offending items, not only their types.
+
+- **`kct export` no longer turns a per-net `target_ampacity` into a class-wide `track_width` floor** (Issue #8527). Nets that declare their own target get net-scoped (`A.NetName`) ampacity rules, ampacity widths use the board's declared stackup copper weight instead of a hard-coded 1 oz, and export warns when it changes the ampacity block of an existing `.kicad_dru`.
+
+- **`kct footprint generate pin-header --rows 2` numbered pads column by column** (Issue #8529). Dual-row headers now alternate columns (odd pins left, even pins right, stepping together) like KiCad's stock `PinHeader_2xN` and the Pi GPIO header, so pin N lands where a real header's pin N is.
+
+- **`kct submit-jlcpcb --dry-run` no longer refuses bundles whose BOM `Footprint` and CPL `Package` differ only by a `Library:` prefix** (Issue #8538). The preflight ignores the prefix when comparing (so older and stock bundles pass), and a genuine mismatch names the reference plus the BOM and CPL values. The export writers are unchanged.
+
+- **`kct submit-jlcpcb` works without JLC OpenAPI credentials** (Issue #8539). The stock
+  gate falls back to anonymous LCSC reads (`provenance.source` = `lcsc-anonymous`) and, with
+  no source at all, says "no inventory source: JLC OpenAPI credentials not set" instead of
+  `transport-error`. `--guided` now runs regardless of the stock gate and prints its state;
+  `--upload` still requires credentials. `--match-mapping` is documented as the CSV column schema.
+
+- **`kct check` resolves circular courtyards and stops warning on hidden fiducial refs** (Issue #8540). `fp_circle` courtyards (stock `Fiducial:` parts) now resolve into outlines so `courtyard_overlap` is checked instead of reporting `courtyard_outline_unresolved`, and `silk_ref_obscured` no longer warns for hidden references on fiducials (pads with `pad_prop_fiducial_glob`/`_loc`, or `board_only` + `exclude_from_pos_files`).
+
+- **`kct creepage` now treats net-0 copper as floating conductors** (Issue #8548). A netless pad or trace between an HV net and another net can shorten the creepage/clearance path (HV → island → other); the census now measures that single hop, names the island in a new `via_floating` witness key on the affected row, and reports `netless_items` / `netless_treatment` (`"floating"`; single-hop only, chains of islands are not searched) at report level. Net-0 zone fills are not collected and so are not modelled. Copperless NPTH mounting holes are excluded; the island hop also applies to the same-footprint board row and attach-zone residual.
+
+- **`kct export` preflight `bom_pcb_match` no longer warns on fiducials** (Issue #8549). Footprints
+  flagged `exclude_from_bom` or `board_only` are exempt from the "on PCB but not in BOM" warning;
+  genuine mismatches still warn, and BOM refs missing from the PCB still fail.
+
+- **`kct pcb sync-netlist` keeps nets on KiCad 10 boards** (Issue #8550). Pads on name-only boards are written as `(net "name")` and no top-level net table is added, so KiCad no longer reports `<no net>`.
+
+- **`kct pcb sync-netlist --remove-orphans` no longer deletes `board_only` footprints** (Issue #8551). Fiducials, mounting holes and logos marked `(attr board_only)` are not orphans and are skipped (also in the `kct sync` reconciler).
+
+- **Readiness refresh no longer refuses on advisory `pour_slot` warnings** (Issue #8559). `match_warning_allowance` now skips `NON_GATING_RULE_PREFIXES`, matching `unaccepted_warnings`, so board 04/05/07 refresh and dry-run replays stop failing on `pour_slot` findings; other unlisted warnings still refuse.
+
+- **Silk DRC now sees board-level `gr_text` / `gr_*` silk on origin-offset boards** (Issue #8561). `silk_over_copper` and `silk_overlap` (and so `kct check`) compared sheet-absolute board-level silk against board-relative footprint geometry and missed it on any board whose origin is not (0,0); `silkscreen/place_refs` had the same mismatch for its static-silk obstacles.
+
+- **Stitch/pour-weld copper uses the board's net dialect** (Issue #8563). On
+  KiCad 10 name-only boards, `kct stitch` and the pour-oracle weld now write
+  `(net "NAME")` instead of a legacy `(net <n>)` that KiCad reads as no net.
+  Withdrawn weld closures also record each stub against its own via so no
+  stub is left behind.
+
+- **`kct route` says why a net was routed wider than its class width** (Issue #8564). Nets sized by impedance (declared target, or one synthesized from a validator default such as `.*CLK$`) now log one warning-level line with the width, target Ω and origin, and the route decision rationale carries the same reason. `kct route` now records and saves route decisions to `<board>.decisions.json`, so `kct decisions explain-route <net>` returns that reason. Also fixes route decisions never being recorded (an empty `DecisionStore` is falsy) and the decision length metric crashing on real segments. Routed widths are unchanged.
+
+- **`kct route` placement-delta feedback no longer keeps moves that overlap neighbouring parts** (Issue #8566). A delta is now reverted when it adds pad-to-pad or courtyard overlaps between the moved footprint and other footprints, and a `--nets`-limited pass skips deltas for parts that carry nets outside the requested set.
+
+- **`kct export --mfr jlcpcb` BOM `Footprint` and CPL `Package` now agree** (Issue #8569).
+  When one file carried a bare footprint name and the other `lib:name` for the
+  same ref, both now use the qualified form; genuinely different footprints are
+  left untouched.
+
+- **`kct readiness --verify` names the missing `manufacturing.zip`** (Issue #8571). The `artifacts` blocker now says `bundle has no manufacturing.zip next to <dir>/` with the remedy instead of a temp-dir path, and `/kct:tapeout` documents the bundle layout readiness needs.
+
+- **`kct route-link` relaxes map-derived floors inside attach zones and re-checks collapsed routes** (Issue #8573). With `--voltage-map`, copper inside a footprint attach zone shared with the link net keeps only the base clearance (the waiver `kct creepage --waive-attach-zone` applies); outside the zone the full floor holds. A collapsed route that violates a per-net floor (`--net-clearance` or map-derived) now falls back to the uncollapsed route.
+
+- **Creepage census searches chains of floating net-0 islands** (Issue #8579). A bridge through several netless copper islands is now found by a shortest-path search per layer instead of a single `HV -> island -> other` hop, so reported creepage is no longer optimistic for multi-island bridges. The IEC 60664-1 X-rule for floating segments is not applied: the standard text could not be verified.
+
+- **Tapeout sign-off no longer stales the readiness receipt** (Issue #8580).
+  `output/manufacturing/manifest.json` is now hashed in a canonical form
+  (top-level `tapeout` key removed, sorted keys) by both `kct readiness` and the
+  reader; other inputs keep raw-byte hashes. Receipts written earlier keep
+  validating until the manifest changes.
+
+- **`PCB.add_footprint(..., layer="B.Cu")` now places a real back-side footprint** (Issue #8581). Pads, `fp_*` graphics, texts and embedded zones used to stay on `F.*` while only the footprint's `(layer)` node said `B.Cu`, so back-side parts got front copper/mask (and the footprint swap in `kct pcb sync` / `PCBWorkflow.add_component` inherited it). Every side-specific layer is now flipped, local geometry is mirrored and texts get `(justify mirror)`, matching pcbnew's `Flip`. `F.Cu` placement output is unchanged.
+
+- **`kct repair-creepage` hardening** (Issue #8585). A pair that vanishes from the post-move census is now rejected as "not verified" instead of kept as cleared with margin 0; unrepaired floating-island (`via_floating`) rows name the island; text output says "PARTIALLY REPAIRED" when some moves were written but pairs remain; the count-only DRC gate is documented in the help.
+
+- **`kct stitch` honours keep-out rule areas** (Issue #8587). Via sites and
+  pad-to-via stubs are no longer placed inside `(tracks not_allowed)` /
+  `(vias not_allowed)` rule areas (board-level and footprint-embedded, per
+  layer); a pad with no legal site is skipped with a reason naming the area,
+  instead of kicad-cli reporting `items_not_allowed`.
+
+- **`kct stitch` no longer rejects via sites inside a foreign net's inner-layer plane** (Issue #8591). Only outer-layer (F.Cu/B.Cu) foreign fill blocks a via or stub; a through via crossing an inner plane is legal because KiCad cuts an antipad on refill. Keep-out rule areas still block on every layer.
+
+- **`kct readiness --verify` → `kct tapeout-sign-off` handoff works for any bundle layout** (Issue #8592). The Ready gate accepts `<board>/manufacturing/manifest.json` as well as `output/manufacturing/manifest.json`; `tapeout-sign-off --readiness` accepts the `--verify` receipt at `output/readiness-verification/readiness.json` and resolves relative paths first.
+
+### Added
+
+- **`kct pcb prune` removes redundant copper** (Issue #8216). Builds per-net connectivity the way KiCad does (endpoint-anchored track joins, track ends inside the full pad/via shape — never capsule overlap), and is deliberately conservative: a removal must keep every live neighbour connected through track/via/pad joins (a zone outline is never relied on, since its fill can void), keep every pad/zone terminal connected, and never leave a track end joined only by overlap. Off-centre ends are snapped onto the via/pad centre together with every end that shares the joint. With `kicad-cli`, edits that add violations under `pcb drc --refill-zones` (run with the board's own `.kicad_pro`) are dropped; without a DRC check (`--no-drc` or no `kicad-cli`) the file is not written unless `--unverified` is passed. A redundant branch whose copper merely touches other same-net copper without a shared endpoint (such as the spur beside a via) is removed too, but only when connectivity also holds over those body-touching neighbours.
+
+- **`kct route` shortens long "tent" detours** (Issue #8217). New
+  `shorten_detour_pass` replaces a whole chain of 3+ segments with a straight or
+  single-bend 45° path between its endpoints when it is shorter, collision-clear
+  and still passes over every same-net pad/via the chain touched. Controlled by
+  `OptimizationConfig.shorten_detours` (default on). Wired into the `kct route`
+  post-route optimizer only (it needs the router's board model); nets declaring a
+  `length_match_group`, committed coupled diff pairs and Kelvin branches are
+  left alone. `kct optimize-traces` is unchanged for now.
+
+- **`kct check` reports avoidable copper; `kct readiness` dedupes it first** (Issue #8218). New `redundant_copper` category (warnings only; `--skip redundant_copper`) flags exact-duplicate segments, runs of very short segments, long detours and track ends off a via centre. `kct readiness --generate` now runs `pcb dedupe` before refill/check and records the removed counts in `README.txt`; the `tapeout` skill gains the same Gate 0.
+
+- **`kct pcb prune` merges collinear grid-step runs** (Issue #8236). A straight, end-to-end run of same-net/layer/width segments whose joints are pure two-segment endpoint joins (no via, pad, zone or third segment) collapses into one segment covering identical copper. Runs containing a protected segment, or whose bodies touch same-net copper outside the run, are left alone; the existing per-net `pcb drc --refill-zones` check still applies.
+
+- **`kct export --merge-lcsc-from <bom.csv>` names the LCSC merge source** (Issue #8260). The LCSC merge previously read only `<output-dir>/bom_<mfr>.csv`, so a fresh bundle directory silently got a worse BOM than the previous verified one. The new flag takes an explicit CSV (a missing file is an error; `--no-merge-lcsc` wins), the export summary now prints the merge source used or "no existing BOM to merge", and the `export --help` text and tapeout / manufacturing-readiness skills document the behaviour.
+
+- **Declare deliberately non-LCSC BOM refs in the `.kct` spec** (Issue #8261). `bom_entries` accept `exempt` (`consigned` | `hand_solder` | `dnp_by_intent`) with a required `exempt_reason`; `bom_lcsc_values`/`bom_lcsc_stock` report them in an `exempt (declared)` segment instead of `unverified`, and tapeout Gate 4 accepts only declared exemptions.
+
+- **`kct optimize-traces` removes lateral jogs** (Issue #8269). A new pass slides a short sideways step between two parallel runs (the router's grid-pitch "wiggle", e.g. a 45-degree run that steps 0.05 mm sideways and continues) to the next corner, where it merges into a segment parallel to it. Angles stay in the 0/45/90 set, total length never grows, chain endpoints never move, and each rewrite must be collision-clear and keep every same-net pad/via it touched on the copper. Runs after pull-tight; `OptimizationConfig.remove_jogs` / `max_jog_length` (default 1.0 mm), CLI opt-out `--no-jogs`. Like detour shortening it needs a collision checker and net anchors, so it is a no-op without them.
+
+- **Explicit per-board non-HV declarations for the HV vacuity guard** (Issue #8278).
+  A board's net-class map may now carry a reserved `non_hv_nets` block
+  (`{"FUSED": "12-24 V fused motor supply, SELV"}`) that exempts mains-*named*
+  nets from the name-based isolation vacuity guard (#4354). A reason is
+  required, a malformed block fails closed, a mains-level working voltage still
+  trips the guard, and nets resolved HV by class or voltage are never removed.
+  Every exemption is listed in the isolation JSON (`declared_non_hv_nets`), the
+  `kct audit` table and the report's action items.
+- **`known_issues` can name track-copper warnings by location** (Issue #8278).
+  `redundant_copper_*` findings have no ref/pad, so they now key as
+  `{rule, at: [x_mm, y_mm]}` (CLI: `--known-issue N:summary:advisory:redundant_copper_detour@x/y`).
+  Only those rules accept a located warning identity.
+- **`kct creepage` honours `non_hv_nets`** (Issue #8278), the same
+  declaration `kct audit` reads, so the two no longer disagree on a board such
+  as Board 05. Exempted nets are printed to stderr. A malformed block is an
+  error (exit 1). Undeclared mains-named nets and a mains-level
+  `--working-voltage` still exit 2.
+
+- **`kct optimize-traces` honours HV creepage with `--voltage-map`** (Issue #8300). New `--voltage-map`, `--creepage-standard`, `--pollution-degree`, `--material-group` and `--hv-threshold` flags (same semantics and defaults as `kct route`). Each candidate edit that would bring a net pair below its pairwise creepage requirement (against foreign traces, vias and pads, with the same rated-footprint attach-zone exemption `kct route` uses) is rejected on its own while other edits on the net still apply; the text and `--format json` summaries report skipped edits by net pair. Without `--voltage-map` behaviour is unchanged.
+
+- **`kct creepage` locates each failing pair** (Issue #8301). Every row in
+  `--format json` now carries a `witness` (`point_a_mm`, `point_b_mm`, `item_a`,
+  `item_b`: pad `REF.pin`, `segment:/via:/zone:<uuid>`, or `Edge.Cuts`), and the
+  new `--witness` flag adds the same to the text tables. Points are straight-line
+  closest points, so for slot-detour rows they mark the clearance gap.
+
+- **`kct pcb strip --from-report` / `--dangling`** (Issue #8309). `--from-report` cuts one victim track/via per `clearance`/`shorting_items` finding in a kicad-cli DRC JSON (or located `kct creepage` rows), honouring `--protect-nets` and `--radius`; `--dangling` repeatedly removes `track_dangling`/`via_dangling` copper, keeping anchor vias at or above `--keep-via-min` and refusing a pass that raises the unconnected count. Writes are verified with `kicad-cli --refill-zones` DRC unless `--unverified`.
+
+- **`kct route-link` routes individual links between chosen endpoints** (Issue #8310). Repeatable `--link "NET REF.PAD|x,y[@layer] REF.PAD|x,y[@layer]"`, with `--via-at x,y` (forced waypoint via) and `--link-layers` (per-link layer allow-list) applying to the preceding `--link`. `--probe` reports a path (length, via count) or the nearest blocking item per link and writes nothing; exit 1 if any link is unroutable. It reuses `router.link_router.route_link`, so the router and the HV census share one rule set. Per-link DRC/creepage gating and rollback are tracked in #8314.
+
+- **`kct pcb transplant SRC DST --nets A,B -o OUT`** (Issue #8311). Copies the tracks and vias of the named nets from one revision of a placement onto another, matching nets by name; refuses when pad positions differ. Supports `--dry-run` (rendered as a `pcb diff`), `--drc`, and `REV:path` specs.
+
+- **`kct fix-silkscreen --clip-to-pads` trims silk lines too close to pads** (Issue #8312). Opt-in flag
+  that shortens or removes footprint `fp_line` strokes within the manufacturer's silk-to-pad clearance
+  (using the same geometry as the `silk_pad_clearance` check), so stock 0402 outlines stop failing it.
+  Pin-1 / polarity markers are never edited and are reported as skipped; `--dry-run` lists each edit.
+
+- **`kct pcb prune --current-paths FILE [--wide MM]` breaks loops on declared power nets** (Issue #8313). On the nets named in the current-path specs, each copper loop, including loops closed through vias, is broken by removing its narrowest segment below `--wide` (default 0.5 mm) and any stub that cut leaves dead-ended, so `current-paths-audit` stops calling the run ambiguous and `pcb reinforce` accepts it. Vias a cut leaves with nothing attached are removed with it (a cut that would leave a via on a single layer is refused). Pads and zones are never disconnected; loops whose segments are all at or above `--wide` are left in place and listed (`uncut_loops` in `--format json`). Note that with `--current-paths` the generic pass keeps wide redundant copper on declared nets, so those nets can see *less* pruning than without the flag.
+
+- **`kct check` flags parallel traces too close for the zone fill** (Issue #8435). New advisory `pour_slot` category (skippable with `--skip pour_slot`): different-net track pairs on a poured layer whose gap is under `2 × clearance + min_thickness` leave a slot in the plane. Findings are warnings.
+
+- **`kct optimize-traces --pour-slots` repairs pour slots** (Issue #8440). New opt-in pass that
+  spreads (or, failing that, packs) the parallel different-net tracks flagged by the `pour_slot`
+  advisory (#8435). Each edit is refereed by kicad-cli with zone refill and reverted if any DRC
+  or unconnected count rises; without kicad-cli the pass refuses and edits nothing.
+
+- **Pour-slot cleanup re-pitches parallel buses** (Issue #8460). 3+ parallel same-layer runs are spread jointly as one refereed edit; a boxed-in bus reports `channel too narrow: needs X mm, has Y mm`.
+
+- **`kct submit-jlcpcb` prepares a JLCPCB PCBA submission** (Issue #8466, part of #8465). Offline
+  preflight of the tapeout bundle (manifest hashes, human sign-off, board sha), a frozen plan, a live
+  stock gate (short or unknown lines block; inventory-covered lines are explicit), an optional API
+  upload leg and a review page, plus the `/kct:submit-jlcpcb` skill. `--dry-run` never uploads; the
+  command never checks out, pays or marks anything ordered.
+- **`kct submit-jlcpcb --website` holds a one-driver-per-browser lock** (Issue #8465). A second
+  run against the same `--cdp-port` refuses with `ABORTED at lock` until the first exits (or its
+  lock is two hours old or its process is dead), so two agents can never interleave on one
+  signed-in session. `--lock-dir` overrides `~/.kct/locks`. `--dry-run --website` is now refused
+  before the preflight, since a dry run never touches the website; a blocked stock gate says the
+  website leg was skipped.
+
+- **`kct submit-jlcpcb --website` drives your own Chrome to a saved JLCPCB cart** (Issue #8468, part
+  of #8465). Attended only (TTY plus your signed-in CDP profile), one action at a time, never
+  requests a robots.txt-disallowed path, and stops at the cart. Fields it cannot map exactly abort
+  with a screenshot; a part-matching export that omits, adds, substitutes or leaves a line
+  unselected blocks the cart. `--guided` prints the manual checklist. The review page gains the
+  cart URL, quote, lead time, file hashes, match diff and remaining human steps. Selectors are
+  unverified against the live site.
+
+- **`pip install 'kicad-tools[submit]'` installs the JLCPCB site driver's Playwright dependency** (Issue #8481). New opt-in `submit` extra (not part of `all`); no browser download is needed because the driver attaches to your system Chrome over CDP. The "playwright is not installed" abort now names the extra.
+
+- **`kct footprint generate rpi-hat`** (Issue #8529). Generates a Raspberry Pi HAT part: the 2x20 header (pin 1 at the origin) plus four unnumbered 2.75 mm NPTH mounting holes (58 x 49 mm), copper keep-outs on `*.Cu` sized to the spec's 6.2 mm minimum land (`--keepout-diameter`) and the 65 x 56.5 mm outline on F.Fab, so the holes cannot drift from the header. The `connector_edge_distance` inventory now also covers `J`-reference footprints outside `Connector_*` libraries (such composite parts were silently dropped), and `create_hat_regions()` defaults to the 65 x 56.5 mm HAT size (56.0 is also allowed by the spec).
+
+- **`kct pcb add-fiducials` places global fiducials** (Issue #8531, part of #8530). Puts
+  asymmetric, non-collinear `Fiducial` footprints at copper-free sites near the
+  board corners on each requested side, flagged `board_only`,
+  `exclude_from_bom` and `exclude_from_pos_files`. Supports `--sides`,
+  `--count`, `--keepout`, `--edge-margin` and `--dry-run`; fails without
+  writing when no free site exists.
+
+- **`kct pcb add-board-info` stamps project/rev/date on silkscreen** (Issue #8533). Fields come from the PCB title block (`{project}` falls back to the `.kicad_pro` stem) and an unresolvable field is an error; `--auto` picks a free region clear of pads, silk, courtyards and the board edge, `--layer B.SilkS` mirrors the text, and `--order-placeholder` adds a fab order-number marker.
+
+- **`kct tapeout-sign-off` records the human sign-off `submit-jlcpcb` requires** (Issue #8537). It verifies the bundle against its manifest and refuses unless a passing `kct readiness` receipt (`--readiness`) is bound to `--board` and covers every bundle file, then writes `tapeout.{board_sha256, readiness_sha256, human_signoff}`; preflight requires the receipt hash. Preflight now reports a missing record key, a sha256 mismatch and a size mismatch separately, and selects `gerbers/gerbers.zip` over `kicad_project.zip` in a stock `kct export` bundle.
+
+- **`kct repair-creepage` translates wide HV copper to clear a creepage shortfall** (Issue #8545). For each failing, unwaived `kct creepage` pair it moves the track segment (then via) along the census witness normal by the shortfall plus `--margin`, keeping width and joints. A move is kept only if the pair passes, no other pair gets worse and the kicad-cli `--refill-zones` DRC does not regress; otherwise it is rolled back and reported. `--dry-run` lists moves with witness coordinates; unrepairable pairs exit non-zero.
+
+- **`kct route-link` is HV-aware** (Issue #8546). New `--voltage-map`,
+  `--creepage-standard`, `--pollution-degree` and `--material-group` derive each
+  link's per-neighbour clearance floor from the pairwise creepage requirement, and
+  the per-link creepage gate uses the same requirements (attach-zone pairs whose
+  outside copper clears are waived). `--net-clearance` now binds to the preceding
+  `--link` (before any `--link` it stays run-global; with a voltage map the larger
+  floor wins), and an unroutable link squeezed between two foreign conductors
+  reports the corridor-width bound instead of a generic reason. Without the new
+  flags behaviour is unchanged.
+
+- **Scoped cleanup on signed-off boards** (Issue #8547). `kct place-silk-refs --refs R1,R2`
+  moves only the named references (others stay put as obstacles); `kct pcb prune --nets
+  NET[,NET] [--region x1,y1,x2,y2]` prunes only those nets, applying a net's plan only when
+  every edit lies inside the box (otherwise it is reported as `region_skipped`). JSON output
+  records the scope used.
+
+- **`kct readiness` accepts `--voltage-map`, `--waive-same-footprint` and `--waive-attach-zone`** (Issue #8570). The `hv_isolation` gate can now run the same per-pair voltage-derived census as `kct creepage`, so non-isolated mains boards no longer false-fail on same-potential pairs and divider pads. The map's sha256, the waiver flags, the waived-pair count and `gate_passed` are recorded in `hv-isolation.json`; the map is hash-bound in the report inputs. The flat `--hv-*` path is unchanged.
+
+### Changed
+
+- **Relief rescue explains "no relief path" and stops repeating futile rescues** (Issue #8248). The log states the corridor the victim needs, access-loss witnesses mark each closer as rip-able or fixed, and a victim whose relief found no path under an identical witness in the previous iteration is skipped (logged once).
+
+- **Relief-rescue log lines now explain themselves** (Issue #8256). The "no relief path" line replaces `freed width unknown` with a lower bound on the corridor the ripped blockers vacated (narrowest ripped segment plus twice the smallest gap any neighbour could legally hold: the blocker's resolved minimum clearance raised only to its own authored floor, an unripped diff-pair partner's intra-pair gap, its class clearance to fixed fills, and measured gaps to foreign pads, the board edge and unripped copper; "not measured" when one cannot be resolved) and an upper bound on the shortfall in mm. When no blocker was ripped yet, it says so instead of printing a shortfall. It also states whether copper placed since the rip re-occupied that corridor, naming the net. `Targeted rip-up resolved X/Y` now carries a per-net reason count when X < Y: rolled back, rip skipped, refused by the rip-up guard, no blockers found, or fewer than 2 pads. Diagnostics only; routing is unchanged.
+
+- **`kct optimize-traces` no longer reads routes on two layers as junctions** (Issue #8298). Chain building keys vertices by copper layer, so two routes that share their vertices on both layers of a through-hole pad stay whole chains, and branch anchors for the per-pass guard come from same-layer chains only. A twin route on the other layer no longer pins a lateral jog in place.
+
+- **`kct optimize-traces` exposes every pass and matches `--net` exactly** (Issue #8299). New `--no-staircase`, `--no-pull-tight` and `--no-detour` flags join the existing four, so "all passes disabled" really leaves the geometry untouched; all seven passes are listed in "Optimizations enabled" and the JSON `optimizations` object. `--net` is now an exact, case-sensitive net-name match (`GND` no longer edits `PGND`); the new `--net-pattern GLOB` gives glob matching. The summary (text and JSON `stats.nets_touched`) always lists the nets whose geometry changed.
+
+- **`kct route-link` gates each committed link** (Issue #8314). Without `--probe`, links are committed one at a time; kicad-cli DRC (pinned toolchain) and the pairwise creepage census (`--min`, `--net-class-map`, `--net-class`) run after each, and a link that adds a violation is rolled back alone, byte-exactly. Reports gain per-link `status` / `failed_check`; exit 1 if any link is rolled back or unroutable, exit 2 (nothing written) when the pinned kicad-cli is unavailable.
+
+- **`optimize-traces --drc-aware` referees at the board's own clearance** (Issue #8367). The in-process DRC used the `--mfr` preset clearance, counting hundreds of clearance errors kicad-cli (project rules) did not, so every net was rolled back. It now uses the clearance resolved from the board's `.kicad_pro`/`.kicad_dru`.
+
+- **DRC-verified commands accept `--project` and refuse default-rules verification** (Issue #8369). `pcb prune`, `optimize-traces --drc-aware` and `stitch --drc` take `--project PATH.kicad_pro` (its sibling `.kicad_dru` is used) and exit non-zero when no project rules are found, unless `--allow-default-rules` is passed. `pcb reinforce` does not verify via kicad-cli and is unchanged.
+
+- **`kct pcb prune` splits a container to drop a covered track a third track lands on** (Issue #8406). When a track ends at an interior end of a covered segment, the longer same-width track is cut there into collinear pieces so the landing becomes a shared endpoint (no `track_dangling`), then the covered track is removed. No copper changes; locked or arc-adjacent containers are never split. `--json` stats gain `segments_split` when this fires.
+
+- **`kct optimize-traces` warns when the creepage gate is inactive** (Issue #8433). Without `--voltage-map` it now prints a warning to stderr (suppressed by `--quiet`), and `--format json` output gains `"creepage_gate": "inactive"|"active"` plus a `"warnings"` entry when inactive.
+
+- **`optimize-traces --pour-slots` no longer packs by default** (Issue #8457). Packing removes a pour slot by removing the ground strip between the tracks, so a pass that only packed looked like success. It is now opt-in via `--pour-slots-pack`; the summary notes packed pairs keep their `pour_slot` advisory, and `left_alone` is reported per reason (`left_alone_by_reason` in JSON), counting each pair once instead of each attempt.
+
+- **Pour-slot cleanup spreads via-ended runs** (Issue #8459). A run ending on a same-net via keeps that end on the via and reaches the shifted line through a 45° jog leg; vias never move, every edit is still kicad-cli refereed, and non-axis-aligned or blocked jogs are left alone with a reason.
+
+### Performance
+
+- **Relief "no relief path" diagnostics no longer scan the whole board per blocker segment** (Issue #8295). The measured-gap scan indexes the ripped blocker's segments on a spatial grid (results unchanged), and a negative gap now reads `ripped N2 overlaps Net_7 copper` instead of `overlaps measured gap to Net_7 copper`.
+
+- **Negotiated routing stops re-running the pure-Python A* on nets it already drained** (Issue #8370). After a C++ `NO_PATH` / `PAIRWISE_BLOCKED` give-up, the first hand-off of a net still falls back; once the Python A* has drained for that net, later hand-offs are skipped even though rip-up changed the grid (opt out: `KICAD_ROUTER_SKIP_REPEAT_FALLBACK=0`). `fallback_stats` gains `python_fallback_seconds_by_net` and `python_fallback_repeat_skips`, and the timeout receipt lists `python_fallback_top_nets`.
+
+- **Repeat pure-Python A* fallbacks no longer re-run at the full per-net budget** (Issue #8485). A fallback that fails without draining its open set (for example, one ended by the per-net deadline) is now recorded for its pad pair. A repeat of that request runs on 10% of the first attempt's time, with a 5 s floor (under `--deterministic-budget`, 10% of the iteration cap instead). A timed negotiated stage also caps its total fallback time at 15% of `--timeout`; once the cap is spent, repeats are skipped. First attempts of new requests always keep their full budget. The timeout receipt now reports `python_fallback_reduced_repeats`, `python_fallback_stage_budget_s`, `python_fallback_stage_spent_s` and `python_fallback_stage_budget_skips`. To restore the old behaviour, set `KICAD_ROUTER_SKIP_REPEAT_FALLBACK=0`.
+
+- **Negotiated routing stops re-paying for nets already known to fail** (Issue
+  #8486). The overflow-silent rescue (targeted rip-up plus relief) is no longer
+  re-run for a net whose last rescue resolved nothing while its seal is
+  unchanged. A net that spent its whole per-net search cap with no path in two
+  consecutive iterations under the same seal has its next cap halved (each
+  further such iteration halves it again, floor 5 s; reset when the net routes,
+  fails fast, or its seal changes). Nets with no sealed pad are now keyed on the
+  exact foreign copper around them, so the #8248 repeat-relief skip covers them
+  too. Failed nets are still reported as before, and the negotiated summary now
+  prints a `Known-failing nets` line with the seconds spent on them per
+  iteration. The deterministic budget arm (no wall-clock cap) is unaffected by
+  the back-off.
+
 ## [0.27.0] - 2026-10-31
 
 ### Upgrade notes / behaviour changes
@@ -14845,6 +15455,9 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.29.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.29.0
+[0.28.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.28.1
+[0.28.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.28.0
 [0.27.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.27.0
 [0.26.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.26.0
 [0.25.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.25.1

@@ -104,3 +104,34 @@ def test_via_offcentre_unshared_end_flagged_when_via_not_centred():
     # Free end 0.2 mm short of the via, nothing else on that layer.
     res = _run([_Seg((0, 0), (4.8, 0))], [_Via((5.0, 0))])
     assert _ids(res) == ["redundant_copper_via_offcentre"]
+
+
+def test_covered_segment_reported():
+    res = _run([_Seg((0, 0), (10, 0)), _Seg((2, 0), (5, 0))])
+    ids = _ids(res)
+    assert ids.count("redundant_copper_covered") == 1
+    v = next(v for v in res.violations if v.rule_id == "redundant_copper_covered")
+    assert v.severity == "warning" and "kct pcb prune" in v.message
+    assert v.location == (2, 0)
+
+
+def test_exact_duplicate_not_reported_as_covered():
+    res = _run([_Seg((0, 0), (5, 0)), _Seg((5, 0), (0, 0))])
+    assert _ids(res) == ["redundant_copper_duplicate"]
+
+
+def test_covered_negatives():
+    base = _Seg((0, 0), (10, 0))
+    for other in (
+        _Seg((8, 0), (12, 0)),  # partial overlap
+        _Seg((2, 0), (5, 0), layer="B.Cu"),  # different layer
+        _Seg((2, 0), (5, 0), net_number=2, net_name="OTHER"),  # different net
+        _Seg((2, 0), (5, 1)),  # non-collinear
+    ):
+        res = _run([base, other])
+        assert "redundant_copper_covered" not in _ids(res)
+
+
+def test_narrower_container_not_covering():
+    res = _run([_Seg((0, 0), (10, 0), width=0.1), _Seg((2, 0), (5, 0), width=0.2)])
+    assert "redundant_copper_covered" not in _ids(res)

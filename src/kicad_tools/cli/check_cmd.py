@@ -2504,13 +2504,19 @@ def main(argv: list[str] | None = None) -> int:
         ]
         missing = [k for k in wanted if not any(v.key == k for v in targets)]
         if missing:
+            listed = ", ".join(repr(k) for k in missing)
+            if not targets:
+                print(
+                    f"Error: --waive names no current finding for key(s): {listed}"
+                    ". Copy the 'key' field from `kct check --format json`.",
+                    file=sys.stderr,
+                )
+                return 1
             print(
-                "Error: --waive names no current finding for key(s): "
-                + ", ".join(repr(k) for k in missing)
-                + ". Copy the 'key' field from `kct check --format json`.",
+                f"WARNING: --waive names no current finding for key(s): {listed}"
+                " (skipped; the other key(s) are still recorded).",
                 file=sys.stderr,
             )
-            return 1
         waive_path = (
             gw_path
             if gw_path is not None
@@ -2691,6 +2697,14 @@ def main(argv: list[str] | None = None) -> int:
     if not getattr(args, "refill_zones", False):
         _warn_stale_zone_fills(results.violations, pcb_path)
 
+    # Issue #8643: missing / stock-default project rules mean kicad-cli-style
+    # DRC ran on KiCad defaults.  Advisory only; surfaced in the JSON too.
+    from kicad_tools.sidecars import project_rules_findings
+
+    project_rules = project_rules_findings(pcb_path)
+    for finding in project_rules:
+        print(f"WARNING: {finding['code']}: {finding['message']}", file=sys.stderr)
+
     # Issue #3750 / #7260: the DRC sub-check, the meta-check rollup (ERC +
     # LVS + manifest; skipped under --drc-only to preserve the legacy
     # stdout/exit-code contract) and the verdict/exit code are computed by
@@ -2758,6 +2772,7 @@ def main(argv: list[str] | None = None) -> int:
             verdict=verdict,
             exit_code=exit_code,
             scope=scope_record,
+            project_rules=project_rules,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -3802,6 +3817,9 @@ def output_table(
         print(f"  Infos:      {info_count}")
     if waived_count > 0:
         print(f"  Waived:     {waived_count}")
+    orphan_count = _orphan_waiver_count(results)
+    if orphan_count > 0:
+        print(f"  Orphan waivers: {orphan_count} (match no current finding)")
     if results.suppressed_count > 0:
         print(f"  Suppressed: {results.suppressed_count} (standard library footprints)")
 
@@ -4109,6 +4127,19 @@ def _warn_attach_zone_suppressed(results: DRCResults) -> None:
     )
 
 
+def _orphan_waiver_count(results) -> int:
+    """Waiver entries that matched no current finding (Issue #8614).
+
+    Counts the ``waiver_unused`` advisories ``apply_waivers`` appended.
+    Orphans never fail the gate.
+    """
+    from kicad_tools.validate.rules.waivers import WAIVER_UNUSED_RULE_ID
+
+    return sum(
+        1 for v in results.violations if getattr(v, "rule_id", None) == WAIVER_UNUSED_RULE_ID
+    )
+
+
 def output_json(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -4122,8 +4153,12 @@ def output_json(
     verdict: str | None = None,
     exit_code: int | None = None,
     scope: dict | None = None,
+    project_rules: list[dict] | None = None,
 ) -> None:
     """Output violations as JSON.
+
+    Issue #8643: ``project_rules`` (``sidecars.project_rules_findings``) is
+    always emitted as a top-level list, empty when clean.
 
     Issue #3750: when ``meta`` is provided (default mode), the envelope
     grows a top-level ``meta_checks`` field.  Legacy consumers that read
@@ -4179,6 +4214,7 @@ def output_json(
     summary_data["stale_waivers"] = sum(
         1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
     )
+    summary_data["orphan_waivers"] = _orphan_waiver_count(results)
     if coverage is not None:
         summary_data.update(_coverage_summary(coverage))
     # Issue #8131: gates can assert the attach-zone exemption was applied.
@@ -4213,6 +4249,7 @@ def output_json(
     # Issue #8016: additive; omitted without --bbox/--refs/--nets.
     if scope is not None:
         data["scope"] = scope
+    data["project_rules"] = list(project_rules or [])
     print(json.dumps(data, indent=2))
 
 
@@ -4237,6 +4274,7 @@ def output_sarif(
         "stale_waivers": sum(
             1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
         ),
+        "orphan_waivers": _orphan_waiver_count(results),
         "rules_checked": results.rules_checked,
     }
     if coverage is not None:
@@ -4306,6 +4344,7 @@ def write_json_report(
     summary_data["stale_waivers"] = sum(
         1 for v in results.violations if getattr(v, "stale_waiver_hash", None)
     )
+    summary_data["orphan_waivers"] = _orphan_waiver_count(results)
     if coverage is not None:
         summary_data.update(_coverage_summary(coverage))
     # Issue #8262: parity with ``output_json`` -- gates reading the ``--output``

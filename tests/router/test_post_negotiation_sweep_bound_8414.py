@@ -57,7 +57,11 @@ def test_subgrid_retry_forwards_budget_to_route_net():
 
     Autorouter._retry_net_with_subgrid(fake, 1, per_net_timeout=7.5)
 
-    assert calls == [(1, {"_subgrid_retry": True, "per_net_timeout": 7.5})]
+    # The REMAINDER of the 7.5 s it was handed (the escape work spent some).
+    assert len(calls) == 1
+    net, kw = calls[0]
+    assert net == 1 and kw["_subgrid_retry"] is True
+    assert 7.0 < kw["per_net_timeout"] <= 7.5
 
 
 def _via_conflict_fake(calls, *, relocate_ok):
@@ -93,7 +97,10 @@ def test_via_conflict_resolver_forwards_budget_on_final_retry():
 
     Autorouter._resolve_via_conflicts_for_net(fake, 1, per_net_timeout=3.0)
 
-    assert calls == [(1, {"_subgrid_retry": True, "per_net_timeout": 3.0})]
+    assert len(calls) == 1
+    net, kw = calls[0]
+    assert net == 1 and kw["_subgrid_retry"] is True
+    assert 2.5 < kw["per_net_timeout"] <= 3.0
 
 
 def test_via_conflict_resolver_forwards_budget_in_rip_reroute():
@@ -104,7 +111,7 @@ def test_via_conflict_resolver_forwards_budget_in_rip_reroute():
 
     # rip-reroute's route_net_fn, then the final retry: both budgeted.
     assert len(calls) == 2
-    assert all(kw["per_net_timeout"] == 3.0 for _, kw in calls)
+    assert all(2.5 < kw["per_net_timeout"] <= 3.0 for _, kw in calls)
 
 
 def test_route_net_pin_access_retries_get_remaining_budget(monkeypatch):

@@ -15,6 +15,8 @@ from ..mistakes import (
     MistakeCategory,
     distance,
     is_crystal,
+    is_ground_net,
+    is_power_net,
     trace_length,
 )
 
@@ -55,6 +57,11 @@ class CrystalTraceLengthCheck:
         crystals = self._find_crystals(pcb)
 
         for crystal in crystals:
+            # An active oscillator module (has a supply pad) drives a clock;
+            # the crystal-node trace-length rule does not apply (issue #8663).
+            if self._is_active_oscillator(crystal):
+                continue
+
             # Find nets connected to crystal
             crystal_nets = self._get_crystal_nets(crystal)
 
@@ -104,17 +111,24 @@ class CrystalTraceLengthCheck:
 
     def _get_crystal_nets(self, crystal: Footprint) -> list[str]:
         """Get the signal nets connected to a crystal (excluding power/ground)."""
-        signal_nets = []
+        signal_nets: list[str] = []
         for pad in crystal.pads:
-            if pad.net_name and not self._is_power_or_ground(pad.net_name):
+            # Unique nets only: two pads on one net must yield one finding.
+            if (
+                pad.net_name
+                and pad.net_name not in signal_nets
+                and not self._is_power_or_ground(pad.net_name)
+            ):
                 signal_nets.append(pad.net_name)
         return signal_nets
 
     def _is_power_or_ground(self, net_name: str) -> bool:
         """Check if net is power or ground."""
-        upper = net_name.upper()
-        power_ground = ["VCC", "VDD", "GND", "VSS", "3V3", "5V", "GROUND"]
-        return any(pg in upper for pg in power_ground)
+        return is_ground_net(net_name) or is_power_net(net_name)
+
+    def _is_active_oscillator(self, crystal: Footprint) -> bool:
+        """True for a powered oscillator module (a supply pad on the part)."""
+        return any(is_power_net(p.net_name) for p in crystal.pads if p.net_name)
 
 
 class CrystalNoiseProximityCheck:

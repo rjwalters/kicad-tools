@@ -11,7 +11,7 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-_None._
+- **#8623**: chore(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
 
 ## Very Important
 
@@ -23,31 +23,36 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-_None._
+- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#8468**: feat(submit-jlcpcb): website leg, factory-match gate, cart hand-off (part 3/3 of #8465)
+- **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs
+- **#8702**: Chained --complete DRC comparison: measure finding key and cover native kicad-cli findings
+- **#8719**: kct pcb prune is not idempotent: repeated runs alternate between two board states (0.01-0.07 mm in-pad segments)
+- **#8720**: optimize-traces --drc-aware (0.29.0): reports a new kicad-cli clearance error on the written board, then keeps the result and exits 0
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#8718**: fix(route): key chained-pass connectivity errors by net, not message
+- **#8721**: fix(optimize-traces): roll back nets that raise any kicad-cli rule count
+- **#8722**: test(prune): assert convergence on sub-0.1 mm in-pad segments
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#8476**: feat(submit-jlcpcb): attended website driver to a saved JLCPCB cart
+- **#8623**: chore(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
 
 ## Proposed
 
@@ -57,13 +62,18 @@ Issues carrying `loom:curated`.
 - **#5539**: Champion: Merge-Risk Hold Digest *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback *(curated)*
-- **#8396**: route --complete commits cross-footprint copper that fails pairwise HV creepage (+16 pairs, down to 0.40 mm vs 1.6 mm) that the negotiated pass respects *(curated)*
-- **#8399**: Boards 02/04/07: evidence refresh refused on main by unaccepted redundant_copper warnings (#8218), blocks #8385 *(curated)*
-- **#8414**: Post-negotiation sweep overruns its announced 60 s bound until the global timeout *(curated)*
-- **#8422**: Live-verify --complete creepage rollback on a real mains board (follow-up to #8396) *(curated)*
 - **#8425**: Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B *(curated)*
 - **#8434**: Changelog Fragment Check re-runs on every label change; Loom role label churn keeps it queued *(curated)*
-- **#8468**: feat(submit-jlcpcb): website leg, factory-match gate, cart hand-off (part 3/3 of #8465) *(curated)*
+- **#8486**: route perf: nets proven sealed are re-searched at full budget and re-rescued every iteration (43% of search time, rescue 0/15 for ~1,475 s each pass) *(curated)*
+- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step *(curated)*
+- **#8577**: route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class (fails kicad-cli DRC) *(curated)*
+- **#8603**: Board 07: classify and eliminate remaining redundant_copper warnings at source (part of #8399) *(curated)*
+- **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
+- **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
+- **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
+- **#8702**: Chained --complete DRC comparison: measure finding key and cover native kicad-cli findings *(curated)*
+- **#8719**: kct pcb prune is not idempotent: repeated runs alternate between two board states (0.01-0.07 mm in-pad segments) *(curated)*
+- **#8720**: optimize-traces --drc-aware (0.29.0): reports a new kicad-cli clearance error on the written board, then keeps the result and exits 0 *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -79,14 +89,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 0 |
+| Operator merge-risk holds | 1 |
 | Very important | 0 |
-| Important | 0 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 0 |
+| Important | 1 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 4 |
+| PRs awaiting review | 3 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 11 |
+| Curated | 16 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->

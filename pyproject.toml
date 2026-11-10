@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kicad-tools"
-version = "0.27.0"
+version = "0.29.0"
 description = "Standalone Python tools for parsing and manipulating KiCad schematic and PCB files"
 readme = "README.md"
 license = "MIT"
@@ -163,7 +163,7 @@ native = [
 ]
 # CUDA GPU acceleration (NVIDIA GPUs on Linux/Windows)
 cuda = [
-    "cupy-cuda12x>=13.0",
+    "cupy-cuda12x>=13.0; sys_platform != 'darwin'",
 ]
 # Metal GPU acceleration (Apple Silicon Macs)
 metal = [
@@ -216,7 +216,7 @@ all = [
     "fastmcp>=4,<5",
     "pydantic>=2.0",
     "jsonschema>=4.20",
-    "cupy-cuda12x>=13.0",
+    "cupy-cuda12x>=13.0; sys_platform != 'darwin'",
     "mlx>=0.5",
     "matplotlib>=3.5",
     "ax-platform>=0.4.0",
@@ -241,7 +241,7 @@ dev = [
     "pytest-cov>=4.0",
     "pytest-benchmark>=4.0",
     "pytest-timeout>=2.3",
-    "ruff==0.17.1",
+    "ruff==0.17.2",
     "mypy>=1.0",
     "rtree>=1.0",
     "numpy>=1.24",

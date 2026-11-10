@@ -153,6 +153,110 @@ def _make_kicad_cli_arbiter(rules_from: Path):
     return arbiter
 
 
+def _make_opens_verifier(rules_from: Path):
+    """Board-text -> ``{net: unconnected items}`` via kicad-cli (Issue #8632).
+
+    Includes zone/via connectivity (``--refill-zones``), which the optimizer's
+    pad-to-pad guard cannot model.  Returns ``None`` when kicad-cli cannot run.
+    """
+    import json
+    import re
+    import shutil
+    import tempfile
+    from collections import Counter
+
+    from kicad_tools.cli.runner import run_drc
+
+    def verify(board_text: str) -> dict[str, int] | None:
+        try:
+            with tempfile.TemporaryDirectory(prefix="kct_optopen_") as td:
+                stage = Path(td) / "stage"
+                stage.mkdir()
+                target = stage / "opens.kicad_pcb"
+                target.write_text(board_text)
+                for suffix in (".kicad_pro", ".kicad_dru"):
+                    src = rules_from.with_suffix(suffix)
+                    if src.exists():
+                        shutil.copy2(src, target.with_suffix(suffix))
+                report = Path(td) / "drc.json"
+                run_drc(
+                    target,
+                    output_path=report,
+                    format="json",
+                    schematic_parity=False,
+                    refill_zones=True,
+                )
+                if not report.exists():
+                    return None
+                data = json.loads(report.read_text())
+        except Exception:
+            return None
+        counts: Counter[str] = Counter()
+        for item in data.get("unconnected_items", []):
+            nets = set()
+            for it in item.get("items", []):
+                nets.update(re.findall(r"\[([^\]]+)\]", str(it.get("description", ""))))
+            for n in nets:
+                counts[n] += 1
+        return dict(counts)
+
+    return verify
+
+
+def _make_creepage_verifier(args):
+    """Board-text -> ``{"netA|netB|layer": 1}`` for un-waived failing pairs.
+
+    Runs the same audit as ``kct creepage`` (same voltage map, standard,
+    pollution degree and material group; same-footprint and attach-zone
+    waivers on) on the candidate board (Issue #8632).  ``None`` if it cannot run.
+    """
+    import contextlib
+    import io
+    import json
+    import tempfile
+    from types import SimpleNamespace
+
+    from kicad_tools.cli.commands.creepage import run_creepage_command
+
+    def verify(board_text: str) -> dict[str, int] | None:
+        try:
+            with tempfile.TemporaryDirectory(prefix="kct_optcreep_") as td:
+                board = Path(td) / "creep.kicad_pcb"
+                board.write_text(board_text)
+                ns = SimpleNamespace(
+                    pcb=str(board),
+                    format="json",
+                    min=None,
+                    standard=args.creepage_standard,
+                    working_voltage=None,
+                    pollution_degree=args.pollution_degree,
+                    material_group=args.material_group,
+                    voltage_map=args.voltage_map,
+                    census_threshold=args.hv_threshold,
+                    waive_same_footprint=True,
+                    waive_attach_zone=True,
+                    witness=False,
+                    net_class="HV",
+                    net_class_map=None,
+                )
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    run_creepage_command(ns)
+                data = json.loads(out.getvalue())
+        except Exception:
+            return None
+        pairs = data.get("pairs")
+        if pairs is None:
+            return None
+        return {
+            f"{p['net_a']}|{p['net_b']}|{p.get('layer')}": 1
+            for p in pairs
+            if not p.get("pass", True) and not p.get("waived")
+        }
+
+    return verify
+
+
 def _kicad_cli_drc_summary(before: dict | None, after: dict | None, has_dru: bool) -> dict:
     """Combine the before/after kicad-cli runs into the reported summary (#8322)."""
     ok = (
@@ -397,8 +501,12 @@ def _creepage_keys(args, stats) -> dict:
             "creepage_gate": "inactive",
             "warnings": [_CREEPAGE_GATE_INACTIVE_WARNING],
         }
+    audit = stats.output_checks.get("creepage")
     return {
-        "creepage_gate": "active",
+        # Issue #8632: "active" only when the whole-board re-audit ran (or had
+        # nothing to audit because no net changed).
+        "creepage_gate": "active" if audit in ("ran", "unchanged") else "per_edit_only",
+        "creepage_audit": audit or "not_run",
         "voltage_map": args.voltage_map,
         "creepage_skipped": [
             {"net_a": a, "net_b": b, "count": n}
@@ -464,6 +572,65 @@ def _make_grid_synced_optimize_fn(router, optimizer):
         router.existing_routes[idx] = new
 
     return optimize, commit
+
+
+#: One ounce of copper is 0.035 mm (35 um) thick.
+_MM_PER_OZ = 0.035
+
+
+def resolve_board_stackup_with_source(
+    pcb_path: Path | str, project: Path | str | None = None
+) -> tuple[int, float, dict[str, str]]:
+    """Return ``(copper_layers, outer_copper_oz, sources)`` for ``pcb_path``.
+
+    Layers come from the board's copper layer table.  Weight comes from the
+    project's ``meta.copper_oz`` (written by ``kct init``), then the stackup's
+    outer copper thickness, then 1.0.  Anything unreadable falls back to the
+    historical ``2`` layers / ``1.0`` oz rather than failing the caller.
+
+    ``sources`` maps ``layers`` / ``copper_oz`` to ``"board"`` when the board
+    (or its project) supplied the value and ``"default (undetermined)"`` when
+    the fallback was used (Issue #8639).
+    """
+    undetermined = "default (undetermined)"
+    layers, copper_oz = 2, 1.0
+    sources = {"layers": undetermined, "copper_oz": undetermined}
+    pcb_path = Path(pcb_path)
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.load(str(pcb_path))
+        if len(pcb.copper_layers):
+            layers = len(pcb.copper_layers)
+            sources["layers"] = "board"
+        for layer in pcb.setup.stackup if pcb.setup is not None else []:
+            if layer.type == "copper" and layer.thickness > 0:
+                copper_oz = round(layer.thickness / _MM_PER_OZ, 2)
+                sources["copper_oz"] = "board"
+                break
+    except Exception:
+        pass
+    try:
+        from kicad_tools.core.project_file import get_manufacturer_metadata, load_project
+
+        base = Path(project) if project else pcb_path
+        pro = base.with_suffix(".kicad_pro")
+        if pro.exists():
+            meta = get_manufacturer_metadata(load_project(pro))
+            if meta.get("copper_oz"):
+                copper_oz = float(meta["copper_oz"])
+                sources["copper_oz"] = "board"
+    except Exception:
+        pass
+    return layers, copper_oz, sources
+
+
+def resolve_board_stackup(
+    pcb_path: Path | str, project: Path | str | None = None
+) -> tuple[int, float]:
+    """Return ``(copper_layers, outer_copper_oz)`` for ``pcb_path`` (Issue #8633)."""
+    layers, copper_oz, _ = resolve_board_stackup_with_source(pcb_path, project)
+    return layers, copper_oz
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -628,14 +795,16 @@ Examples:
     parser.add_argument(
         "--layers",
         type=int,
-        default=2,
-        help="Number of copper layers for DRC checks (default: 2)",
+        default=None,
+        help="Number of copper layers for DRC checks (default: counted from the "
+        "board; 2 if it cannot be read)",
     )
     parser.add_argument(
         "--copper",
         type=float,
-        default=1.0,
-        help="Copper weight in oz for DRC checks (default: 1.0)",
+        default=None,
+        help="Copper weight in oz for DRC checks (default: the project's "
+        "meta.copper_oz, else the board stackup's outer copper, else 1.0)",
     )
 
     # HV creepage inputs (Issue #8300): same flags/defaults as ``kct route``.
@@ -706,6 +875,24 @@ Examples:
     pcb_path = Path(args.pcb)
     if not pcb_path.exists():
         return _fail(as_json, str(pcb_path), f"PCB file not found: {pcb_path}")
+
+    # Issue #8633: unset --layers/--copper come from the board, not a 2-layer
+    # 1 oz default.  Explicit flags still win.
+    # Issue #8632: record where each value came from for the report.
+    args._stack_source = {
+        "layers": "flag" if args.layers is not None else "board",
+        "copper_oz": "flag" if args.copper is not None else "board",
+    }
+    if args.layers is None or args.copper is None:
+        board_layers, board_copper, board_sources = resolve_board_stackup_with_source(
+            pcb_path, args.project
+        )
+        if args.layers is None:
+            args.layers = board_layers
+            args._stack_source["layers"] = board_sources["layers"]
+        if args.copper is None:
+            args.copper = board_copper
+            args._stack_source["copper_oz"] = board_sources["copper_oz"]
 
     # Validate manufacturer ID if provided
     if args.mfr:
@@ -786,6 +973,16 @@ Examples:
         rules_base = Path(args.project) if args.project else pcb_path
         if rules_base.with_suffix(".kicad_dru").exists():
             config.drc_arbiter = _make_kicad_cli_arbiter(rules_base)
+
+    # Issue #8632: whole-board output verification (opens incl. zones/vias, and
+    # creepage), so the "clean" report cannot hide a regression the per-net
+    # guards missed.
+    if args.drc_aware:
+        config.output_verifiers["opens"] = _make_opens_verifier(
+            Path(args.project) if args.project else pcb_path
+        )
+    if args.voltage_map is not None:
+        config.output_verifiers["creepage"] = _make_creepage_verifier(args)
 
     # Issue #8214: collision-check every rewrite against the board's own
     # copper instead of relying on whole-net ``--drc-aware`` rollback.  A grid
@@ -1027,6 +1224,9 @@ Examples:
                 "manufacturer": args.mfr,
                 "layers": args.layers,
                 "copper_oz": args.copper,
+                "stack_source": getattr(args, "_stack_source", {}),
+                "output_checks": stats.output_checks,
+                "output_verify_rolled_back": stats.output_verify_rolled_back,
                 "stats": {
                     "nets_optimized": stats.nets_optimized,
                     "nets_rolled_back": stats.nets_rolled_back,

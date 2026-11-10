@@ -448,6 +448,99 @@ class TestRoutePostDrcPathAmpacity:
 
         assert _path_ampacity_violations(captured) == []
 
+    def test_audit_record_distinguishes_ran_from_skipped(self, tmp_path, monkeypatch, capsys):
+        """Issue #8674: the chained completion pass reads this record.  An entry
+        means the rule pass ran (empty = no errors); a board whose DRC was
+        skipped for --timeout has NO entry, which must not read as clean."""
+        _patch_geometric_absent(monkeypatch)
+        monkeypatch.setattr(route_cmd, "_path_ampacity_errors", {})
+        narrow = _write_t_network_pcb(
+            tmp_path / "narrow.kicad_pcb", trunk_width=NARROW_TRUNK_WIDTH_MM
+        )
+        undeclared = _write_t_network_pcb(
+            tmp_path / "undeclared.kicad_pcb", trunk_width=NARROW_TRUNK_WIDTH_MM
+        )
+        skipped = _write_t_network_pcb(
+            tmp_path / "skipped.kicad_pcb", trunk_width=NARROW_TRUNK_WIDTH_MM
+        )
+
+        _run_gate(narrow, [_trunk_spec(), _sense_spec()])
+        _run_gate(undeclared, None)
+        verdict = route_cmd.run_post_route_drc(
+            output_path=skipped,
+            manufacturer="jlcpcb",
+            layers=2,
+            quiet=True,
+            current_path_specs=[_trunk_spec(), _sense_spec()],
+            time_left=0.0,
+        )
+
+        assert verdict == route_cmd.DRC_SKIPPED_FOR_TIME
+        assert "SKIPPED" in capsys.readouterr().out
+        record = route_cmd._path_ampacity_errors
+        assert record[str(narrow.resolve())]
+        assert record[str(undeclared.resolve())] == frozenset()
+        assert str(skipped.resolve()) not in record
+
+    @pytest.mark.parametrize("failure", ["skipped", "load_raises", "check_all_raises"])
+    def test_stale_audit_record_dropped_when_later_call_does_not_run(
+        self, tmp_path, monkeypatch, failure
+    ):
+        """Issue #8692: a later call on the same path that skips or fails must
+        not leave the earlier call's record behind (it would read as audited)."""
+        _patch_geometric_absent(monkeypatch)
+        board = _write_t_network_pcb(
+            tmp_path / "routed.kicad_pcb", trunk_width=NARROW_TRUNK_WIDTH_MM
+        )
+        other = tmp_path / "other.kicad_pcb"
+        key = str(board.resolve())
+        other_key = str(other.resolve())
+        seeded = {key: frozenset({"attempt-1 error @ (1.0, 2.0)"}), other_key: frozenset()}
+        monkeypatch.setattr(route_cmd, "_path_ampacity_errors", dict(seeded))
+
+        kwargs = {"time_left": 0.0} if failure == "skipped" else {}
+        if failure == "load_raises":
+            from kicad_tools.schema.pcb import PCB
+
+            def _boom(*a, **k):
+                raise RuntimeError("load failed")
+
+            monkeypatch.setattr(PCB, "load", staticmethod(_boom))
+        elif failure == "check_all_raises":
+            from kicad_tools.validate import DRCChecker
+
+            def _boom(self, *a, **k):
+                raise RuntimeError("check_all failed")
+
+            monkeypatch.setattr(DRCChecker, "check_all", _boom)
+
+        verdict = route_cmd.run_post_route_drc(
+            output_path=board,
+            manufacturer="jlcpcb",
+            layers=2,
+            quiet=True,
+            current_path_specs=[_trunk_spec()],
+            **kwargs,
+        )
+
+        expected = route_cmd.DRC_SKIPPED_FOR_TIME if failure == "skipped" else (-1, -1)
+        assert verdict == expected
+        assert key not in route_cmd._path_ampacity_errors
+        # A different path's record is untouched.
+        assert route_cmd._path_ampacity_errors[other_key] == frozenset()
+
+    def test_skipped_with_no_prior_entry_is_not_a_keyerror(self, tmp_path, monkeypatch):
+        _patch_geometric_absent(monkeypatch)
+        monkeypatch.setattr(route_cmd, "_path_ampacity_errors", {})
+        board = _write_t_network_pcb(
+            tmp_path / "routed.kicad_pcb", trunk_width=NARROW_TRUNK_WIDTH_MM
+        )
+        verdict = route_cmd.run_post_route_drc(
+            output_path=board, manufacturer="jlcpcb", layers=2, quiet=True, time_left=0.0
+        )
+        assert verdict == route_cmd.DRC_SKIPPED_FOR_TIME
+        assert route_cmd._path_ampacity_errors == {}
+
 
 class TestAmbiguityAndUncoveredCopperAtTheRouteGate:
     """Issue #4980's remaining audit-visibility acceptance tests, at the gate.

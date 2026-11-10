@@ -130,6 +130,18 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
     }
 )
 
+#: Rule-id prefixes/names for avoidable copper (tapeout trace-quality gate,
+#: Issue #8633).  These stay advisory in ``known_warnings.NON_GATING_RULE_PREFIXES``
+#: (the generic strict gate is unchanged); the readiness gate refuses a
+#: nonzero count after cleanup unless acknowledged with a reason.
+TRACE_QUALITY_PREFIXES: tuple[str, ...] = ("redundant_copper", "via_dangling")
+
+
+def is_trace_quality_rule(rule: str) -> bool:
+    """True for ``redundant_copper_*`` and ``via_dangling``."""
+    return any(rule == p or rule.startswith(p + "_") for p in TRACE_QUALITY_PREFIXES)
+
+
 #: Values that look like a part number but carry no procurement identity.
 #: An assembly BOM containing any of these is not orderable.
 PLACEHOLDER_PART_IDS = frozenset(
@@ -861,6 +873,12 @@ class ReadinessOptions:
     skip_fiducials: bool = False
     skip_board_info: bool = False
     assembly_prep_record: dict[str, str] | None = None
+    # Trace-quality acknowledgements (Issue #8633): ``rule_id -> reason``.
+    ack_trace_quality: dict[str, str] = field(default_factory=dict)
+    # Previous revision to diff warnings against (Issue #8664): a board file,
+    # board directory or bundle.  ``baseline_record`` is filled in by Gate 4b.
+    baseline: Path | None = None
+    baseline_record: dict[str, Any] | None = None
 
     @property
     def root(self) -> Path:
@@ -879,6 +897,7 @@ class ReadinessResult:
     report: dict[str, Any]
     report_path: Path
     exit_code: int
+    baseline_record: dict[str, Any] | None = None
 
     @property
     def status(self) -> str:
@@ -1011,6 +1030,19 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
 
     ack = frozenset(rule.strip() for rule in (args.ack_warnings or "").split(",") if rule.strip())
 
+    baseline: Path | None = None
+    if getattr(args, "baseline", None):
+        baseline = Path(args.baseline).resolve()
+        if not baseline.exists():
+            return None, f"--baseline path not found: {baseline}"
+
+    ack_trace: dict[str, str] = {}
+    for item in getattr(args, "ack_trace_quality", None) or []:
+        rule, _, reason = item.partition("=")
+        if not rule.strip() or not reason.strip():
+            return None, f"--ack-trace-quality needs RULE=REASON with a non-empty reason: {item!r}"
+        ack_trace[rule.strip()] = reason.strip()
+
     checked_at = getattr(args, "checked_at", None)
     try:
         known_issues = _resolve_known_issues(board_dir, args, checked_at)
@@ -1028,6 +1060,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             output_dir=output_dir,
             evidence_dir=evidence_dir,
             ack_warnings=ack,
+            baseline=baseline,
             known_issues=tuple(known_issues),
             include_tht=bool(args.include_tht),
             archive=not args.no_archive,
@@ -1048,6 +1081,7 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             skip_cleanup=bool(getattr(args, "skip_cleanup", False)),
             skip_fiducials=bool(getattr(args, "skip_fiducials", False)),
             skip_board_info=bool(getattr(args, "skip_board_info", False)),
+            ack_trace_quality=ack_trace,
         ),
         None,
     )
@@ -1824,12 +1858,133 @@ def _gate_lvs(check_report: dict) -> tuple[CheckOutcome, dict]:
     )
 
 
+def _baseline_pcb(spec: Path) -> Path | None:
+    """Resolve ``--baseline`` (file, board dir or bundle) to a ``.kicad_pcb``."""
+    if spec.is_file():
+        return spec if spec.suffix == ".kicad_pcb" else None
+    if not spec.is_dir():
+        return None
+    found = _find_pcb(spec)
+    if found is not None:
+        return found
+    for pcb in sorted(spec.rglob("*.kicad_pcb")):
+        if not pcb.name.endswith("-bak.kicad_pcb"):
+            return pcb
+    return None
+
+
+def _baseline_candidates(options: ReadinessOptions) -> list[Path]:
+    """Previous boards/bundles sitting beside the output directory (Issue #8664)."""
+    parent = options.output_dir.parent
+    found: list[Path] = []
+    if not parent.is_dir():
+        return found
+    current = options.pcb.resolve()
+    for entry in sorted(parent.iterdir()):
+        is_board = entry.is_file() and entry.suffix == ".kicad_pcb" and entry.resolve() != current
+        is_bundle = (
+            entry.is_dir()
+            and entry.name.startswith(options.output_dir.name)
+            and entry.resolve() != options.output_dir.resolve()
+            and _baseline_pcb(entry) is not None
+        )
+        if is_board or is_bundle:
+            found.append(entry)
+    return found
+
+
+def _introduced_warning_counts(
+    options: ReadinessOptions, engines: Engines, check_report: dict
+) -> tuple[tuple[dict[str, int], dict[str, int]] | None, str | None]:
+    """Per-rule warnings introduced since ``options.baseline``.
+
+    Returns ``((introduced, baseline_counts), error)``; exactly one of the two
+    is non-``None``. ``baseline_counts`` is the baseline's own per-rule warning
+    count (Issue #8673), not back-computed from the introduced rows.
+    """
+    from kicad_tools.cli.check_diff import diff_reports
+
+    assert options.baseline is not None
+    pcb = _baseline_pcb(options.baseline)
+    if pcb is None:
+        return None, f"--baseline {options.baseline} contains no readable .kicad_pcb"
+    report_path = options.evidence_dir / "kct-check-baseline.json"
+    run = engines.kct_check(pcb, options.manufacturer, report_path, options.check_args)
+    if not run.ok or not report_path.is_file():
+        return None, f"baseline {pcb} could not be checked: {run.detail}"
+    try:
+        old = _read_json(report_path)
+    except (OSError, ValueError) as exc:
+        return None, f"baseline report unreadable: {exc}"
+    result = diff_reports(old, check_report)
+    counts: dict[str, int] = {}
+    for row in result["introduced"]:
+        if row.get("severity") == "warning":
+            rule = str(row.get("rule_id") or "unknown")
+            counts[rule] = counts.get(rule, 0) + 1
+    return (dict(sorted(counts.items())), _warning_counts(old)), None
+
+
 def _gate_warning_review(
-    options: ReadinessOptions, check_report: dict
+    options: ReadinessOptions, check_report: dict, engines: Engines | None = None
 ) -> tuple[CheckOutcome, dict[str, int]]:
     """Gate 4b — per-rule warning table + assembly-affecting acknowledgement."""
     counts = _warning_counts(check_report)
     table = _format_warning_table(counts)
+    introduced: dict[str, int] = {}
+    if options.baseline is not None:
+        found, error = _introduced_warning_counts(options, engines or Engines(), check_report)
+        if found is None:
+            return (
+                CheckOutcome(
+                    name="warning_review",
+                    status=FAILED,
+                    detail=f"Baseline comparison failed: {error}",
+                    blockers=[f"Baseline comparison failed: {error}"],
+                ),
+                counts,
+            )
+        introduced, old_counts = found
+        options.baseline_record = {
+            "baseline": str(options.baseline),
+            "introduced": introduced,
+            "previous_counts": old_counts,
+            "current_counts": counts,
+        }
+    else:
+        candidates = _baseline_candidates(options)
+        if candidates:
+            names = ", ".join(c.name for c in candidates)
+            print(
+                f"NOTICE: previous revision found beside the output directory ({names}); "
+                "warnings were not compared. Pass --baseline <path> to diff against it "
+                "(Issue #8664).",
+                file=sys.stderr,
+            )
+    intro_block = sorted(
+        rule
+        for rule, n in introduced.items()
+        if n and rule in ASSEMBLY_AFFECTING_RULES and rule not in options.ack_warnings
+    )
+    if intro_block:
+        named = ", ".join(
+            f"{rule} +{introduced[rule]} (now {counts.get(rule, 0)})" for rule in intro_block
+        )
+        return (
+            CheckOutcome(
+                name="warning_review",
+                status=FAILED,
+                detail=(
+                    f"Assembly-affecting warnings introduced since baseline: {named}. "
+                    f"Table: {table}."
+                ),
+                blockers=[
+                    "Assembly-affecting warnings introduced since baseline "
+                    f"({named}); acknowledge with --ack-warnings or fix them."
+                ],
+            ),
+            counts,
+        )
     unacknowledged = sorted(
         rule
         for rule, count in counts.items()
@@ -1849,8 +2004,31 @@ def _gate_warning_review(
             ),
             counts,
         )
+    trace_open = sorted(
+        rule
+        for rule, count in counts.items()
+        if count and is_trace_quality_rule(rule) and not options.ack_trace_quality.get(rule)
+    )
+    if trace_open:
+        named = ", ".join(f"{rule}={counts[rule]}" for rule in trace_open)
+        return (
+            CheckOutcome(
+                name="warning_review",
+                status=FAILED,
+                detail=f"Trace-quality warnings remain after cleanup: {named}. Table: {table}.",
+                blockers=[
+                    f"Trace-quality warnings remain after cleanup ({named}); fix the copper "
+                    "or acknowledge each rule with --ack-trace-quality RULE=REASON."
+                ],
+            ),
+            counts,
+        )
     acked = sorted(options.ack_warnings & set(counts))
     suffix = f" Acknowledged: {', '.join(acked)}." if acked else ""
+    if introduced:
+        suffix += (
+            " Introduced since baseline (non-blocking): " + _format_warning_table(introduced) + "."
+        )
     return (
         CheckOutcome(
             name="warning_review",
@@ -2079,6 +2257,8 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
             "board": {"name": options.pcb.stem, "pcb_file": options.pcb.name},
             "warning_counts_by_rule": dict(sorted(warning_counts.items())),
             "acknowledged_warning_rules": sorted(options.ack_warnings),
+            "acknowledged_trace_quality": dict(sorted(options.ack_trace_quality.items())),
+            "copper_cleanup": options.cleanup_record,
         }
     )
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
@@ -2312,11 +2492,76 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
     return problems
 
 
-def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
-    """Run (generate) or count (verify) the exact-duplicate copper cleanup.
+def _cleanup_prune_step(options: ReadinessOptions) -> dict[str, Any]:
+    """``kct pcb prune`` step: DRC-verified, applied only when verified."""
+    from kicad_tools.pcb_prune import prune_board
 
-    Must run before any hashing/refill so the DRC cross-gate judges the
-    cleaned board (Issue #8218).  A skip is recorded, never silent.
+    pruned, result = prune_board(options.pcb, project=options.project)
+    if result.accepted and not result.drc_verified:
+        return {"status": "not-applied", "detail": result.drc_note, "segments_removed": 0}
+    if result.accepted:
+        pruned.save(str(options.pcb))
+    return {
+        "status": "applied",
+        "segments_removed": result.stats.get("segments_removed", 0),
+        "ends_snapped": result.stats.get("ends_snapped", 0),
+    }
+
+
+def _cleanup_optimize_step(options: ReadinessOptions) -> dict[str, Any]:
+    """``kct optimize-traces --drc-aware`` step (layers/copper read from the board)."""
+    import contextlib
+    import io
+
+    from kicad_tools.cli import optimize_cmd
+
+    argv = [
+        str(options.pcb),
+        "--drc-aware",
+        "--mfr",
+        options.manufacturer,
+        "--format",
+        "json",
+    ]
+    if options.project is not None:
+        argv += ["--project", str(options.project)]
+    if options.hv_voltage_map is not None:
+        argv += ["--voltage-map", str(options.hv_voltage_map)]
+        if options.hv_standard:
+            argv += ["--creepage-standard", options.hv_standard]
+        if options.hv_pollution_degree is not None:
+            argv += ["--pollution-degree", str(options.hv_pollution_degree)]
+        argv += ["--material-group", options.hv_material_group]
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = optimize_cmd.main(argv)
+    try:
+        doc = json.loads(out.getvalue())
+    except ValueError:
+        doc = {}
+    if rc != 0:
+        detail = doc.get("error") or err.getvalue().strip() or f"exit {rc}"
+        return {"status": "failed", "detail": str(detail)}
+    stats = doc.get("stats", {}) if isinstance(doc, dict) else {}
+    return {
+        "status": "applied",
+        "segments_before": stats.get("segments_before", 0),
+        "segments_after": stats.get("segments_after", 0),
+        "corners_before": stats.get("corners_before", 0),
+        "corners_after": stats.get("corners_after", 0),
+        "layers": doc.get("layers") if isinstance(doc, dict) else None,
+        "copper_oz": doc.get("copper_oz") if isinstance(doc, dict) else None,
+    }
+
+
+def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
+    """Run (generate) or count (verify) the copper cleanup.
+
+    ``dedupe -> prune -> optimize-traces --drc-aware`` (Issue #8633, extending
+    the #8218 dedupe step).  Must run before any hashing/refill so the DRC
+    cross-gate judges the cleaned board.  A skip is recorded, never silent, and
+    each step's counts land in ``steps``.  ``--drc-aware`` is verified only by
+    the kicad-cli refill DRC and creepage census the later gates run (#8632).
     """
     if options.skip_cleanup:
         return {"copper_cleanup": "skipped"}
@@ -2332,11 +2577,17 @@ def _copper_cleanup(options: ReadinessOptions) -> dict[str, Any]:
         }
     stats = pcb.dedupe_copper()
     removed = {"segments": stats["segments"], "vias": stats["vias"]}
-    if options.operation == "generate":
-        if stats["segments"] or stats["vias"]:
-            pcb.save(str(options.pcb))
-        return {"copper_cleanup": "applied", "removed": removed}
-    return {"copper_cleanup": "verify-count-only", "removed": removed}
+    if options.operation != "generate":
+        return {"copper_cleanup": "verify-count-only", "removed": removed}
+    if stats["segments"] or stats["vias"]:
+        pcb.save(str(options.pcb))
+    steps: dict[str, Any] = {"dedupe": {"status": "applied", **removed}}
+    for name, step in (("prune", _cleanup_prune_step), ("optimize_traces", _cleanup_optimize_step)):
+        try:
+            steps[name] = step(options)
+        except Exception as exc:  # recorded; the trace-quality gate still judges the board
+            steps[name] = {"status": "failed", "detail": str(exc)}
+    return {"copper_cleanup": "applied", "removed": removed, "steps": steps}
 
 
 def _assembly_prep(options: ReadinessOptions) -> dict[str, str]:
@@ -2435,6 +2686,25 @@ def _write_readme(
             f"  ACCEPTED RISK: {rule} ({warning_counts[rule]} warning(s)) "
             "explicitly acknowledged via --ack-warnings."
         )
+    for rule, reason in sorted(options.ack_trace_quality.items()):
+        if warning_counts.get(rule):
+            lines.append(
+                f"  ACCEPTED RISK: {rule} ({warning_counts[rule]} warning(s)) trace quality "
+                f"acknowledged: {reason}"
+            )
+    base = options.baseline_record
+    if base is not None:
+        lines.extend(
+            ["", "Warnings introduced since baseline", "----------------------------------"]
+        )
+        if not base["introduced"]:
+            lines.append("  none")
+        for rule, n in base["introduced"].items():
+            tag = "assembly-affecting" if rule in ASSEMBLY_AFFECTING_RULES else "advisory"
+            lines.append(
+                f"  {rule}: +{n} ({base['previous_counts'].get(rule, 0)} -> "
+                f"{warning_counts.get(rule, 0)}) [{tag}]"
+            )
     record = options.cleanup_record
     if record is not None:
         lines.extend(["", "Copper cleanup", "--------------"])
@@ -2446,6 +2716,11 @@ def _write_readme(
                 f"  copper_cleanup: {record['copper_cleanup']}; exact-duplicate copper "
                 f"removed: {removed['segments']} segment(s), {removed['vias']} via(s)"
             )
+            for name, step in record.get("steps", {}).items():
+                detail = ", ".join(f"{k}={v}" for k, v in step.items() if k != "status")
+                lines.append(
+                    f"  step {name}: {step.get('status')}" + (f" ({detail})" if detail else "")
+                )
     prep = options.assembly_prep_record
     if prep is not None:
         lines.extend(["", "Assembly prep", "-------------"])
@@ -3078,6 +3353,16 @@ def build_report(
     if options.known_issues:
         report["known_issues"] = [dict(entry) for entry in options.known_issues]
 
+    # Issue #8643: a stock-default .kicad_pro means DRC ran on KiCad defaults.
+    # Recorded as a warning only; the missing-project refusal is in resolve_options.
+    from kicad_tools.sidecars import project_rules_findings
+
+    default_rules = [
+        f for f in project_rules_findings(options.pcb) if f["code"] == "project_default"
+    ]
+    if default_rules:
+        report["warnings"] = default_rules
+
     evidence = {check.name: check.evidence for check in checks if check.evidence}
     if evidence:
         report["evidence"] = evidence
@@ -3459,7 +3744,7 @@ def _run_readiness_candidate(
     checks.append(lvs)
     metrics.update(lvs_metrics)
 
-    warning_review, warning_counts = _gate_warning_review(options, check_report)
+    warning_review, warning_counts = _gate_warning_review(options, check_report, engines)
     checks.append(warning_review)
 
     hv = _gate_hv_isolation(options)
@@ -3549,7 +3834,12 @@ def _run_readiness_candidate(
         report_path.write_text(json.dumps(report, indent=2) + "\n")
 
     exit_code = 0 if report["status"] == STATUS_READY else 1
-    return ReadinessResult(report=report, report_path=report_path, exit_code=exit_code)
+    return ReadinessResult(
+        report=report,
+        report_path=report_path,
+        exit_code=exit_code,
+        baseline_record=options.baseline_record,
+    )
 
 
 def _write_known_issues_evidence(options: ReadinessOptions) -> None:
@@ -3581,6 +3871,17 @@ def _print_report(result: ReadinessResult, options: ReadinessOptions) -> None:
     print()
     for check in report["checks"]:
         print(f"  [{check['status']:>8s}] {check['name']}: {check['detail']}")
+    base = result.baseline_record or options.baseline_record
+    if base is not None:
+        print()
+        print(f"  Warnings introduced since baseline {base['baseline']}:")
+        for rule, n in base["introduced"].items():
+            print(
+                f"    {rule}: +{n} ({base['previous_counts'].get(rule, 0)} -> "
+                f"{base['current_counts'].get(rule, 0)})"
+            )
+        if not base["introduced"]:
+            print("    none")
     if report.get("known_issues"):
         print()
         print(f"  {len(report['known_issues'])} known issue(s):")
@@ -3675,6 +3976,29 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Comma-separated rule_ids whose assembly-affecting warnings are "
             "explicitly accepted; each becomes an accepted-risk line in README.txt"
+        ),
+    )
+    parser.add_argument(
+        "--baseline",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Previous revision (.kicad_pcb, board directory or bundle) to diff against "
+            "(Issue #8664). Warnings introduced since then are listed per rule; "
+            "introduced assembly-affecting warnings block unless acknowledged with "
+            "--ack-warnings. Same comparison as `kct check --diff OLD NEW`."
+        ),
+    )
+    parser.add_argument(
+        "--ack-trace-quality",
+        dest="ack_trace_quality",
+        action="append",
+        default=[],
+        metavar="RULE=REASON",
+        help=(
+            "Accept a nonzero redundant_copper_* / via_dangling count remaining after "
+            "cleanup; the reason is mandatory and is recorded in README.txt and the "
+            "manifest.  Repeatable"
         ),
     )
     parser.add_argument(

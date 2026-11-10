@@ -2109,6 +2109,39 @@ def test_existing_reversed_half_quantum_stub_is_not_re_added(tmp_path):
         pcb.save(p)
 
 
+@pytest.mark.parametrize("shape", ["tail", "split_trunk", "perp", "diag", "loop"])
+@pytest.mark.parametrize("length", [0.01, 0.028, 0.04, 0.07])
+def test_prune_converges_on_sub_tenth_mm_in_pad_segments(tmp_path, shape, length):
+    """Issue #8719: prune on its own output is a no-op (no add/remove cycle)."""
+    pads = [("A", 100, 100), ("B", 110, 100)]
+    near = 110 - length
+    segs = {
+        "tail": [((100, 100), (110, 100)), ((near, 100), (110, 100))],
+        "split_trunk": [((100, 100), (near, 100)), ((near, 100), (110, 100))],
+        "perp": [((100, 100), (110, 100)), ((110, 100 + length), (110, 100))],
+        "diag": [((100, 100), (near, 100 + length)), ((near, 100 + length), (110, 100))],
+        "loop": [
+            ((100, 100), (110, 100)),
+            ((109, 100), (109, 101)),
+            ((109, 101), (near, 101)),
+            ((near, 101), (110, 100)),
+        ],
+    }[shape]
+    p = _board(tmp_path, pads, segs)
+    pcb, _res = _run(p)  # first pass may change the board
+    pcb.save(p)
+    settled = _keys(pcb)
+    for _ in range(3):
+        pcb, res = _run(p)
+        assert res.accepted == []
+        assert not res.stats.get("segments_removed")
+        assert not res.stats.get("ends_snapped")
+        assert not res.stats.get("stubs_added")
+        assert not res.stats.get("segments_split")
+        assert _keys(pcb) == settled
+        pcb.save(p)
+
+
 def test_only_the_missing_stub_piece_is_queued(tmp_path):
     from kicad_tools.pcb_prune import plan_prune
 
@@ -2228,3 +2261,102 @@ def test_cli_rejects_unknown_net_and_bad_region(tmp_path, capsys):
     assert "NOPE" in capsys.readouterr().err
     assert _cli_prune(p, "--region", "10,10,5,20") == 1
     assert "x1 < x2" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Issue #8687: the prune plan must not turn a resolved declared-current net
+# ambiguous (a stub that runs parallel to the trunk it is anchored to).
+# ---------------------------------------------------------------------------
+
+
+def _looping_plan(net_number: int = 1, net_name: str = "SIG"):
+    from kicad_tools.pcb_prune import NetPlan
+
+    # Two pieces from pad A's centre to B's: a second path beside the trunk.
+    return NetPlan(
+        net_number,
+        net_name,
+        stubs=[
+            ("F.Cu", (100, 100), (102, 102), 0.2),
+            ("F.Cu", (102, 102), (105, 100), 0.2),
+        ],
+    )
+
+
+def _gate_board(tmp_path: Path) -> tuple[Path, Path]:
+    p = _board(tmp_path, [("A", 100, 100), ("B", 105, 100)], [((100, 100), (105, 100))])
+    return p, _specs(tmp_path)
+
+
+@pytest.fixture
+def forced_looping_plan(monkeypatch):
+    import kicad_tools.pcb_prune as mod
+
+    monkeypatch.setattr(mod, "plan_prune", lambda *a, **k: [_looping_plan()])
+
+
+def test_audit_gate_rejects_plan_that_resolves_to_ambiguous(tmp_path, forced_looping_plan):
+    from kicad_tools.router.current_paths import load_current_path_specs
+
+    p, cp = _gate_board(tmp_path)
+    pcb, res = prune_board(
+        p, verify_drc=False, current_paths=load_current_path_specs(cp), apply=True
+    )
+    assert not res.accepted
+    assert len(res.rejected) == 1
+    assert "resolved to ambiguous" in res.rejected[0].reject_reason
+    assert len(pcb.segments) == 1  # nothing was added
+
+
+def test_audit_gate_uses_discovered_sidecar(tmp_path, forced_looping_plan):
+    p, cp = _gate_board(tmp_path)
+    cp.rename(tmp_path / "current_paths.json")
+    pcb, res = prune_board(p, verify_drc=False)
+    assert len(res.rejected) == 1 and not res.accepted
+    # Discovery only feeds the gate: no loop-audit report is produced.
+    assert res.uncut_loops == []
+
+
+def test_audit_gate_inactive_without_specs(tmp_path, forced_looping_plan):
+    p, _ = _gate_board(tmp_path)
+    pcb, res = prune_board(p, verify_drc=False)
+    assert len(res.accepted) == 1 and not res.rejected
+
+
+def test_audit_gate_warns_and_continues_on_unparsable_sidecar(tmp_path, forced_looping_plan):
+    p, _ = _gate_board(tmp_path)
+    (tmp_path / "current_paths.json").write_text("{not json")
+    _, res = prune_board(p, verify_drc=False)
+    assert len(res.accepted) == 1 and not res.rejected
+
+
+def test_audit_gate_is_per_net(tmp_path, monkeypatch):
+    import kicad_tools.pcb_prune as mod
+    from kicad_tools.pcb_prune import NetPlan
+    from kicad_tools.router.current_paths import load_current_path_specs
+
+    p, cp = _gate_board(tmp_path)
+    other = NetPlan(2, "OTHER", stubs=[("F.Cu", (90, 90), (91, 90), 0.2)])
+    monkeypatch.setattr(mod, "plan_prune", lambda *a, **k: [_looping_plan(), other])
+    _, res = prune_board(
+        p, verify_drc=False, current_paths=load_current_path_specs(cp), apply=False
+    )
+    assert [x.net_name for x in res.rejected] == ["SIG"]
+    assert [x.net_name for x in res.accepted] == ["OTHER"]
+
+
+def test_cli_json_lists_added_stubs_per_net(tmp_path, capsys):
+    segs = [((100, 100), (104.82, 100))]
+    p = _board(tmp_path, [("A", 100, 100)], segs, vias=[(105, 100.08)])
+    assert _cli(tmp_path, p, "--no-drc", "--dry-run") == 0
+    out = json.loads(capsys.readouterr().out)
+    stubs = out["nets"][0]["stubs_added"]
+    assert len(stubs) == 2
+    assert {"layer", "start", "end", "width"} == set(stubs[0])
+
+
+def test_cli_json_reports_audit_rejection_reason(tmp_path, capsys, forced_looping_plan):
+    p, cp = _gate_board(tmp_path)
+    assert _cli(tmp_path, p, "--no-drc", "--dry-run", "--current-paths", str(cp)) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "resolved to ambiguous" in out["rejected_by_drc"][0]["reject_reason"]

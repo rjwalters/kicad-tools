@@ -57,6 +57,7 @@ __all__ = [
     "PROJECT_SIDECAR_SUFFIXES",
     "MissingProjectRulesError",
     "resolve_project_rules",
+    "project_rules_findings",
     "stage_project_rules",
     "copy_project_sidecars",
     "NET_CLASS_MAP_SIDECAR_BASENAME",
@@ -266,3 +267,94 @@ def stage_project_rules(rules: Iterable[Path], dst_pcb: Path | str) -> None:
     dst = Path(dst_pcb)
     for r in rules:
         shutil.copyfile(r, dst.with_suffix(r.suffix))
+
+
+#: ``board.design_settings.rules`` exactly as pcbnew writes it for a project it
+#: created itself (KiCad 10.0.7, captured in ``tests/fixtures/pcbnew_default.kicad_pro``).
+_STOCK_DESIGN_RULES = {
+    "max_error": 0.005,
+    "min_clearance": 0.0,
+    "min_connection": 0.0,
+    "min_copper_edge_clearance": 0.5,
+    "min_groove_width": 0.0,
+    "min_hole_clearance": 0.25,
+    "min_hole_to_hole": 0.25,
+    "min_microvia_diameter": 0.2,
+    "min_microvia_drill": 0.1,
+    "min_resolved_spokes": 2,
+    "min_silk_clearance": 0.0,
+    "min_text_height": 0.8,
+    "min_text_thickness": 0.08,
+    "min_through_hole_diameter": 0.3,
+    "min_track_width": 0.2,
+    "min_via_annular_width": 0.1,
+    "min_via_diameter": 0.5,
+    "solder_mask_to_copper_clearance": 0.0,
+    "use_height_for_length_calcs": True,
+}
+
+
+def _is_stock_project(data: object) -> bool:
+    """True when a parsed ``.kicad_pro`` carries only pcbnew's stock rules."""
+    if not isinstance(data, dict):
+        return False
+    net = data.get("net_settings")
+    net = net if isinstance(net, dict) else {}
+    classes = net.get("classes") or []
+    if any(not isinstance(c, dict) or c.get("name") != "Default" for c in classes):
+        return False
+    if net.get("netclass_assignments") or net.get("netclass_patterns"):
+        return False
+    board = data.get("board")
+    ds = board.get("design_settings") if isinstance(board, dict) else None
+    rules = ds.get("rules") if isinstance(ds, dict) else None
+    return rules == _STOCK_DESIGN_RULES
+
+
+def project_rules_findings(pcb_path: Path | str) -> list[dict]:
+    """Warn when a board would be DRC'd under KiCad's default rules (#8643).
+
+    Returns ``{"code", "severity", "message"}`` warnings:
+
+    * ``project_missing`` -- no ``<stem>.kicad_pro`` beside the board,
+    * ``project_default`` -- the ``.kicad_pro`` is the stock one pcbnew writes
+      (``SaveBoard`` creates it when none exists beside the output) and no
+      ``.kicad_dru`` sits next to it.
+
+    An unreadable / invalid ``.kicad_pro`` is not flagged as default (it is not
+    known to be); it never raises.  Stdlib only.
+    """
+    import json
+
+    pcb = Path(pcb_path)
+    pro = pcb.with_suffix(".kicad_pro")
+    if not pro.is_file():
+        return [
+            {
+                "code": "project_missing",
+                "severity": "warning",
+                "message": (
+                    f"no {pro.name} beside {pcb.name}: kicad-cli DRC falls back to KiCad "
+                    "default rules and misses custom clearances"
+                ),
+            }
+        ]
+    if pcb.with_suffix(".kicad_dru").is_file():
+        return []
+    try:
+        data = json.loads(pro.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not _is_stock_project(data):
+        return []
+    return [
+        {
+            "code": "project_default",
+            "severity": "warning",
+            "message": (
+                f"{pro.name} holds only KiCad's stock default rules (pcbnew.SaveBoard writes "
+                "one when none exists beside the output); DRC is not running the board's own "
+                "rules. Call copy_project_sidecars(src, dst) before saving a work copy"
+            ),
+        }
+    ]

@@ -114,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Remove PCB footprints not present in schematic (with --apply)",
     )
     parser.add_argument(
+        "--remove-stranded",
+        action="store_true",
+        help="Remove tracks/vias stranded by a pad-net change (with --apply; "
+        "locked tracks are never removed)",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Force removal of orphans even if they have routed traces",
@@ -125,6 +131,9 @@ def main(argv: list[str] | None = None) -> int:
     guard_error = apply_guard_error(args.apply, args.dry_run, args.confirm)
     if guard_error:
         print(f"Error: {guard_error}", file=sys.stderr)
+        return 1
+    if args.remove_stranded and not args.apply:
+        print("Error: --remove-stranded requires --apply", file=sys.stderr)
         return 1
 
     # Build reconciler kwargs
@@ -186,6 +195,7 @@ def main(argv: list[str] | None = None) -> int:
                 output=args.output,
                 remove_orphans=args.remove_orphans,
                 force=args.force,
+                remove_stranded=args.remove_stranded,
             )
         except Exception as e:
             print(f"Error applying changes: {e}", file=sys.stderr)
@@ -229,6 +239,24 @@ def _output_table(analysis) -> None:
             print(f"  {mm['reference']}:")
             print(f"    Schematic: {mm['schematic_footprint']}")
             print(f"    PCB:       {mm['pcb_footprint']}")
+
+    if analysis.pad_net_mismatches:
+        print(f"\n{'-' * 60}")
+        print(f"PAD NET MISMATCHES ({len(analysis.pad_net_mismatches)}):")
+        for mm in analysis.pad_net_mismatches:
+            old = mm["pcb_net"] or "(unconnected)"
+            print(f"  {mm['reference']}.{mm['pad']}: {old} -> {mm['schematic_net']}")
+
+    if analysis.stranded_copper:
+        print(f"\n{'-' * 60}")
+        print(f"STRANDED COPPER ({len(analysis.stranded_copper)}):")
+        for sc in analysis.stranded_copper:
+            lock = " [locked]" if sc["locked"] == "true" else ""
+            print(
+                f"  {sc['kind']} {sc['uuid'] or sc['position']} on {sc['net']} "
+                f"({sc['layer']}) attached to {sc['pad']}{lock}"
+            )
+        print("  Use --apply --remove-stranded --confirm to remove (locked tracks are kept).")
 
     if analysis.medium_confidence_matches or analysis.low_confidence_matches:
         print(f"\n{'-' * 60}")
@@ -296,6 +324,8 @@ def _output_changes_table(changes, dry_run: bool) -> None:
                 status = "(placed)"
             else:
                 status = "(failed - library not found)"
+        elif change.change_type == "remove_stranded_copper":
+            status = f"({change.new_value})"
         elif change.change_type == "remove_orphan":
             if dry_run:
                 status = "(would remove)"
@@ -305,7 +335,9 @@ def _output_changes_table(changes, dry_run: bool) -> None:
                 status = "(skipped)"
 
         print(f"\n  {change.change_type}: {change.reference}")
-        if change.change_type == "add_footprint" or change.change_type == "remove_orphan":
+        if change.change_type == "remove_stranded_copper":
+            print(f"    {change.old_value} {status}")
+        elif change.change_type == "add_footprint" or change.change_type == "remove_orphan":
             print(f"    {change.new_value} {status}")
         else:
             print(f"    {change.old_value} -> {change.new_value} {status}")

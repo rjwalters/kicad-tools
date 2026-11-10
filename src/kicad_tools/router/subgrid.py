@@ -40,6 +40,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .grid import RoutingGrid
     from .io import FineZone
     from .rules import DesignRules
@@ -383,6 +385,7 @@ class SubGridRouter:
     def generate_escape_segments(
         self,
         analysis: SubGridAnalysis,
+        should_stop: Callable[[], bool] | None = None,
     ) -> SubGridResult:
         """Generate escape segments for all off-grid pads.
 
@@ -397,6 +400,10 @@ class SubGridRouter:
 
         Args:
             analysis: SubGridAnalysis from analyze_pads()
+            should_stop: Optional budget probe, checked before each pad
+                (Issue #8414).  Once it returns True the remaining pads
+                are recorded as failed with reason ``budget_spent`` instead
+                of searched.  ``None`` (the default) searches every pad.
 
         Returns:
             SubGridResult with escape segments and statistics
@@ -405,6 +412,10 @@ class SubGridRouter:
 
         check_rule_areas = bool(getattr(self.grid, "_rule_area_keepouts", None))
         for sgp in analysis.off_grid_pads:
+            if should_stop is not None and should_stop():
+                result.failed_pads.append(sgp.pad)
+                result.failure_reasons[sgp.pad.key] = "budget_spent"
+                continue
             escape, reason = self._find_escape_for_pad(sgp)
             if escape is not None and check_rule_areas:
                 # Issue #6061: catch-all keepout gate over the escape's

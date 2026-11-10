@@ -563,6 +563,46 @@ class TestCheckNets:
         net_issues = [i for i in issues if i.domain == "net"]
         assert len(net_issues) == 0
 
+    def test_single_pin_default_net_equals_pcb_unconnected(
+        self, minimal_schematic: Path, minimal_pcb: Path
+    ):
+        """Schematic single-pin default net == PCB unconnected-(REF-..-PadN) (#8669)."""
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        checker.pcb.footprints[0].pads[0].net_name = "unconnected-(R1-Pad1-Pad1)"
+        mock_netlist = {
+            "Net-(R1-Pad1)": [PinRef("R1", "1")],
+            "+3.3V": [PinRef("R1", "2")],
+        }
+        with _mock_models_schematic(mock_netlist):
+            issues = checker._check_nets()
+        assert [i for i in issues if i.domain == "net"] == []
+
+    def test_unconnected_pcb_vs_multi_pin_schematic_net_still_flagged(
+        self, minimal_schematic: Path, minimal_pcb: Path
+    ):
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        checker.pcb.footprints[0].pads[0].net_name = "unconnected-(R1-Pad1-Pad1)"
+        mock_netlist = {
+            "Net-(R1-Pad1)": [PinRef("R1", "1"), PinRef("C1", "1")],
+            "+3.3V": [PinRef("R1", "2")],
+        }
+        with _mock_models_schematic(mock_netlist):
+            issues = checker._check_nets()
+        assert len([i for i in issues if i.domain == "net"]) == 1
+
+    def test_unconnected_pcb_net_for_other_ref_still_flagged(
+        self, minimal_schematic: Path, minimal_pcb: Path
+    ):
+        checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)
+        checker.pcb.footprints[0].pads[0].net_name = "unconnected-(R2-Pad1-Pad1)"
+        mock_netlist = {
+            "Net-(R1-Pad1)": [PinRef("R1", "1")],
+            "+3.3V": [PinRef("R1", "2")],
+        }
+        with _mock_models_schematic(mock_netlist):
+            issues = checker._check_nets()
+        assert len([i for i in issues if i.domain == "net"]) == 1
+
     def test_mismatched_net_produces_error(self, minimal_schematic: Path, minimal_pcb: Path):
         """Mismatched net names produce error issues."""
         checker = SchematicPCBChecker(minimal_schematic, minimal_pcb)

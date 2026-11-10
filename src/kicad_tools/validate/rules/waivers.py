@@ -309,6 +309,8 @@ class Waiver:
             hash is **not** waived -- the waiver is stale.
         reviewer: Who reviewed the finding (required on keyed entries).
         date: ISO date of the review (required on keyed entries).
+        rebound_at: ISO date the entry was re-bound to a new evidence-hash
+            version with an unchanged digest (Issue #8614); optional.
     """
 
     rule: str
@@ -320,6 +322,7 @@ class Waiver:
     evidence_hash: str | None = None
     reviewer: str | None = None
     date: str | None = None
+    rebound_at: str | None = None
 
     def matches_normalized(
         self,
@@ -515,6 +518,12 @@ def _parse_keyed_entry(where: str, raw: dict) -> Waiver:
     except ValueError as e:
         raise ValueError(f"{where} 'date' must be an ISO date (YYYY-MM-DD): {e}") from e
     issue = _optional_str(where, raw, "issue") or ""
+    rebound_at = _optional_str(where, raw, "rebound_at")
+    if rebound_at is not None:
+        try:
+            _dt.date.fromisoformat(rebound_at)
+        except ValueError as e:
+            raise ValueError(f"{where} 'rebound_at' must be an ISO date (YYYY-MM-DD): {e}") from e
     rule = key.split("|", 1)[0]
     if not rule:
         raise ValueError(f"{where} 'key' must start with a rule id")
@@ -528,6 +537,7 @@ def _parse_keyed_entry(where: str, raw: dict) -> Waiver:
         evidence_hash=evidence_hash,
         reviewer=reviewer,
         date=date,
+        rebound_at=rebound_at,
     )
 
 
@@ -802,7 +812,10 @@ def write_keyed_waivers(
     Writes one keyed entry per distinct ``(key, evidence_hash)`` among
     ``findings``, binding each to the finding's *current* evidence hash.  Any
     existing keyed entry for the same key is replaced -- re-waiving a stale
-    finding is the re-review.  Other entries (legacy or for other keys) are
+    finding is the re-review -- except when only the ``evN:`` version prefix of
+    the hash differs (same digest, Issue #8614): that entry keeps its original
+    reviewer, date, reason and issue, takes the new hash and gains
+    ``rebound_at``.  Other entries (legacy or for other keys) are
     preserved verbatim.  The file is (re)written as schema version 3.
 
     Raises:
@@ -828,6 +841,14 @@ def write_keyed_waivers(
         waivers_from_dict(existing)  # validate before touching it
         raw_entries = list(existing.get("waivers", []))
 
+    old_by_key: dict[str, dict] = {}
+    for raw_entry in raw_entries:
+        if isinstance(raw_entry, dict) and isinstance(raw_entry.get("key"), str):
+            old_by_key.setdefault(raw_entry["key"], raw_entry)
+
+    def _digest(h: Any) -> str:
+        return str(h).split(":", 1)[-1]
+
     new_entries: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for finding in findings:
@@ -837,6 +858,18 @@ def write_keyed_waivers(
         if ident in seen:
             continue
         seen.add(ident)
+        old = old_by_key.get(finding.key)
+        if (
+            old is not None
+            and old.get("evidence_hash")
+            and _digest(old["evidence_hash"]) == _digest(finding.evidence_hash)
+        ):
+            rebound = dict(old)
+            if old["evidence_hash"] != finding.evidence_hash:
+                rebound["evidence_hash"] = finding.evidence_hash
+                rebound["rebound_at"] = day
+            new_entries.append(rebound)
+            continue
         entry = {
             "key": finding.key,
             "evidence_hash": finding.evidence_hash,

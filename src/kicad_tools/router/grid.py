@@ -34,6 +34,7 @@ import base64
 import logging
 import math
 import threading
+import time
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager, suppress
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
@@ -451,8 +452,9 @@ def _sync_pad_to_cpp_grid(
     except ImportError:
         return
 
-    # Compute layer index (-1 for through-hole = all layers).
-    if pad.through_hole:
+    # Compute layer index (-1 for through-hole = all layers).  Issue #8675:
+    # a drilled NPTH (``drill > 0``) has its barrel on every copper layer.
+    if pad.through_hole or pad.drill > 0:
         layer_idx = -1
     else:
         try:
@@ -1077,6 +1079,20 @@ class _GridView:
         return _LayerView(self._grid, layer)
 
 
+class SetupDeadlineExpired(Exception):
+    """A per-call wall budget ran out while building pre-search masks.
+
+    Issue #8414 / #8645: raised (never returned) so a cut-short mask build is
+    never mistaken for a complete one. ``Router._route_impl`` catches it and
+    reports a deadline stop. It is re-exported from ``pathfinder`` as
+    ``_SetupDeadlineExpired``.
+    """
+
+
+#: KiCad's default ``min_hole_clearance`` (mm); mirrors board_clearance_rules.
+_KICAD_HOLE_CLEARANCE_MM = 0.25
+
+
 class RoutingGrid:
     """3D grid for routing with obstacle tracking and congestion awareness.
 
@@ -1472,8 +1488,15 @@ class RoutingGrid:
         # Try to get GPU backend
         try:
             backend = get_backend(config=self._config)
-            # Determine backend type from the module
-            if hasattr(backend, "cuda"):
+            # Determine backend type.  ``get_backend()`` returns an
+            # ``ArrayBackend`` that carries its own ``backend_type``; the
+            # attribute probes below only cover raw module-style backends.
+            # (Issue #8609: probing alone misclassified an MLX ArrayBackend
+            # as CPU, so the grid held MLX arrays while reporting ``cpu``.)
+            reported = getattr(backend, "backend_type", None)
+            if isinstance(reported, BackendType):
+                backend_type = reported
+            elif hasattr(backend, "cuda"):
                 backend_type = BackendType.CUDA
             elif hasattr(backend, "_mx"):  # MLXBackend wrapper
                 backend_type = BackendType.METAL
@@ -1863,20 +1886,8 @@ class RoutingGrid:
         self._via_rtree_count = 0
         self.bump_occupancy_generation()  # Issue #4794 (planes replaced)
 
-    def sync_to_cpu(self) -> None:
-        """Transfer GPU arrays to CPU for A* operations.
-
-        Call this before performing A* pathfinding or other operations
-        that require random cell access. The transfer is skipped if
-        arrays are already on CPU or if GPU hasn't been modified.
-        """
-        if self._backend_type == BackendType.CPU:
-            return
-
-        if not self._gpu_dirty:
-            return
-
-        logger.debug("Syncing grid arrays from GPU to CPU")
+    def _convert_arrays_to_numpy(self) -> None:
+        """Convert every grid array to host NumPy and mark the grid CPU-resident."""
         self._blocked = to_numpy(self._blocked)
         self._net = to_numpy(self._net)
         self._usage_count = to_numpy(self._usage_count)
@@ -1895,6 +1906,43 @@ class RoutingGrid:
         # different array objects (host copies) -- any cache holding a
         # derived bitmap must recompute.
         self.bump_occupancy_generation()
+
+    def sync_to_cpu(self) -> None:
+        """Transfer GPU arrays to CPU for A* operations.
+
+        Call this before performing A* pathfinding or other operations
+        that require random cell access. The transfer is skipped if
+        arrays are already on CPU or if GPU hasn't been modified.
+        """
+        if self._backend_type == BackendType.CPU:
+            return
+
+        if not self._gpu_dirty:
+            return
+
+        logger.debug("Syncing grid arrays from GPU to CPU")
+        self._convert_arrays_to_numpy()
+
+    def ensure_numpy_arrays(self) -> None:
+        """Unconditionally move every grid array to host NumPy (Issue #8609).
+
+        The pure-Python A* does per-cell scalar indexing, which is slower
+        on MLX/CuPy arrays than on NumPy (magnitude unmeasured; Issue #8609).
+        Unlike :meth:`sync_to_cpu` this does not depend on ``_gpu_dirty``.
+        Idempotent; a no-op on a CPU grid.
+        """
+        # Decide from the actual array types, not ``_backend_type``: the type
+        # tag can disagree with the arrays (Issue #8609).
+        if self._backend is np and isinstance(self._blocked, np.ndarray):
+            return
+        logger.info(
+            "Grid arrays moved from %s to NumPy for the pure-Python router",
+            self._backend_type.value,
+        )
+        self._convert_arrays_to_numpy()
+        # Stop sync_to_gpu from migrating the arrays back.
+        self._cpu_dirty = False
+        self._config = None
 
     def sync_to_gpu(self) -> None:
         """Transfer CPU arrays to GPU for bulk operations.
@@ -2531,7 +2579,18 @@ class RoutingGrid:
         # inside a detected fine-pitch package's escape region.
         clearance = self._clearance_for_pin_pitch(pin_pitch, pad=pad)
 
-        if pad.through_hole:
+        # Issue #8675: an NPTH (``drill > 0`` without ``through_hole``) is a
+        # hole on EVERY copper layer, kept clear at hole-to-copper clearance.
+        is_npth = not pad.through_hole and pad.drill > 0
+        if is_npth:
+            half_w, half_h = pad_half_extents(pad)
+            effective_width = max(2 * half_w, pad.drill)
+            effective_height = max(2 * half_h, pad.drill)
+            clearance = max(
+                clearance,
+                _KICAD_HOLE_CLEARANCE_MM + self.rules.trace_width / 2,
+            )
+        elif pad.through_hole:
             if pad.width > 0 and pad.height > 0:
                 half_w, half_h = pad_half_extents(pad)
                 effective_width, effective_height = 2 * half_w, 2 * half_h
@@ -2553,8 +2612,8 @@ class RoutingGrid:
         gx1, gy1 = self.world_to_grid(x1, y1)
         gx2, gy2 = self.world_to_grid(x2, y2)
 
-        # PTH pads block all layers, SMD pads block only their layer
-        if pad.through_hole:
+        # PTH/NPTH pads block all layers, SMD pads block only their layer
+        if pad.through_hole or is_npth:
             layers_to_block = list(range(self.num_layers))
         else:
             layers_to_block = [self.layer_to_index(pad.layer.value)]
@@ -7771,6 +7830,7 @@ class RoutingGrid:
         partner_radius: int | None = None,
         partner_active: bool | None = None,
         relief_mode: bool = False,
+        deadline: float | None = None,
     ) -> np.ndarray:
         """Pre-compute an expanded blocked bitmap for trace-width clearance.
 
@@ -7779,8 +7839,10 @@ class RoutingGrid:
         of each ``route()`` call.  The per-neighbor check then becomes a
         single array lookup: ``expanded[layer, ny, nx]``.
 
-        The dilation uses ``scipy.ndimage.maximum_filter`` when available,
-        falling back to a pure-NumPy sliding-window maximum.
+        The dilation is a pure-NumPy Euclidean-disc shift-and-OR
+        (:meth:`_dilate_blocked`) with out-of-bounds treated as blocked.
+        It never uses scipy, so the result is the same in every
+        environment (Issue #8657).
 
         Issue #2559 / Epic #2556 Phase 1C: When ``partner_net`` is provided
         with a tighter ``partner_radius`` (< ``radius``), partner-owned
@@ -7818,6 +7880,12 @@ class RoutingGrid:
                          penalty; net-0 statics and foreign obstacles stay
                          hard.  Mirrors ``Pathfinder::relief_mode_`` in the
                          C++ backend.
+
+            deadline: Issue #8645 -- optional ``time.monotonic()`` deadline,
+                      checked before each dilation. On expiry raises
+                      :class:`SetupDeadlineExpired` instead of returning a
+                      partial mask. A single dilation is not preempted.
+                      ``None`` (default) never checks.
 
         Returns:
             Boolean NumPy array of shape ``(num_layers, rows, cols)`` where
@@ -7876,10 +7944,16 @@ class RoutingGrid:
             partner_mask = base_blocked & (self._net == partner_net)
             other_mask = base_blocked & ~partner_mask
 
+            if deadline is not None and time.monotonic() >= deadline:
+                raise SetupDeadlineExpired
             other_expanded = self._dilate_blocked(other_mask, radius)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise SetupDeadlineExpired
             partner_expanded = self._dilate_blocked(partner_mask, partner_radius)
             return other_expanded | partner_expanded
 
+        if deadline is not None and time.monotonic() >= deadline:
+            raise SetupDeadlineExpired
         return self._dilate_blocked(base_blocked, radius)
 
     def _dilate_blocked(self, base_blocked: np.ndarray, radius: int) -> np.ndarray:
@@ -7902,6 +7976,12 @@ class RoutingGrid:
         roughly half the cells of the square kernel at the radii used in
         practice, so the dilation runs marginally *faster* than the
         previous ``maximum_filter`` path on typical boards.
+
+        Out-of-bounds cells count as **blocked** (the mask is padded with
+        ones), so every cell within ``radius`` of the grid edge is blocked:
+        a trace that wide cannot be centred there without leaving the
+        board.  The result does not depend on which optional packages are
+        installed (Issue #8657).
         """
         if radius <= 0:
             return base_blocked.copy() if isinstance(base_blocked, np.ndarray) else base_blocked
@@ -7915,40 +7995,33 @@ class RoutingGrid:
         # ``route()`` invocation (one per net) do not rebuild the disc.
         disc = self._get_disc_kernel(radius)
 
-        try:
-            from scipy.ndimage import binary_dilation  # type: ignore[import-untyped]
+        # Issue #8657: always the NumPy shift-and-OR, never scipy.  A
+        # ``scipy.ndimage.binary_dilation`` branch used to run whenever
+        # scipy happened to be importable; it padded with zeros, so its
+        # answer differed from this one within ``radius`` cells of the
+        # grid edge, and it was 8-17x slower on large grids.
+        kernel_size = 2 * radius + 1
+        padded = np.ones(
+            (
+                self.num_layers,
+                self.rows + 2 * radius,
+                self.cols + 2 * radius,
+            ),
+            dtype=np.bool_,
+        )
+        padded[
+            :,
+            radius : radius + self.rows,
+            radius : radius + self.cols,
+        ] = base_blocked
 
-            # The dilation is applied per layer (no cross-layer coupling);
-            # express the 3D structure as ``(1, 2r+1, 2r+1)`` so the layer
-            # axis is treated independently.
-            structure = np.zeros((1, disc.shape[0], disc.shape[1]), dtype=np.bool_)
-            structure[0] = disc
-            expanded = binary_dilation(base_blocked, structure=structure)
-            return expanded
-        except ImportError:
-            # Fallback: pure-NumPy disc dilation via padded shift-and-OR.
-            kernel_size = 2 * radius + 1
-            padded = np.ones(
-                (
-                    self.num_layers,
-                    self.rows + 2 * radius,
-                    self.cols + 2 * radius,
-                ),
-                dtype=np.bool_,
-            )
-            padded[
-                :,
-                radius : radius + self.rows,
-                radius : radius + self.cols,
-            ] = base_blocked
+        expanded = np.zeros_like(base_blocked)
+        for dy in range(kernel_size):
+            for dx in range(kernel_size):
+                if disc[dy, dx]:
+                    expanded |= padded[:, dy : dy + self.rows, dx : dx + self.cols]
 
-            expanded = np.zeros_like(base_blocked)
-            for dy in range(kernel_size):
-                for dx in range(kernel_size):
-                    if disc[dy, dx]:
-                        expanded |= padded[:, dy : dy + self.rows, dx : dx + self.cols]
-
-            return expanded
+        return expanded
 
     def _get_disc_kernel(self, radius: int) -> np.ndarray:
         """Return (and cache) the Euclidean-disc structuring element.

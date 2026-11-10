@@ -84,6 +84,31 @@ def _qfn_pads(cu: str = "F.Cu") -> list[Pad]:
     return pads
 
 
+HLK_NAME = "Converter_ACDC:Converter_ACDC_Hi-Link_HLK-PMxx"
+
+
+def _hlk_pads() -> list[Pad]:
+    return [
+        Pad(
+            number=n,
+            type="thru_hole",
+            shape="circle",
+            position=pos,
+            size=(1.5, 1.5),
+            drill=0.8,
+            layers=["*.Cu"],
+        )
+        for n, pos in (("1", (0.0, 0.0)), ("2", (0.0, 5.0)), ("3", (30.0, 0.0)))
+    ]
+
+
+def _hlk_graphics(*, marker: bool) -> list[FootprintGraphic]:
+    graphics = [_g("rect", layer="F.Fab", width=0.1, start=(-3.97, -8.0), end=(33.05, 8.0))]
+    if marker:
+        graphics.append(_g("poly", points=[(-3.97, 0.0), (-4.58, 0.44), (-4.58, -0.44)]))
+    return graphics
+
+
 def _led_pads() -> list[Pad]:
     return [
         Pad(
@@ -240,6 +265,23 @@ class TestAsymmetryAndVisibility:
         pcb = _pcb(_fp(graphics=[_fab_body(), far]))
         assert len(_run(pcb)) == 1
         assert _run(pcb, search_radius_mm=3.5) == []
+
+    def test_marker_at_overhanging_body_edge(self):
+        """HLK-PMxx-style module: triangle at the body edge, ~4 mm from pad 1 (#8688)."""
+        pcb = _pcb(_fp(name=HLK_NAME, pads=_hlk_pads(), graphics=_hlk_graphics(marker=True)))
+        assert _run(pcb) == []
+        # An explicit smaller radius is a floor, not a cap.
+        assert _run(pcb, search_radius_mm=1.0) == []
+
+    def test_overhanging_body_without_marker_still_missing(self):
+        pcb = _pcb(_fp(name=HLK_NAME, pads=_hlk_pads(), graphics=_hlk_graphics(marker=False)))
+        assert _ids(_run(pcb)) == [(PIN1_MARKER_MISSING_RULE_ID, ("U1",))]
+
+    def test_marker_graphic_indices_accepts_body_edge_triangle(self):
+        graphics = _hlk_graphics(marker=True)
+        fp = _fp(name=HLK_NAME, pads=_hlk_pads(), graphics=graphics)
+        accepted = Pin1MarkerRule().marker_graphic_indices(fp, graphics)
+        assert accepted == {1}
 
     def test_led_cathode_bar(self):
         top = _g("line", start=(1.46, -0.735), end=(-1.485, -0.735))

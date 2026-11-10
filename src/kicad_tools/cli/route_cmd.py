@@ -3332,6 +3332,7 @@ def _make_checkpoint_callback(
             routed,
             stub_net_ids=_kept_preserved_net_ids(router),
             name_only=name_only,
+            board_net_ids=_router_board_net_ids(router),
         )
 
     # Mutable container so the closure can write back the timestamp.
@@ -3554,8 +3555,19 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
     ``router.existing_routes``, which the layer-escalation loop would otherwise
     lose when it re-reads a checkpoint-overwritten staged file.
 
+    Issue #8658: on a KiCad-10 name-only board the parser returns every trace
+    and via under net id 0.  Each route is re-keyed by its net name with the
+    loader's own rule (:func:`~kicad_tools.router.io.rekey_name_only_copper`),
+    so this list carries the same ids as ``router.existing_routes``.  Otherwise
+    the short check reads a new trace joining its own net's kept copper as a
+    short against "Net 0".  Copper with no resolvable net name stays at id 0.
+    Those ids are only this text's: a later attempt's router can number the
+    same names differently, so consumers match these routes by net name
+    (:func:`_preserved_route_router_net`), never by comparing ids.
+
     Returns an empty list when the file has no routed copper or cannot be read.
     """
+    from kicad_tools.router.io import _build_net_number_map, rekey_name_only_copper
     from kicad_tools.router.optimizer.pcb import parse_segments, parse_vias
     from kicad_tools.router.primitives import Route
 
@@ -3567,6 +3579,7 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
     segments_by_net = parse_segments(text)
     vias_by_net = parse_vias(text)
     all_net_names = set(segments_by_net) | set(vias_by_net)
+    net_map = _build_net_number_map(text)
 
     routes: list[Route] = []
     for net_name in sorted(all_net_names):
@@ -3575,6 +3588,7 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
         if not segs and not vias:
             continue
         net_id = segs[0].net if segs else vias[0].net
+        net_id, segs, vias = rekey_name_only_copper(net_id, net_name, segs, vias, net_map)
         routes.append(Route(net=net_id, net_name=net_name, segments=segs, vias=vias))
     return routes
 
@@ -3622,6 +3636,57 @@ def _kept_preserved_net_ids(router) -> set[int]:
     return set(getattr(router, "_stub_terminals", None) or {})
 
 
+def _router_board_net_ids(router) -> dict[str, int]:
+    """The current router's net name -> id map, or ``{}`` when it has none."""
+    ids = getattr(router, "board_net_ids", None)
+    return ids if isinstance(ids, dict) else {}
+
+
+def _preserved_route_router_net(route: "Route", board_net_ids: "dict[str, int] | None") -> int:
+    """The id ``route``'s net has in the CURRENT router; 0 when it has none (#8658).
+
+    Preserved routes are captured once, from the pristine staged file.  On a
+    name-only board their ids are synthetic (first-seen order of the names in
+    that text), while a later layer-escalation attempt loads a file ``kct``
+    has rewritten, where the same names can get different ids.  So a captured
+    id must never be compared with a routed id directly: the route's net
+    *name* is resolved through the current router's ``board_net_ids``.
+
+    A named route the current router does not know, and copper with no net
+    name under id 0, return 0 -- such copper cannot have been re-routed and is
+    never dropped.  Without a map (stand-in routers) or without a name the
+    captured id is used: numeric ids come from the file and do not drift.
+    """
+    if board_net_ids and route.net_name:
+        return max(int(board_net_ids.get(route.net_name, 0) or 0), 0)
+    return route.net if route.net > 0 else 0
+
+
+def _preserved_route_is_rerouted(
+    route: "Route", routed_net_ids, board_net_ids: "dict[str, int] | None"
+) -> bool:
+    """Whether the current router re-routed ``route``'s net (matched by name)."""
+    router_net = _preserved_route_router_net(route, board_net_ids)
+    return router_net > 0 and router_net in routed_net_ids
+
+
+def _rekey_preserved_route(route: "Route", router_net: int) -> "Route":
+    """``route`` under the current router's id for its net (#8658).
+
+    The short check and the kept-copper audits compare the emitted preserved
+    routes with this attempt's routed copper by id.  Unchanged when the ids
+    already agree or the current router has no id for the net.
+    """
+    if router_net <= 0 or router_net == route.net:
+        return route
+    return replace(
+        route,
+        net=router_net,
+        segments=[replace(seg, net=router_net) for seg in route.segments],
+        vias=[replace(via, net=router_net) for via in route.vias],
+    )
+
+
 def _dedupe_preserved_sexp(
     preserved_sexp: str,
     preserved_routes: "list[Route] | None",
@@ -3629,6 +3694,7 @@ def _dedupe_preserved_sexp(
     *,
     stub_net_ids=(),
     name_only: bool = False,
+    board_net_ids: "dict[str, int] | None" = None,
 ) -> str:
     """Drop preserved copper that a re-routed net replaces (issue #6626).
 
@@ -3637,6 +3703,11 @@ def _dedupe_preserved_sexp(
     their preserved copper) to the already-serialized ``preserved_sexp`` that
     partial saves and checkpoints append.  Verbatim blocks that are not in
     ``preserved_routes`` (placement-preserved nets) are left untouched.
+
+    ``routed`` and ``stub_net_ids`` carry the current router's ids;
+    ``board_net_ids`` is that router's name -> id map, through which each
+    preserved route is matched by net name rather than by its captured id
+    (:func:`_preserved_route_router_net`).
     """
     if not preserved_sexp or not preserved_routes:
         return preserved_sexp
@@ -3645,9 +3716,13 @@ def _dedupe_preserved_sexp(
         return preserved_sexp
     # ``Route.to_sexp`` mints a fresh uuid per call, so the serialized text
     # cannot be matched against re-serialized routes: filter it by net instead.
-    drop_ids = {r.net for r in preserved_routes if r.net in routed_ids}
-    drop_names = {r.net_name for r in preserved_routes if r.net in routed_ids and r.net_name}
-    if not drop_ids:
+    # The text carries the CAPTURED ids and names, so those select the blocks.
+    dropped = [
+        r for r in preserved_routes if _preserved_route_is_rerouted(r, routed_ids, board_net_ids)
+    ]
+    drop_ids = {r.net for r in dropped if r.net > 0}
+    drop_names = {r.net_name for r in dropped if r.net_name}
+    if not dropped:
         return preserved_sexp
     from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
 
@@ -3669,12 +3744,16 @@ def _serialize_preserved_routes(
     exclude_net_ids: set[int] | None = None,
     *,
     name_only: bool = False,
+    board_net_ids: "dict[str, int] | None" = None,
 ) -> str:
     """Serialize preserved routes, skipping any net in ``exclude_net_ids``.
 
     The exclusion set is the freshly-routed net ids: a net that was both
     pre-existing *and* re-routed must be emitted from the routed copy only,
-    never twice (#3155 defensive dedupe).
+    never twice (#3155 defensive dedupe).  Those are the current router's
+    ids; ``board_net_ids`` (its name -> id map) lets each preserved route be
+    matched by net name instead of by its captured id
+    (:func:`_preserved_route_router_net`, #8658).
 
     Issue #4416: ``name_only`` re-emits preserved copper in the board's
     ``(net "name")`` dialect so an incremental route pass does not flip the
@@ -3683,7 +3762,7 @@ def _serialize_preserved_routes(
     exclude = exclude_net_ids or set()
     parts: list[str] = []
     for route in preserved_routes:
-        if route.net in exclude:
+        if _preserved_route_is_rerouted(route, exclude, board_net_ids):
             continue
         sexp = route.to_sexp(name_only=name_only)
         if sexp:
@@ -4092,10 +4171,22 @@ def _finalize_routes(
             stub_net_ids = _kept_preserved_net_ids(router)
             if stub_net_ids:
                 routed_net_ids = routed_net_ids - stub_net_ids
+            # Issue #8658: ``source_routes`` carry the ids of the pristine
+            # capture, ``routed_net_ids`` those of this attempt's router.  On
+            # a name-only board the two can differ once kct has rewritten the
+            # staged file, so each preserved route is matched by net name.
+            board_net_ids = _router_board_net_ids(router)
             preserved_sexp = _serialize_preserved_routes(
-                source_routes, exclude_net_ids=routed_net_ids, name_only=name_only
+                source_routes,
+                exclude_net_ids=routed_net_ids,
+                name_only=name_only,
+                board_net_ids=board_net_ids,
             )
-            _emitted_preserved = [r for r in source_routes if r.net not in routed_net_ids]
+            _emitted_preserved = [
+                _rekey_preserved_route(r, _preserved_route_router_net(r, board_net_ids))
+                for r in source_routes
+                if not _preserved_route_is_rerouted(r, routed_net_ids, board_net_ids)
+            ]
             if preserved_sexp:
                 emitted = _emitted_preserved
                 preserved_segments = sum(len(r.segments) for r in emitted)
@@ -4575,6 +4666,7 @@ def _save_partial_results() -> bool:
             router.routes,
             stub_net_ids=_kept_preserved_net_ids(router),
             name_only=name_only,
+            board_net_ids=_router_board_net_ids(router),
         )
         if source_copper and route_sexp:
             route_sexp = f"{route_sexp}\n\t{source_copper}"
@@ -5802,6 +5894,7 @@ def _write_drc_constraint_sidecars(
     net_class_map: dict | None = None,
     coupled_pairs: list[tuple[str, str]] | None = None,
     pair_gaps: list[tuple[str, str, float]] | None = None,
+    edge_clearance: float | None = None,
 ) -> None:
     """Emit ``.kicad_pro`` + ``.kicad_dru`` next to the routed PCB.
 
@@ -5858,6 +5951,10 @@ def _write_drc_constraint_sidecars(
             it (:func:`_router_pair_gaps`, Issue #6443).  Each pair KiCad
             recognises by name gets a native ``diff_pair_gap`` rule.
             ``None`` keeps whatever an earlier route wrote.
+        edge_clearance: Copper-to-edge clearance (mm) the route kept tracks
+            and vias at (Issue #8674).  Written as a track/via-scoped
+            ``edge_clearance`` rule so kicad-cli DRC flags a violation of it
+            without also constraining pads and pours.  ``None`` writes none.
     """
     try:
         from kicad_tools.manufacturers import (
@@ -5907,6 +6004,7 @@ def _write_drc_constraint_sidecars(
                 if pair_gaps is not None
                 else None
             ),
+            route_edge_clearance_mm=edge_clearance,
         )
     except (ValueError, OSError, KeyError) as e:
         if source_pcb_path is not None:
@@ -6016,6 +6114,43 @@ def _native_drc_failure_advice(geo) -> list[str]:
     ]
 
 
+# Issue #8674: the ``path_ampacity`` errors (message + location) the last
+# post-route DRC found, per resolved board path.  Declared current paths are
+# audited after routing, never planned by a search, so the chained completion
+# pass compares its staged board against the negotiated one here to tell
+# whether its copper added any.  An entry exists for every board whose DRC
+# rule pass ran (an empty set when it found none, or none were declared); a
+# MISSING entry means the board was not audited (DRC skipped for --timeout,
+# failed before the rule pass, or never started) and must never be read as
+# "no errors".  Cleared at the start of each outermost invocation.
+_path_ampacity_errors: dict[str, frozenset[str]] = {}
+
+# Issue #8695: the same record for EVERY error-severity finding class
+# (keyed by :func:`_drc_error_finding_key`), so the chained completion pass can refuse
+# copper that added blocking errors of any kind, not only path_ampacity.
+# Same semantics: a missing entry means "not audited", never "clean".
+_drc_error_findings: dict[str, frozenset[str]] = {}
+
+
+def _drc_error_finding_key(v) -> str:
+    """Record key of one post-route DRC error for the chained comparison.
+
+    ``rule_id|message @ location`` for every class, except ``connectivity``
+    (Issue #8702): its message carries the net's pad counts ("2 of 3 pads
+    stranded") and its location/items name the first stranded pad, so a pass
+    that connects only some of an open net's pads re-reports the SAME open net
+    under a new string and was refused as if it had added an error (measured
+    on boards/04-stm32-devboard).  Key it by net instead: a pass still refuses
+    when it strands a net that had no connectivity error, never when it only
+    advances one.  ``DRCViolation.key`` is not used: it keeps the first
+    stranded pad in ``items`` (the same drift) and collapses distinct
+    dimension errors on one net and layer into one key.
+    """
+    if v.rule_id == "connectivity" and v.nets:
+        return f"connectivity|{','.join(sorted(v.nets))}"
+    return f"{v.rule_id}|{v.message} @ {v.location}"
+
+
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
@@ -6034,6 +6169,7 @@ def run_post_route_drc(
     router: object | None = None,
     time_left: float | None = None,
     drc_cost_estimate: float = 0.0,
+    edge_clearance: float | None = None,
 ) -> tuple[int, int]:
     """Run DRC validation on the routed PCB.
 
@@ -6132,6 +6268,13 @@ def run_post_route_drc(
     def _left() -> float | None:
         return None if _finish_by is None else _finish_by - time.monotonic()
 
+    # Issue #8692: the path_ampacity audit record means "the MOST RECENT call
+    # on this path ran its rule pass".  Drop any earlier call's entry before
+    # any early exit (skipped for time, PCB.load / DRCChecker / check_all
+    # failure) so a stale record cannot read as "this board was audited".
+    _record_key = str(Path(output_path).resolve())
+    _path_ampacity_errors.pop(_record_key, None)
+
     # Issue #3917 Defect 1: persist the net-class map as a sidecar next to
     # the routed PCB so ``kct check`` (and re-runs of this DRC) can
     # auto-load it and fire the sidecar-gated skew / continuity rules.
@@ -6215,6 +6358,7 @@ def run_post_route_drc(
         net_class_map=_effective_class_map or None,
         coupled_pairs=_coupled_pairs,
         pair_gaps=_router_pair_gaps(_coupled_pairs, _effective_class_map or None, router),
+        edge_clearance=edge_clearance,
     )
 
     # Issue #6273: the sidecars above are cheap and always written; the
@@ -6249,6 +6393,37 @@ def run_post_route_drc(
             current_path_specs=current_path_specs,
         )
         results = checker.check_all()
+        # Recorded even with no declared paths (an empty set): the entry is
+        # what tells the chained pass this board's audit ran at all.  Building
+        # it must never take the rest of this DRC down (the geometric
+        # reconciliation below): on any failure NO entry is written, which
+        # the chained pass reads as "not audited" and refuses (fail-closed).
+        try:
+            _path_ampacity_errors[_record_key] = frozenset(
+                f"{v.message} @ {v.location}"
+                for v in results.errors
+                if v.rule_id == "path_ampacity"
+            )
+        except Exception as record_exc:
+            if not quiet:
+                print(
+                    "  Warning: could not record the path_ampacity audit "
+                    f"({record_exc}); a chained completion pass will treat this "
+                    "board as not audited"
+                )
+
+        _drc_error_findings.pop(_record_key, None)
+        try:
+            _drc_error_findings[_record_key] = frozenset(
+                _drc_error_finding_key(v) for v in results.errors
+            )
+        except Exception as record_exc:
+            if not quiet:
+                print(
+                    "  Warning: could not record the post-route DRC errors "
+                    f"({record_exc}); a chained completion pass will treat this "
+                    "board as not audited"
+                )
 
         error_count = results.error_count
         warning_count = results.warning_count
@@ -7587,6 +7762,7 @@ def _fill_zones_after_route(
                 net_class_map=class_map,
                 coupled_pairs=coupled_pairs,
                 pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
+                edge_clearance=getattr(args, "edge_clearance", None),
             )
             # Issue #7026: the selective fill stages the sibling ``.kicad_dru``,
             # so write the native zone-clearance block first, as the full-fill
@@ -7675,6 +7851,7 @@ def _fill_zones_after_route(
             net_class_map=class_map,
             coupled_pairs=coupled_pairs,
             pair_gaps=_router_pair_gaps(coupled_pairs, class_map, router),
+            edge_clearance=getattr(args, "edge_clearance", None),
         )
 
     # Issue #7026: a recipe that fills under ``native_clearance=True`` ships a
@@ -13436,6 +13613,8 @@ def route_with_layer_escalation(
             # floor was resolved from (--copper > board stackup > 1oz), so
             # the sidecars and this DRC agree with `kct check --copper`.
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+            # Issue #8674: the route's edge clearance, as a track/via DRU rule.
+            edge_clearance=getattr(args, "edge_clearance", None),
             # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
@@ -14414,6 +14593,8 @@ def route_with_rule_relaxation(
             # floor was resolved from (--copper > board stackup > 1oz), so
             # the sidecars and this DRC agree with `kct check --copper`.
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+            # Issue #8674: the route's edge clearance, as a track/via DRU rule.
+            edge_clearance=getattr(args, "edge_clearance", None),
             # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
@@ -16953,6 +17134,8 @@ def route_with_combined_escalation(
             # floor was resolved from (--copper > board stackup > 1oz), so
             # the sidecars and this DRC agree with `kct check --copper`.
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+            # Issue #8674: the route's edge clearance, as a track/via DRU rule.
+            edge_clearance=getattr(args, "edge_clearance", None),
             # Issue #2652, Epic #2556 Phase 2.5b: thread the autorouter's
             # net_class_map into the post-route DRC so the diff-pair
             # routing-continuity rule can re-derive its engagement state.
@@ -19304,6 +19487,8 @@ def _in_process_main_impl(argv: list[str] | None = None) -> int:
 
     with _process_state_guard():
         try:
+            _path_ampacity_errors.clear()  # Issue #8674: per-invocation record
+            _drc_error_findings.clear()  # Issue #8695
             rc = _main_impl(argv)
             if rc != 0:
                 _list_unverified_sets(_interrupt_state.get("output_path"))
@@ -19458,7 +19643,10 @@ def _route_parser() -> argparse.ArgumentParser:
             "that leaves signal nets open. By default, when the grid engine "
             "finishes with unconnected signal nets, one in-process --complete "
             "(lattice, existing copper fixed) pass runs on the output before "
-            "the exit code is decided; fully routed boards are untouched."
+            "the exit code is decided; fully routed boards are untouched. "
+            "The pass inherits --layers, --voltage-map and its lookup "
+            "settings, --edge-clearance and --current-paths (Issue #8674), "
+            "and is refused if its copper adds a path_ampacity error."
         ),
     )
     parser.add_argument(
@@ -21606,13 +21794,69 @@ def _chain_complete_argv(
     ``--complete-exclude-nets`` value so the inner pass never requests a net
     the outer run already refused to attempt.
 
-    Copper-affecting recipe flags are forwarded so the inner pass reserves and
-    places copper under the same rules as the outer route: via size,
-    clearance and trace width (only when the operator passed them, since their
-    resolved ``args`` values may come from the board or manufacturer), the net
-    class map, the plane-via reservation opt-outs and the deterministic
-    budget.  ``--auto-layers``, ``--route-engine`` and ``--grid`` are left out:
-    ``--complete`` deliberately picks its own engine and lattice.
+    The inner pass must reserve and place copper under the same rules as the
+    outer route, so every recipe flag that constrains copper is forwarded.
+
+    Forwarded whenever the outer run has a value:
+
+    * ``--manufacturer``, ``--seed``, ``--backend``, ``--copper``,
+      ``--net-class-map`` -- the fab tier, determinism and net classes.
+    * ``--complete-exclude-nets`` -- rebuilt from ``excluded_nets``.
+    * ``--per-net-iterations``, ``--deterministic-budget`` -- the search budget.
+    * ``--quiet``, ``--skip-drc``, ``--allow-offboard``,
+      ``--no-plane-via-reservation``, ``--no-reserve-pour-only-passives``.
+    * ``--layers`` (Issue #8674) unless it is ``auto``: the operator's stack is
+      passed by name, so the inner pass builds the same explicit stack instead
+      of re-detecting one from the routed board.  Under ``auto`` the operator
+      named no stack; the inner pass detects it from the board the outer run
+      wrote.  That equals the outer run's stack (Issue #8693): routing never
+      edits the layer table or zones, and ``detect_layer_stack`` reads both
+      zone-net spellings, so no resolved-stack handoff is needed (a layer
+      count cannot name an 8+-layer stack anyway).
+    * ``--voltage-map`` (Issue #8674) -- the HV pairwise-clearance table the
+      lattice search rejects against and the completion creepage rollback
+      measures against.
+    * ``--current-paths`` / ``--no-current-paths`` (Issue #8674).  The path the
+      outer run actually loaded is forwarded, so a sidecar auto-discovered next
+      to the *input* board also reaches the inner pass, whose input is ``-o``.
+      No engine plans by the declared paths; the inner pass's post-route DRC
+      audits them (``path_ampacity``) and :func:`_chain_complete_pass` refuses
+      a pass whose copper added such an error.
+
+    Forwarded only when the operator passed them (their ``args`` values are
+    otherwise a parser default or were resolved from the board/manufacturer,
+    and the inner pass must resolve those itself):
+
+    * ``--via-drill``, ``--via-diameter``, ``--clearance``, ``--trace-width``.
+    * ``--edge-clearance`` (Issue #8674) -- ``args.edge_clearance`` is filled
+      from the manufacturer when omitted, so only an explicit value is passed.
+    * ``--creepage-standard``, ``--pollution-degree``, ``--material-group``,
+      ``--hv-threshold`` (Issue #8674) -- the ``--voltage-map`` lookup settings.
+
+    Issue #8694 -- forwarded when set / when the operator passed them:
+    ``--strict-layers``, ``--strict-pad-clearance``, ``--strict-in-pad-clearance``,
+    ``--micro-via-in-pad-fallback``, ``--no-optimize``, ``--no-reserve-plane-layers``
+    and ``--no-auto-pour`` (booleans / opt-outs), and ``--via-clearance``,
+    ``--fine-pitch-clearance``, ``--micro-via-size``, ``--micro-via-drill``
+    (explicit values only).  ``--differential-pairs`` and ``--analog-nets`` are
+    not forwarded; :func:`_chain_coupled_routing_refusal` skips the chain when
+    they govern an open net.  ``--power-nets``, ``--stitch-power-planes`` and
+    ``--auto-fix`` are excluded because the outer run's result already covers them
+    (see the guard test).
+
+    Deliberately not forwarded:
+
+    * ``--auto-layers``, ``--route-engine``, ``--grid`` and the grid-engine
+      search/strategy flags -- ``--complete`` picks its own engine (lattice),
+      lattice and single-attempt path.
+    * ``-o``, ``--complete-report``, ``--checkpoint``, ``--timeout`` and the
+      other per-invocation I/O and budget flags -- the pass has its own staged
+      output, and the ``--timeout`` deadline reaches it through the environment.
+
+    ``tests/test_cli_route_chain_forwarding_guard_8674.py`` enumerates every
+    ``kct route`` option and fails when one is neither forwarded here nor
+    listed there with a reason, so a new copper-affecting flag cannot be
+    dropped silently.
     """
     chain_argv = [str(output), "-o", str(staged), "--complete"]
     for flag, attr in (
@@ -21621,10 +21865,24 @@ def _chain_complete_argv(
         ("--backend", "backend"),
         ("--copper", "copper"),
         ("--net-class-map", "net_class_map"),
+        ("--voltage-map", "voltage_map"),  # Issue #8674
     ):
         value = getattr(args, attr, None)
         if value not in (None, ""):
             chain_argv.extend([flag, str(value)])
+    # Issue #8674: an explicit stack is inherited by name; "auto" names none.
+    layers = getattr(args, "layers", None)
+    if layers not in (None, "", "auto"):
+        chain_argv.extend(["--layers", str(layers)])
+    # Issue #8674: the file the outer run loaded (explicit or auto-discovered
+    # beside the input board), else the operator's own flag or opt-out.
+    current_paths = getattr(args, "_current_paths_input_path", None) or getattr(
+        args, "current_paths", None
+    )
+    if getattr(args, "no_current_paths", False):
+        chain_argv.append("--no-current-paths")
+    elif current_paths not in (None, ""):
+        chain_argv.extend(["--current-paths", str(current_paths)])
     exclude = set(excluded_nets) | {
         n.strip()
         for n in (getattr(args, "complete_exclude_nets", "") or "").split(",")
@@ -21637,6 +21895,21 @@ def _chain_complete_argv(
         ("--via-diameter", "via_diameter"),
         ("--clearance", "clearance"),
         ("--trace-width", "trace_width"),
+        # Issue #8674: args.edge_clearance is manufacturer-filled when omitted.
+        ("--edge-clearance", "edge_clearance"),
+        # Issue #8674: the --voltage-map lookup settings (value defaults).
+        ("--creepage-standard", "creepage_standard"),
+        ("--pollution-degree", "pollution_degree"),
+        ("--material-group", "material_group"),
+        ("--hv-threshold", "hv_threshold"),
+        # Issue #8694: clearance rules the single-attempt tail builds
+        # DesignRules from (route_cmd.py ``DesignRules(...)`` in _run_main_impl).
+        # ``args.via_clearance`` is board-resolved, the micro-via sizes carry
+        # value defaults: only an explicit value is passed on.
+        ("--via-clearance", "via_clearance"),
+        ("--fine-pitch-clearance", "fine_pitch_clearance"),
+        ("--micro-via-size", "micro_via_size"),
+        ("--micro-via-drill", "micro_via_drill"),
     ):
         value = getattr(args, attr, None)
         if value is not None and _flag_passed_explicitly(argv, (flag,)):
@@ -21650,12 +21923,53 @@ def _chain_complete_argv(
         ("--allow-offboard", "allow_offboard"),
         ("--no-plane-via-reservation", "no_plane_via_reservation"),
         ("--deterministic-budget", "deterministic_budget"),
+        # Issue #8694: boolean copper rules, forwarded when set.
+        ("--strict-layers", "strict_layers"),
+        ("--strict-pad-clearance", "strict_pad_clearance"),
+        ("--strict-in-pad-clearance", "strict_in_pad_clearance"),
+        ("--micro-via-in-pad-fallback", "micro_via_in_pad_fallback"),
+        ("--no-optimize", "no_optimize"),
     ):
         if getattr(args, attr, False):
             chain_argv.append(flag)
     if getattr(args, "reserve_pour_only_passives", True) is False:
         chain_argv.append("--no-reserve-pour-only-passives")
+    # Issue #8694: both default True; the operator's opt-outs are forwarded so
+    # the pass neither re-opens the plane layers nor re-creates pours.
+    if getattr(args, "reserve_plane_layers", True) is False:
+        chain_argv.append("--no-reserve-plane-layers")
+    if getattr(args, "auto_pour", True) is False:
+        chain_argv.append("--no-auto-pour")
+    # Issue #8694: the pass runs on the lattice engine and reaches the same
+    # _run_match_group_tuning_phase as the outer run, which reads
+    # ``args.length_match_groups`` (the ``length_critical`` engage mode).  Without
+    # forwarding, the pass would only auto-tune via ``checker_limit``.
+    if getattr(args, "length_match_groups", False):
+        chain_argv.append("--length-match-groups")
     return chain_argv
+
+
+def _chain_coupled_routing_refusal(args, open_nets: list[str]) -> str | None:
+    """Why the chained pass must not run, or ``None`` (Issue #8694).
+
+    These flags are not forwarded: the lattice completion engine is not shown
+    to honour pair spacing or the boosted analog class, and the pass would run
+    them at their defaults.  A link left open on a net they govern would be
+    closed by copper that may silently break the constraint, so the chain is
+    skipped instead (fail closed, as for ``path_ampacity``).  Open nets the flags do not
+    govern chain as before.
+    """
+    from kicad_tools.router.net_class import is_differential_pair_name
+
+    if getattr(args, "differential_pairs", False):
+        pair = sorted(n for n in open_nets if is_differential_pair_name(n))
+        if pair:
+            return f"--differential-pairs governs open net(s) {', '.join(pair)}"
+    analog = {n.strip() for n in (getattr(args, "analog_nets", None) or "").split(",") if n.strip()}
+    hit = sorted(n for n in open_nets if n in analog)
+    if hit:
+        return f"--analog-nets governs open net(s) {', '.join(hit)}"
+    return None
 
 
 def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
@@ -21682,9 +21996,18 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     cleanly (0, or 8 for a partial improvement) and closed at least one net;
     otherwise it is discarded and ``-o`` was never touched.  A closing pass
     replaces the stale pre-pass exit code; a partial improvement keeps the
-    original one.  Copper-affecting recipe flags are forwarded
-    (:func:`_chain_complete_argv`); ``--grid``, ``--layers`` and the engine
-    flags are not, since ``--complete`` picks its own.
+    original one.  A pass whose copper added a ``path_ampacity`` error against
+    the declared ``--current-paths`` is refused with a message (Issue #8674):
+    those paths are audited, not planned, and the inner exit 8 does not consult
+    the audit.  The refusal fails closed: a pass whose audit did not run (its
+    DRC was skipped for ``--timeout``) is refused as "not audited", and so is
+    a pass whose board has ``path_ampacity`` errors when the negotiated board
+    was not audited and they cannot be compared.  Under ``--skip-drc`` nothing
+    is audited, as in the outer run, and a note says so.  Copper-affecting
+    recipe flags -- the layer stack, the HV voltage map, the edge clearance and
+    the current paths included (Issue #8674) -- are forwarded
+    (:func:`_chain_complete_argv`); ``--grid`` and the engine flags are not,
+    since ``--complete`` picks its own.
     """
     if (
         getattr(args, "no_chain_complete", False)
@@ -21759,6 +22082,15 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     if not before:
         return result
 
+    refusal = _chain_coupled_routing_refusal(args, before)
+    if refusal is not None:
+        if not quiet:
+            print(
+                f"\n--- Chained completion pass skipped: {refusal}, and the lattice "
+                "completion pass cannot honour it; negotiated output kept ---"
+            )
+        return result
+
     if not quiet:
         print(
             f"\n--- Chained completion pass: {len(before)} signal net(s) still open "
@@ -21821,6 +22153,73 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
                     f"(exit {chain_rc}); negotiated output kept"
                 )
             return result
+        # Issue #8674: no search plans by --current-paths; the post-route DRC
+        # audits them, and the inner exit 8 is returned before that audit is
+        # consulted.  Refuse copper that added a path_ampacity error -- and,
+        # fail-closed, copper whose audit cannot be shown to have run or
+        # cannot be compared: a missing record is "not audited", never "clean".
+        if "--current-paths" in chain_argv:
+            staged_errors = _path_ampacity_errors.get(str(staged.resolve()))
+            outer_errors = _path_ampacity_errors.get(str(output.resolve()))
+            if getattr(args, "skip_drc", False):
+                if not quiet:
+                    print(
+                        "  Note: --skip-drc: the declared --current-paths were NOT "
+                        "audited on the chained completion pass's copper "
+                        "(path_ampacity unchecked); run `kct check` on the output"
+                    )
+            elif staged_errors is None:
+                print(
+                    "  Chained completion pass refused: its copper was not audited "
+                    "against the declared --current-paths (the pass's post-route "
+                    "DRC did not run, e.g. skipped for --timeout); negotiated "
+                    "output kept"
+                )
+                return result
+            elif outer_errors is None:
+                if staged_errors:
+                    print(
+                        "  Chained completion pass refused: its board has "
+                        f"{len(staged_errors)} path_ampacity error(s) against the "
+                        "declared --current-paths and the negotiated board was not "
+                        "audited, so they could not be compared (the pass may not "
+                        "have added them); negotiated output kept"
+                    )
+                    return result
+            elif staged_errors - outer_errors:
+                print(
+                    "  Chained completion pass refused: its copper added "
+                    f"{len(staged_errors - outer_errors)} path_ampacity error(s) "
+                    "against the declared --current-paths; negotiated output kept"
+                )
+                return result
+        # Issue #8695: the inner exit 8 is returned before its DRC verdict is
+        # consulted, so compare every error-severity class (not only
+        # path_ampacity) and refuse copper that added blocking errors.
+        if not getattr(args, "skip_drc", False):
+            staged_all = _drc_error_findings.get(str(staged.resolve()))
+            outer_all = _drc_error_findings.get(str(output.resolve()))
+            if staged_all is None:
+                print(
+                    "  Chained completion pass refused: its copper was not audited "
+                    "(the pass's post-route DRC did not run, e.g. skipped for "
+                    "--timeout); negotiated output kept"
+                )
+                return result
+            added = staged_all if outer_all is None else staged_all - outer_all
+            if added:
+                classes = ", ".join(sorted({f.split("|", 1)[0] for f in added}))
+                why = (
+                    " (the negotiated board was not audited, so they could not be compared)"
+                    if outer_all is None
+                    else ""
+                )
+                print(
+                    "  Chained completion pass refused: its copper added "
+                    f"{len(added)} blocking DRC error(s) [{classes}]{why}; "
+                    "negotiated output kept"
+                )
+                return result
         # Sidecars first, the board last, so -o only changes once the rest is in place.
         # The receipt and constraint sidecars (.kicad_pro/.kicad_dru/.kicad_prl)
         # are not promoted: the outer run republishes the receipt for -o, and the
@@ -24857,6 +25256,8 @@ def _run_main_impl(args, parser, argv) -> int:
             # floor was resolved from (--copper > board stackup > 1oz), so
             # the sidecars and this DRC agree with `kct check --copper`.
             copper_oz=float(getattr(args, "copper_oz", 1.0) or 1.0),
+            # Issue #8674: the route's edge clearance, as a track/via DRU rule.
+            edge_clearance=getattr(args, "edge_clearance", None),
             # Issue #2652, Epic #2556 Phase 2.5b: see other call sites.
             net_class_map=getattr(router, "net_class_map", None),
             # Issue #4178: forward --strict-drc (see other call sites).

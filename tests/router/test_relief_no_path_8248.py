@@ -815,9 +815,12 @@ def test_copper_signature_tracks_only_nearby_copper():
     net_routes[2] = [_seg(4.0, 8.0, 9.0, 8.0, net=2)]
     near = router._relief_witness_signature(VICTIM, net_routes)
     assert near != base
-    # ...and so does nudging it, or the victim's own copper being ignored.
+    # ...but nudging that same net's copper does not (coarse key, #8486), and
+    # a second foreign net entering the window does.
     net_routes[2] = [_seg(4.0, 8.2, 9.0, 8.2, net=2)]
-    assert router._relief_witness_signature(VICTIM, net_routes) not in (base, near)
+    assert router._relief_witness_signature(VICTIM, net_routes) == near
+    net_routes[3] = [_seg(4.0, 9.0, 9.0, 9.0, net=3)]
+    assert router._relief_witness_signature(VICTIM, net_routes) != near
     net_routes[VICTIM] = [_seg(5.0, 7.0, 6.0, 7.0, net=VICTIM)]
     assert router._relief_witness_signature(VICTIM, {**net_routes, VICTIM: []}) == (
         router._relief_witness_signature(VICTIM, net_routes)

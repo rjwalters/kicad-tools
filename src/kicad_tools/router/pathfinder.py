@@ -38,7 +38,7 @@ from . import wall_deadline as _wall_deadline
 from .clearance_kernel import CLEARANCE_EPSILON_MM
 from .clearance_resolver import trace_via_clearance_mm
 from .geometry import segments_intersect as _geom_segments_intersect
-from .grid import RoutingGrid
+from .grid import RoutingGrid, SetupDeadlineExpired
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
 from .pad_landing import landing_cost, pad_landing_geometry
@@ -111,6 +111,122 @@ class _PairwiseSearchState:
 # table, where it degrades to the pre-#4794 recompute-every-call behaviour
 # rather than growing without bound.
 _PAIRWISE_MASK_CACHE_MAX = 64
+
+
+# Issue #8645: the exception lives in ``grid`` so ``compute_expanded_blocked``
+# can raise it; ``_route_impl`` catches it under the historical name.
+_SetupDeadlineExpired = SetupDeadlineExpired
+
+
+def _check_setup_deadline(deadline: float | None) -> None:
+    """Raise :class:`_SetupDeadlineExpired` once ``deadline`` has passed."""
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _SetupDeadlineExpired
+
+
+def _separable_disc_heights(disc: np.ndarray) -> list[int] | None:
+    """Per-column half-heights of ``disc``, or ``None`` if it is not separable.
+
+    Issue #8414. :func:`_disc_dilate_exact` is exact for a ``(2r+1, 2r+1)``
+    structuring element when all of these hold:
+
+    - it is mirror-symmetric on both axes;
+    - every column ``r + a`` is one contiguous run ``[r - h(a), r + h(a)]``,
+      or is empty (``h(a) = -1``);
+    - ``h`` does not increase with ``|a|``.
+
+    The Euclidean halo disc (:func:`~kicad_tools.router.grid.halo_mask`) meets
+    all three. Anything else returns ``None``, and the caller falls back to the
+    shift-and-OR reference, so an unusual element is never approximated.
+    """
+    if disc.ndim != 2 or disc.shape[0] != disc.shape[1] or disc.shape[0] % 2 != 1:
+        return None
+    r = disc.shape[0] // 2
+    if not bool(disc[r, r]):
+        return None
+    if not (np.array_equal(disc, disc[::-1, :]) and np.array_equal(disc, disc[:, ::-1])):
+        return None
+    heights: list[int] = []
+    for a in range(r + 1):
+        column = disc[:, r + a]
+        count = int(np.count_nonzero(column))
+        h = (count - 1) // 2 if count else -1
+        if count and not bool(np.all(column[r - h : r + h + 1])):
+            return None  # set cells are not one centred run
+        if heights and h > heights[-1]:
+            return None
+        heights.append(h)
+    return heights
+
+
+def _disc_dilate_shift_or(mask: np.ndarray, disc: np.ndarray) -> np.ndarray:
+    """Reference zero-padded dilation: OR ``mask`` once per set offset of ``disc``.
+
+    This is the pre-#8414 body of ``Router._dilate_zero_padded``, unchanged. It
+    costs O(N * set offsets), which is O(N * pi * r**2) for a disc. It is kept
+    as the fallback for a structuring element :func:`_separable_disc_heights`
+    rejects, and as the oracle the exact path is tested byte-for-byte against.
+    """
+    radius = disc.shape[0] // 2
+    layers, rows, cols = mask.shape
+    padded = np.zeros((layers, rows + 2 * radius, cols + 2 * radius), dtype=np.bool_)
+    padded[:, radius : radius + rows, radius : radius + cols] = mask
+    expanded = np.zeros_like(mask)
+    kernel_size = 2 * radius + 1
+    for dy in range(kernel_size):
+        for dx in range(kernel_size):
+            if disc[dy, dx]:
+                expanded |= padded[:, dy : dy + rows, dx : dx + cols]
+    return expanded
+
+
+def _disc_dilate_exact(mask: np.ndarray, disc: np.ndarray) -> np.ndarray:
+    """Exact zero-padded dilation of a 3-D ``mask`` by ``disc`` in O(N).
+
+    Issue #8414. Byte-identical to :func:`_disc_dilate_shift_or`, and the cost
+    does not depend on the radius. This is a separable distance transform with
+    a threshold, done in NumPy with no scipy:
+
+    1. ``hd``: per row, the horizontal distance to the nearest set cell. Two
+       running max/min passes over column indices compute it exactly.
+    2. A source row ``y'`` covers target ``(x, y)`` exactly when
+       ``|y - y'| <= S(x, y')``, with ``S = h(hd)`` and ``h`` the column
+       half-heights from :func:`_separable_disc_heights`. Taking the *nearest*
+       source is enough because ``h`` does not increase with ``|dx|``.
+       ``S = -1`` (``hd > r``) covers nothing.
+    3. ``covered(y) <=> max_{y' <= y}(y' + S) >= y  or  min_{y' >= y}(y' - S) <= y``.
+       Both sides are a running max/min along the rows.
+
+    Out of bounds is EMPTY: every source is an in-grid cell, as in the
+    zero-padded reference. Falls back to the reference when ``disc`` is not
+    separable.
+    """
+    heights = _separable_disc_heights(disc)
+    if heights is None:
+        return _disc_dilate_shift_or(mask, disc)
+    r = len(heights) - 1
+    layers, rows, cols = mask.shape
+    out = np.zeros_like(mask, dtype=np.bool_)
+    big = np.int32(rows + cols + 2 * r + 8)
+    # ``lut[d]`` = vertical half-extent reachable from a source ``d`` columns away.
+    lut = np.full(r + 2, -1, dtype=np.int32)
+    lut[: r + 1] = heights
+    col_idx = np.arange(cols, dtype=np.int32)[None, :]
+    row_idx = np.arange(rows, dtype=np.int32)[:, None]
+    for layer in range(layers):
+        m = mask[layer]
+        if not m.any():
+            continue
+        left = np.maximum.accumulate(np.where(m, col_idx, -big), axis=1)
+        right = np.minimum.accumulate(np.where(m, col_idx, big)[:, ::-1], axis=1)[:, ::-1]
+        hd = np.minimum(col_idx - left, right - col_idx)
+        np.minimum(hd, r + 1, out=hd)
+        s = lut[hd]
+        down = np.maximum.accumulate(s + row_idx, axis=0) >= row_idx
+        up = np.minimum.accumulate((row_idx - s)[::-1], axis=0)[::-1] <= row_idx
+        np.logical_or(down, up, out=out[layer])
+    return out
+
 
 # Issue #6117: tolerance for the post-route via-vs-foreign-pad check in
 # ``Router._validate_route_clearance``.  Matches the C++ validator's
@@ -265,6 +381,8 @@ class Router:
                               When False, routes use only orthogonal (Manhattan) moves.
         """
         self.grid = grid
+        # Issue #8609: pure-Python A* must run on NumPy arrays, never MLX/CuPy.
+        grid.ensure_numpy_arrays()
         self.rules = rules
         from .mfr_limits import get_mfr_limits
 
@@ -3222,7 +3340,9 @@ class Router:
             return True
         return False
 
-    def _pairwise_expanded_blocked(self, net: int, scalar_radius: int) -> np.ndarray | None:
+    def _pairwise_expanded_blocked(
+        self, net: int, scalar_radius: int, deadline: float | None = None
+    ) -> np.ndarray | None:
         """Pairwise (HV-isolation) widening bitmap for the A* hot loop.
 
         Issue #4507: the Python A* hot loop consults the pre-dilated
@@ -3261,6 +3381,12 @@ class Router:
         Returns ``None`` when dormant (no table, no projection, or ``net``
         participates in no widening pair) -- the caller then uses the scalar
         bitmap unchanged, byte-identical to pre-#4507 behaviour.
+
+        Issue #8414: ``deadline`` is the calling search's wall-clock deadline
+        (``time.monotonic()`` based). It is checked before every uncached
+        foreign-domain dilation, and :class:`_SetupDeadlineExpired` is raised
+        once it has passed. The check comes before the cache write, so only
+        complete masks are ever cached.
         """
         table = getattr(self.rules, "pairwise_clearance", None)
         if table is None:
@@ -3307,6 +3433,7 @@ class Router:
             if cache is not None and cache_key in cache:
                 pair_base = cache[cache_key]
             else:
+                _check_setup_deadline(deadline)  # Issue #8414
                 foreign_mask = self.grid._blocked & np.isin(self.grid._net, foreign_ids)
                 # ``None`` memoizes "this domain has no copper on the grid at
                 # this generation" -- as reusable as a mask, and it is the
@@ -3397,34 +3524,17 @@ class Router:
         Ones-padding there would seal a border band ``pair_r`` cells wide --
         far beyond the board-edge rule -- and can wall off the only compliant
         detour.  This helper mirrors the C++ convention with zero padding.
+
+        Issue #8414: the dilation is :func:`_disc_dilate_exact`. It runs in
+        O(N), costs the same at any radius, and is byte-identical to the old
+        per-offset shift-and-OR loop (:func:`_disc_dilate_shift_or`). That
+        loop cost 1.3-15.7 s per mask on a 15.9 M-cell board. scipy's
+        ``binary_dilation`` was measured slower than the loop at that size,
+        so it is no longer tried.
         """
         if radius <= 1:
             return mask
-        disc = self.grid._get_disc_kernel(radius)
-        try:
-            # scipy is an optional dependency (same posture as
-            # ``RoutingGrid._dilate_blocked``); the ignore must tolerate both
-            # a missing package and missing stubs across check environments.
-            from scipy.ndimage import (  # type: ignore[import-untyped, import-not-found, unused-ignore]
-                binary_dilation,
-            )
-
-            structure = np.zeros((1, disc.shape[0], disc.shape[1]), dtype=np.bool_)
-            structure[0] = disc
-            return np.asarray(binary_dilation(mask, structure=structure), dtype=np.bool_)
-        except ImportError:
-            rows, cols = self.grid.rows, self.grid.cols
-            padded = np.zeros(
-                (self.grid.num_layers, rows + 2 * radius, cols + 2 * radius), dtype=np.bool_
-            )
-            padded[:, radius : radius + rows, radius : radius + cols] = mask
-            expanded = np.zeros_like(mask)
-            kernel_size = 2 * radius + 1
-            for dy in range(kernel_size):
-                for dx in range(kernel_size):
-                    if disc[dy, dx]:
-                        expanded |= padded[:, dy : dy + rows, dx : dx + cols]
-            return expanded
+        return _disc_dilate_exact(mask, self.grid._get_disc_kernel(radius))
 
     # ------------------------------------------------------------------
     # Soft cross-domain (HV) avoidance gradient (Issue #4507)
@@ -3610,7 +3720,7 @@ class Router:
         self._pairwise_band_kernel_cache = ((hard_r, band), dist_sq, band_mask)
         return dist_sq, band_mask
 
-    def _pairwise_gradient_band(self, net: int) -> np.ndarray | None:
+    def _pairwise_gradient_band(self, net: int, deadline: float | None = None) -> np.ndarray | None:
         """Cells where :meth:`_pairwise_avoidance_cost` can be non-zero.
 
         Issue #4507: the Python A* hot loop cannot afford a band scan per
@@ -3619,6 +3729,9 @@ class Router:
         exact kernel only for cells it flags.  ``None`` when dormant -- the
         hot loop then adds no cost at all and stays byte-identical to
         pre-#4507 behaviour.
+
+        Issue #8414: raises :class:`_SetupDeadlineExpired` if ``deadline`` has
+        passed before the band dilation starts.
         """
         geometry = self._pairwise_gradient_geometry(net)
         if geometry is None:
@@ -3628,6 +3741,7 @@ class Router:
         foreign_ids, _widen_lut = self._pairwise_widening_net_ids(state, dom)
         if not foreign_ids:
             return None
+        _check_setup_deadline(deadline)  # Issue #8414
         foreign_mask = self.grid._blocked & np.isin(self.grid._net, foreign_ids)
         if not bool(np.any(foreign_mask)):
             return None
@@ -4479,6 +4593,20 @@ class Router:
         self.last_route_deadline_hit = False  # Issue #6329
         self.last_route_deadline_iterations = 0
 
+        # Issue #8414: the per-call wall clock starts HERE, before the
+        # pre-search mask builders. On an HV board those builders (scalar
+        # dilation, pairwise widening, gradient band) cost 127 s of a 128 s
+        # fallback call whose budget was 10 s, because the deadline was only
+        # armed just before the A* loop.
+        route_start = time.monotonic()
+        # Issue #8645: a corner-flanked start gets the escape-hint multiplier
+        # for setup too, so the mask builders are not stopped at 1x on a net
+        # the search would have been given 3x. ``_detect_escape_hint`` reads
+        # only grid cells and ``start_layers``, so it runs after the layer
+        # filters, before the first mask builder (hoisted below).
+        setup_timeout = per_net_timeout
+        setup_deadline = None
+
         # Issue #2330: Reset waypoint state for this route call
         self._waypoint_world_coords.clear()
         self._waypoint_id_counter = 0
@@ -4623,6 +4751,13 @@ class Router:
             if not start_layers or not end_layers:
                 return None
 
+        # Issue #8645: decide the budget multiplier once, before any mask
+        # builder, and derive both the setup and search deadlines from it.
+        escape_dir = self._detect_escape_hint(start, start_layers)
+        if per_net_timeout is not None and per_net_timeout > 0.0 and escape_dir is not None:
+            setup_timeout = per_net_timeout * self._ESCAPE_HINT_DEADLINE_MULT
+        setup_deadline = route_start + setup_timeout if setup_timeout is not None else None
+
         # A* setup
         open_set: list[AStarNode] = []
 
@@ -4647,17 +4782,39 @@ class Router:
         # _is_trace_blocked becomes a single array lookup per neighbor.
         # Issue #2559 / Phase 1C: Pass partner net id and tighter radius so
         # within-pair edges of a diff pair get the relaxed clearance.
-        expanded_blocked = self.grid.compute_expanded_blocked(
-            net_trace_half_width_cells,
-            start.net,
-            allow_sharing,
-            partner_net=partner_net_id,
-            partner_radius=net_partner_half_width_cells,
-            partner_active=partner_active_flag,
-            # Issue #3438: relief-probe mode -- foreign usage-0 cells are
-            # excluded from the hard bitmap (penalised per step instead).
-            relief_mode=self.relief_mode and allow_sharing,
-        )
+        try:
+            expanded_blocked = self.grid.compute_expanded_blocked(
+                net_trace_half_width_cells,
+                start.net,
+                allow_sharing,
+                partner_net=partner_net_id,
+                partner_radius=net_partner_half_width_cells,
+                partner_active=partner_active_flag,
+                # Issue #3438: relief-probe mode -- foreign usage-0 cells are
+                # excluded from the hard bitmap (penalised per step instead).
+                relief_mode=self.relief_mode and allow_sharing,
+                # Issue #8645: checked between dilations; raises, never
+                # returns a partial mask.
+                deadline=setup_deadline,
+            )
+        except _SetupDeadlineExpired:
+            self._note_setup_deadline_stop()
+            return None
+
+        # Issue #8414: the HV pairwise builders below check the call's wall
+        # deadline before every dilation they start. On expiry the search is
+        # a deadline stop, not a drained open set, so callers (the
+        # post-negotiation sweep and ``_note_wall_bound_under_cap``) see it as
+        # one. The builders raise before caching, so no partial mask outlives
+        # the stop. A dormant (non-HV) call never checks here; its A* loop
+        # samples the same deadline every 1024 expansions, as before.
+        try:
+            pairwise_extra = self._pairwise_expanded_blocked(
+                start.net, net_trace_half_width_cells, deadline=setup_deadline
+            )
+        except _SetupDeadlineExpired:
+            self._note_setup_deadline_stop()
+            return None
 
         # Issue #4507 / Epic #4431 Phase 2b parity: OR the pairwise
         # (HV-isolation) widening into the hot-loop bitmap so the pure-Python
@@ -4666,7 +4823,6 @@ class Router:
         # matching the C++ ``cross_domain_trace_blocked`` (a creepage
         # requirement cannot "negotiate away").  ``None`` when dormant --
         # the bitmap is then byte-identical to pre-#4507.
-        pairwise_extra = self._pairwise_expanded_blocked(start.net, net_trace_half_width_cells)
         if pairwise_extra is not None:
             expanded_blocked = expanded_blocked | pairwise_extra
 
@@ -4690,7 +4846,11 @@ class Router:
         # runs only for the handful of cells near HV copper.  ``None`` when
         # dormant, so a board without a voltage map pays one ``is None``
         # test per neighbour and keeps byte-identical g-scores.
-        pairwise_band = self._pairwise_gradient_band(start.net)
+        try:
+            pairwise_band = self._pairwise_gradient_band(start.net, deadline=setup_deadline)
+        except _SetupDeadlineExpired:
+            self._note_setup_deadline_stop()
+            return None
         # Per-call memo: the copper the gradient measures against cannot move
         # during one A* call (the same assumption ``expanded_blocked`` makes),
         # and a cell is typically relaxed from several parents.
@@ -4791,7 +4951,6 @@ class Router:
         # The seed inherits ``direction = escape_dir`` so its
         # descendants get the turn-cost bonus for continuing outward.
         # When ``_detect_escape_hint`` declines, the block is a no-op.
-        escape_dir = self._detect_escape_hint(start, start_layers)
         if escape_dir is not None:
             for cx, cy, cl, edge_cost in self._escape_hint_cells(
                 start, escape_dir, start.net, start_layers
@@ -4829,10 +4988,12 @@ class Router:
         # converge.  This is a TARGETED extension -- it never widens
         # the global deadline, and nets whose pads don't trip the
         # predicate continue to honour ``per_net_timeout`` exactly.
-        effective_timeout = per_net_timeout
-        if per_net_timeout is not None and per_net_timeout > 0.0 and escape_dir is not None:
-            effective_timeout = per_net_timeout * self._ESCAPE_HINT_DEADLINE_MULT
-        deadline = time.monotonic() + effective_timeout if effective_timeout is not None else None
+        # Issue #8645: the multiplier is decided once, up top (``setup_deadline``
+        # shares it), so setup and search draw on one budget.
+        effective_timeout = setup_timeout
+        # Issue #8414: measured from ``route_start`` (the top of the call), so
+        # the pre-search setup above is charged to the same budget.
+        deadline = route_start + effective_timeout if effective_timeout is not None else None
         timeout_check_interval = 1024
         goal_rejected = False  # Issue #6098
 
@@ -5518,6 +5679,11 @@ class Router:
         # frontier nodes behind).
         self.last_route_exhausted = not open_set and not goal_rejected
         return None
+
+    def _note_setup_deadline_stop(self) -> None:
+        """Record that the wall budget ran out before the A* loop (issue #8414)."""
+        self.last_route_deadline_hit = True
+        self.last_route_deadline_iterations = 0
 
     def get_last_failure_info(self) -> dict | None:
         """Return structured failure diagnostics from the most recent failed route().
@@ -6343,6 +6509,9 @@ class Router:
             return None
 
         per_net_timeout = _wall_deadline.clamp_search_timeout(per_net_timeout)
+        # Issue #8414: start the wall clock before any setup, as in
+        # ``_route_impl``, so seeding and escape hints are charged to the budget.
+        bidi_start = time.monotonic()
 
         # Issue #966: Clear via cache at start of route (grid state may have changed)
         self.clear_via_cache()
@@ -6619,7 +6788,7 @@ class Router:
         if self._max_iterations_override is not None:
             max_iterations = min(max_iterations, self._max_iterations_override)
 
-        bidi_deadline = time.monotonic() + per_net_timeout if per_net_timeout is not None else None
+        bidi_deadline = bidi_start + per_net_timeout if per_net_timeout is not None else None
         bidi_deadline_hit = False
 
         while (forward_open or backward_open) and iterations < max_iterations:

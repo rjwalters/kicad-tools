@@ -75,6 +75,40 @@ class TestIsMountingHole:
         for ref in ("R1", "C30", "D_TVS1", "U5", "J3", "MH"):
             assert not _is_mounting_hole(ref, "Capacitor_SMD:C_0805_2012Metric"), ref
 
+    def test_name_heuristic_skipped_for_netted_pads(self):
+        # A header whose library name embeds "MountingHoles" has netted pads
+        # and a schematic symbol: it must not be filtered (#8669).
+        name = "PinSocket_2x20_P2.54mm_Vertical_MountingHoles"
+        assert not _is_mounting_hole("J1", name, has_netted_pads=True)
+        assert _is_mounting_hole("J1", name, has_netted_pads=False)
+
+    def test_reference_heuristic_kept_for_netted_pads(self):
+        assert _is_mounting_hole("MH1", "", has_netted_pads=True)
+
+    def test_get_pcb_components_keeps_netted_mountingholes_footprint(self):
+        header = MagicMock()
+        header.reference = "J1"
+        header.value = "GPIO"
+        header.name = "PinSocket_2x20_MountingHoles"
+        header.attr_flags = []
+        pad = MagicMock()
+        pad.net_name = "GND"
+        header.pads = [pad]
+
+        hole = MagicMock()
+        hole.reference = "X9"
+        hole.value = ""
+        hole.name = "MountingHole:MountingHole_3.2mm_M3"
+        hole.attr_flags = []
+        hole.pads = []
+
+        checker = MagicMock()
+        checker.pcb.footprints = [header, hole]
+        reconciler = Reconciler.__new__(Reconciler)
+        comps = reconciler._get_pcb_components(checker)
+        assert "J1" in comps
+        assert "X9" not in comps
+
 
 class TestSyncMatch:
     """Tests for SyncMatch dataclass."""
@@ -2992,3 +3026,365 @@ class TestFootprintsEquivalent:
         assert _footprints_equivalent("Capacitor_SMD:C_0603", "C_0603")
         assert _footprints_equivalent("C_0603", "Capacitor_SMD:C_0603")
         assert not _footprints_equivalent("Capacitor_SMD:C_0603", "C_0402")
+
+
+class TestPadNetMismatches:
+    """Pad-net mismatch detection and apply (Issue #8703)."""
+
+    MM = {"reference": "R1", "pad": "2", "pcb_net": "GND", "schematic_net": "VCC"}
+
+    def test_mismatch_breaks_sync_and_is_actionable(self):
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        assert not analysis.is_in_sync
+        assert analysis.has_actionable_items
+
+    def test_to_dict_and_summary(self):
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        d = analysis.to_dict()
+        assert d["pad_net_mismatches"] == [self.MM]
+        assert d["summary"]["pad_net_mismatches"] == 1
+        assert "R1.2: GND -> VCC" in analysis.summary()
+
+    def test_find_uses_validator_and_filters_unconnected_schematic(self):
+        from kicad_tools.validate.netlist import SyncIssue
+
+        issues = [
+            SyncIssue("error", "net_mismatch", "m", "s", "R1", "VCC", "GND", "2"),
+            SyncIssue("error", "net_mismatch", "m", "s", "R2", "", "GND", "1"),
+        ]
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = Path("a.kicad_sch")
+        rec._pcb_path = Path("a.kicad_pcb")
+        with patch("kicad_tools.validate.netlist.NetlistValidator") as nv:
+            nv.return_value.pad_net_mismatches.return_value = issues
+            assert rec._find_pad_net_mismatches() == [self.MM]
+
+    def _reconciler(self):
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = Path("a.kicad_sch")
+        rec._pcb_path = Path("a.kicad_pcb")
+        return rec
+
+    def test_apply_dry_run_reports_without_assigning(self):
+        rec = self._reconciler()
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load") as load,
+            patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+            patch.object(rec, "_assign_nets") as assign,
+        ):
+            changes = rec.apply(analysis, dry_run=True)
+        load.assert_called_once()
+        assign.assert_not_called()
+        assert len(changes) == 1
+        c = changes[0]
+        assert (c.reference, c.change_type, c.old_value, c.new_value, c.applied) == (
+            "R1.2",
+            "assign_pad_net",
+            "GND",
+            "VCC",
+            False,
+        )
+
+    def test_apply_assigns_nets_and_saves(self, tmp_path):
+        rec = self._reconciler()
+        out = tmp_path / "out.kicad_pcb"
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM])
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load") as load,
+            patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+            patch.object(rec, "_assign_nets") as assign,
+        ):
+            changes = rec.apply(analysis, dry_run=False, output=out)
+        assign.assert_called_once_with(load.return_value, strict=True)
+        load.return_value.save.assert_called_once_with(str(out))
+        assert changes[0].applied
+
+    def test_strict_assign_failure_is_reported(self):
+        rec = self._reconciler()
+        with patch("kicad_tools.operations.netlist.export_netlist", side_effect=OSError("boom")):
+            with pytest.raises(RuntimeError, match="boom"):
+                rec._assign_nets(MagicMock(), strict=True)
+            rec._assign_nets(MagicMock())  # non-strict stays best-effort
+
+
+class TestStrandedCopper:
+    """Issue #8705: copper stranded by a pad-net change."""
+
+    MM = {"reference": "R1", "pad": "2", "pcb_net": "GND", "schematic_net": "VCC"}
+
+    @staticmethod
+    def _pcb(segs, vias=(), pads=None):
+        from types import SimpleNamespace as NS
+
+        from kicad_tools.schema.pcb import Segment, Via
+
+        positions = {
+            ("R1", "2"): (0.0, 0.0),
+            ("R2", "1"): (10.0, 0.0),
+            ("R3", "1"): (10.0, 10.0),
+            ("R4", "1"): (0.0, 10.0),
+        }
+        pcb = MagicMock()
+        pcb._nets = {}
+        pcb.get_pad_position.side_effect = lambda r, p: positions.get((r, p))
+        pcb.footprints = [
+            NS(reference="R1", pads=[NS(number="2", net_name="GND")]),
+            NS(reference="R2", pads=[NS(number="1", net_name="GND")]),
+            NS(reference="R3", pads=[NS(number="1", net_name="GND")]),
+            NS(reference="R4", pads=[NS(number="1", net_name="GND")]),
+        ]
+        pcb.segments = [
+            Segment(
+                start=a, end=b, width=0.2, layer="F.Cu", net_number=1, net_name=n, uuid=u, locked=lk
+            )
+            for (a, b, n, u, lk) in segs
+        ]
+        pcb.vias = [
+            Via(
+                position=p,
+                size=0.6,
+                drill=0.3,
+                layers=["F.Cu", "B.Cu"],
+                net_number=1,
+                net_name=n,
+                uuid=u,
+            )
+            for (p, n, u) in vias
+        ]
+        return pcb
+
+    def test_pour_stub_track_and_via_reported(self):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", False)], vias=[((1, 0), "GND", "v1")])
+        found = Reconciler._collect_stranded(pcb, [self.MM])
+        assert {i["uuid"] for _o, i in found} == {"s1", "v1"}
+        assert all(i["pad"] == "R1.2" for _o, i in found)
+
+    def test_copper_reaching_correct_pad_is_not_stranded_beyond_it(self):
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "s1", False),
+                ((5, 0), (10, 0), "GND", "s2", False),
+                ((10, 0), (20, 0), "GND", "s3", False),  # beyond R2.1: legit
+            ]
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        assert "s3" not in uuids and {"s1", "s2"} <= uuids
+
+    def test_t_junction_keeps_branches_to_legit_pads(self):
+        # R1.2 -A- J; J -B- R2.1; J -C- K -D- R3.1 (Issue #8705 review)
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "A", False),
+                ((5, 0), (10, 0), "GND", "B", False),
+                ((5, 0), (5, 10), "GND", "C", False),
+                ((5, 10), (10, 10), "GND", "D", False),
+            ]
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        assert uuids == {"A"}
+
+    def test_via_junction_keeps_continuation_to_legit_pad(self):
+        # Net continues on B.Cu from the via to R2.1: only the pad-side stub goes.
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "A", False),
+                ((5, 0), (10, 0), "GND", "B", False),  # second branch at the via
+                ((5, 0), (5, 10), "GND", "C", False),
+                ((5, 10), (10, 10), "GND", "D", False),
+            ],
+            vias=[((5, 0), "GND", "V")],
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        assert uuids == {"A"}
+
+    def test_via_bridged_chain_to_legit_pad_is_stranded_only_up_to_pad(self):
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "A", False),
+                ((5, 0), (10, 0), "GND", "B", False),
+                ((10, 0), (10, 5), "GND", "legit", False),  # R2.1's own routing
+            ],
+            vias=[((5, 0), "GND", "V")],
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        # The via is a pass-through between A and B, so the chain to R2.1 is the
+        # old R1.2 connection; R2.1's own copper beyond the pad stays.
+        assert uuids == {"A", "V", "B"}
+
+    def test_segment_between_two_mismatched_pads_reported_once(self):
+        mm2 = {"reference": "R2", "pad": "1", "pcb_net": "GND", "schematic_net": "VCC"}
+        pcb = self._pcb([((0, 0), (10, 0), "GND", "s1", False)])
+        found = Reconciler._collect_stranded(pcb, [self.MM, mm2])
+        assert [i["uuid"] for _o, i in found] == ["s1"]
+
+    def test_real_pcb_object(self, tmp_path):
+        from kicad_tools.schema.pcb import PCB, Segment, Via
+        from tests.conftest import MINIMAL_PCB
+
+        f = tmp_path / "a.kicad_pcb"
+        f.write_text(MINIMAL_PCB)
+        pcb = PCB.load(str(f))
+        x, y = pcb.get_pad_position("R1", "1")
+        pcb._segments = [
+            Segment(
+                start=(x, y),
+                end=(x + 2, y),
+                width=0.2,
+                layer="F.Cu",
+                net_number=0,
+                net_name="GND",
+                uuid="rs1",
+            )
+        ]
+        pcb._vias = [
+            Via(
+                position=(x + 2, y),
+                size=0.6,
+                drill=0.3,
+                layers=["F.Cu", "B.Cu"],
+                net_number=0,
+                net_name="GND",
+                uuid="rv1",
+            )
+        ]
+        mm = {"reference": "R1", "pad": "1", "pcb_net": "GND", "schematic_net": "VCC"}
+        found = Reconciler._collect_stranded(pcb, [mm])
+        assert {i["uuid"] for _o, i in found} == {"rs1", "rv1"}
+
+    def test_other_net_and_clean_board(self):
+        pcb = self._pcb([((0, 0), (1, 0), "VCC", "s1", False)])
+        assert Reconciler._collect_stranded(pcb, [self.MM]) == []
+        assert Reconciler._collect_stranded(pcb, []) == []
+
+    def test_locked_reported_and_flagged(self):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", True)])
+        ((_o, info),) = Reconciler._collect_stranded(pcb, [self.MM])
+        assert info["locked"] == "true"
+
+    def _apply(self, rec, pcb, analysis, **kw):
+        with (
+            patch("kicad_tools.schema.pcb.PCB.load", return_value=pcb),
+            patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+            patch.object(rec, "_assign_nets"),
+        ):
+            return rec.apply(analysis, **kw)
+
+    def _rec(self):
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = Path("a.kicad_sch")
+        rec._pcb_path = Path("a.kicad_pcb")
+        return rec
+
+    def test_apply_without_flag_never_removes(self, tmp_path):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", False)])
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM], stranded_copper=[{"kind": "segment"}])
+        changes = self._apply(self._rec(), pcb, analysis, dry_run=False, output=tmp_path / "o")
+        pcb.remove_segments.assert_not_called()
+        assert all(c.change_type != "remove_stranded_copper" for c in changes)
+
+    def test_apply_dry_run_lists_without_removing(self):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", False)])
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM], stranded_copper=[{"kind": "segment"}])
+        changes = self._apply(self._rec(), pcb, analysis, dry_run=True, remove_stranded=True)
+        pcb.remove_segments.assert_not_called()
+        rm = [c for c in changes if c.change_type == "remove_stranded_copper"]
+        assert len(rm) == 1 and not rm[0].applied and rm[0].new_value == "would remove"
+
+    def test_apply_confirm_removes_unlocked_keeps_locked(self, tmp_path):
+        pcb = self._pcb([((0, 0), (1, 0), "GND", "s1", False), ((0, 0), (0, 1), "GND", "s2", True)])
+        analysis = SyncAnalysis(pad_net_mismatches=[self.MM], stranded_copper=[{"kind": "segment"}])
+        changes = self._apply(
+            self._rec(), pcb, analysis, dry_run=False, remove_stranded=True, output=tmp_path / "o"
+        )
+        removed = pcb.remove_segments.call_args[0][0]
+        assert [s.uuid for s in removed] == ["s1"]
+        vals = {
+            c.reference: c.new_value for c in changes if c.change_type == "remove_stranded_copper"
+        }
+        assert vals["segment:s2"] == "locked (skipped)"
+
+    SWAP = {
+        "type": "update_footprint",
+        "reference": "R1",
+        "old_value": "Old:FP",
+        "new_value": "New:FP",
+    }
+
+    def _swap_pcb(self, segs, vias, new_pad_numbers):
+        """PCB whose R1 has pads 1 and 2 on GND; the swap keeps only new_pad_numbers."""
+        from types import SimpleNamespace as NS
+
+        pcb = self._pcb(segs, vias)
+        old_fp = NS(
+            reference="R1",
+            position=(0.0, 0.0),
+            rotation=0.0,
+            layer="F.Cu",
+            value="",
+            pads=[
+                NS(number="1", net_name="GND", net_number=1),
+                NS(number="2", net_name="GND", net_number=1),
+            ],
+        )
+        pcb.footprints = [old_fp, *pcb.footprints[1:]]
+        pcb.get_footprint.side_effect = lambda r: old_fp if r == "R1" else None
+        pcb.get_pad_position.side_effect = lambda r, n: {
+            ("R1", "2"): (0.0, 0.0),
+            ("R1", "1"): (0.0, 5.0),
+            ("R2", "1"): (10.0, 0.0),
+        }.get((r, n))
+        scratch = MagicMock()
+        from types import SimpleNamespace as NS2
+
+        scratch.add_footprint.return_value = NS2(pads=[NS2(number=n) for n in new_pad_numbers])
+        return pcb, scratch
+
+    def test_removed_pad_seed_only_for_pads_absent_from_new_footprint(self):
+        pcb, scratch = self._swap_pcb([], [], ["1"])
+        rec = self._rec()
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=scratch):
+            seeds = rec._removed_pad_seeds(pcb, [self.SWAP])
+        assert seeds == [{"reference": "R1", "pad": "2", "pcb_net": "GND"}]
+
+    def test_pad_present_in_both_footprints_is_not_seeded(self):
+        pcb, scratch = self._swap_pcb([], [((0, 0), "GND", "v1")], ["1", "2"])
+        rec = self._rec()
+        with patch("kicad_tools.schema.pcb.PCB.load", return_value=scratch):
+            assert rec._removed_pad_seeds(pcb, [self.SWAP]) == []
+
+    def test_via_stub_on_removed_pad_is_reported_and_removed_on_apply(self, tmp_path):
+        # Segment is deleted by the swap itself; the via at the pad is not.
+        pcb, scratch = self._swap_pcb(
+            [((0, 0), (1, 0), "GND", "s1", False)], [((1, 0), "GND", "v1")], ["1"]
+        )
+        rec = self._rec()
+        analysis = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact", actions=(self.SWAP,))],
+            stranded_copper=[{"kind": "via"}],
+        )
+        pcb.remove_footprint.side_effect = lambda r: None
+        pcb.add_footprint.return_value = scratch.add_footprint.return_value
+        with patch("kicad_tools.schema.pcb.PCB.load", side_effect=[pcb, scratch]):
+            with (
+                patch.object(rec, "_compute_placement_start", return_value=(0, 0, 0)),
+                patch.object(rec, "_assign_nets"),
+            ):
+                changes = rec.apply(
+                    analysis, dry_run=False, remove_stranded=True, output=tmp_path / "o"
+                )
+        removed_vias = pcb.remove_vias.call_args[0][0]
+        assert [v.uuid for v in removed_vias] == ["v1"]
+        assert any(c.change_type == "remove_stranded_copper" for c in changes)
+
+    def test_analysis_wiring(self):
+        a = SyncAnalysis(stranded_copper=[{"kind": "via"}])
+        assert not a.is_in_sync and a.has_actionable_items
+        assert a.to_dict()["summary"]["stranded_copper"] == 1
+        assert "Stranded copper" in a.summary()
+
+    def test_cli_requires_apply(self, capsys):
+        from kicad_tools.cli.sync_cmd import main
+
+        assert main(["--analyze", "--remove-stranded", "--schematic", "a", "--pcb", "b"]) == 1
+        assert "--remove-stranded requires --apply" in capsys.readouterr().err

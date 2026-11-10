@@ -295,6 +295,15 @@ def _name_match_rank(sch_net: str, pcb_net: str) -> int:
     return 2
 
 
+def is_unconnected_pad_net(net_name: str, ref: str, pad: str) -> bool:
+    """Return True for KiCad's no-connect sentinel net naming this exact pad.
+
+    KiCad names an explicitly no-connect pad's net
+    ``unconnected-(<REF>-<PIN>-Pad<PAD>)``.
+    """
+    return net_name.startswith(f"unconnected-({ref}-") and net_name.endswith(f"-Pad{pad})")
+
+
 def _format_pads(pads: list[tuple[str, str]], limit: int = 5) -> str:
     """Render ``[("C1", "1"), ...]`` as ``C1.1, C2.1`` (truncated past ``limit``)."""
     shown = ", ".join(f"{ref}.{pad}" for ref, pad in pads[:limit])
@@ -601,6 +610,18 @@ class NetlistValidator:
         self._check_global_net_names(result)
         self._check_pad_net_assignments(result, self._pcb_pad_nets())
 
+    def pad_net_mismatches(self) -> list[SyncIssue]:
+        """Return per-pad net mismatches (connectivity-based, issue #8703).
+
+        Runs the same comparison as :meth:`validate` (by connectivity, not
+        net-name equality) and returns only the pad-level findings, i.e. the
+        issues that name a reference and pad.  Whole-net findings such as
+        swapped net names are excluded.
+        """
+        result = SyncResult()
+        self._check_pad_net_assignments(result, self._pcb_pad_nets())
+        return [i for i in result.issues if i.category == "net_mismatch" and i.reference and i.pin]
+
     def _pcb_pad_nets(self) -> dict[tuple[str, str], str | None]:
         """Build ``{(ref, pad) -> net | None}`` from the PCB.
 
@@ -617,11 +638,7 @@ class NetlistValidator:
             if not ref or ref.startswith("#") or not pad.number:
                 continue
             name: str | None = pad.net_name or None
-            if (
-                name is not None
-                and name.startswith(f"unconnected-({ref}-")
-                and name.endswith(f"-Pad{pad.number})")
-            ):
+            if name is not None and is_unconnected_pad_net(name, ref, pad.number):
                 name = None
             key = (ref, pad.number)
             # A footprint may repeat a pad number (e.g. a thermal pad

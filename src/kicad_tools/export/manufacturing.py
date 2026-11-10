@@ -87,6 +87,11 @@ class ManufacturingConfig(AssemblyConfig):
     # relaxed built-in minimums instead of KiCad's stricter defaults.
     emit_drc_constraints: bool = True
 
+    # When True (default), the emitted ``.kicad_dru`` carries per-net ampacity
+    # ``track_width`` floors from the net-class-map sidecar.  False
+    # (``--no-ampacity-rules``) emits none (#8612).
+    emit_ampacity_rules: bool = True
+
 
 @dataclass
 class ManufacturingResult:
@@ -972,10 +977,31 @@ class ManufacturingPackage:
                 logger.info(fab_override_msg)
 
         rules = self._apply_stackup_copper(rules)
-        net_classes = self._load_net_classes(result)
-
         dru_path = Path(self.pcb_path).with_suffix(".kicad_dru")
+        try:
+            dru_text_before = dru_path.read_text(encoding="utf-8")
+        except OSError:
+            dru_text_before = None
         dru_before = self._ampacity_block(dru_path)
+
+        max_width_mm: float | None = None
+        net_classes = None
+        if not self.config.emit_ampacity_rules:
+            logger.info("Ampacity rules disabled (--no-ampacity-rules)")
+        else:
+            from ..manufacturers.attach_zone_dru import has_designer_clearance_rule
+
+            if has_designer_clearance_rule(dru_text_before):
+                result.warnings.append(
+                    f"Skipped ampacity rules: {dru_path.name} carries the designer's own "
+                    "clearance rules and was not extended with track_width floors."
+                )
+            else:
+                net_classes = self._load_net_classes(result)
+                net_classes = self._drop_waived_ampacity_nets(net_classes, result)
+                max_width_mm = self._largest_board_dimension()
+                if net_classes and max_width_mm is not None:
+                    self._warn_oversize_ampacity(net_classes, rules, max_width_mm, result)
 
         try:
             written = write_drc_constraints(
@@ -985,6 +1011,7 @@ class ManufacturingPackage:
                 layers=layers,
                 copper_oz=copper_oz,
                 net_classes=net_classes,
+                max_ampacity_width_mm=max_width_mm,
             )
         except OSError as e:
             logger.warning("Could not write DRC-constraint files: %s", e)
@@ -1005,6 +1032,113 @@ class ManufacturingPackage:
             logger.warning(msg)
             result.warnings.append(msg)
 
+        # #8612: the designer owns this file; say so whenever export rewrote it.
+        try:
+            dru_text_after = dru_path.read_text(encoding="utf-8")
+        except OSError:
+            dru_text_after = None
+        if (
+            dru_text_before is not None
+            and dru_text_after is not None
+            and dru_text_after != dru_text_before
+        ):
+            note = f"Export modified {dru_path.name} (generated DRC rules)."
+            logger.info(note)
+            result.warnings.append(note)
+
+    def _largest_board_dimension(self) -> float | None:
+        """Largest Edge.Cuts extent in mm, or None when it cannot be determined."""
+        try:
+            from ..core.board_outline import board_outline_bounds
+            from ..schema.pcb import PCB
+
+            bounds = board_outline_bounds(PCB.load(str(self.pcb_path))._sexp)
+        except Exception as e:  # noqa: BLE001 - best effort
+            logger.debug("Could not read board outline for DRU: %s", e)
+            return None
+        if bounds is None:
+            return None
+        x0, y0, x1, y1 = bounds
+        return max(x1 - x0, y1 - y0)
+
+    @staticmethod
+    def _warn_oversize_ampacity(net_classes, rules, max_width_mm, result) -> None:
+        """Warn for each ampacity minimum wider than the board (skipped by generate_dru)."""
+        from ..physics.ampacity import width_for_current
+
+        for nc in net_classes:
+            if nc.target_ampacity is None:
+                continue
+            layers = [("external", rules.outer_copper_oz)]
+            if rules.inner_copper_oz > 0:
+                layers.append(("internal", rules.inner_copper_oz))
+            for layer, oz in layers:
+                width = width_for_current(nc.target_ampacity, copper_weight_oz=oz, layer=layer)
+                if width > max_width_mm:
+                    msg = (
+                        f"Skipped ampacity rule '{nc.name} {nc.target_ampacity:g}A, {layer}': "
+                        f"minimum {width:.1f} mm exceeds the board's largest dimension "
+                        f"({max_width_mm:.1f} mm) and can never be met."
+                    )
+                    logger.warning(msg)
+                    result.warnings.append(msg)
+
+    def _drop_waived_ampacity_nets(self, net_classes, result: ManufacturingResult):
+        """Drop nets whose ampacity is waived or current-path reinforced (#8612).
+
+        A malformed sidecar is warned about and the floors are kept.
+        """
+        if not net_classes:
+            return net_classes
+        from dataclasses import replace
+
+        exempt: set[str] = set()
+        pcb_path = Path(self.pcb_path)
+        try:
+            from ..validate.rules.waivers import discover_waivers_sidecar, load_waivers
+
+            wpath = discover_waivers_sidecar(pcb_path)
+            if wpath is not None:
+                for entry in load_waivers(wpath).entries:
+                    if entry.rule not in ("ampacity", "path_ampacity"):
+                        continue
+                    nets = set(entry.nets)
+                    if entry.key:
+                        parts = entry.key.split("|")
+                        if len(parts) > 2:
+                            nets.update(n for n in parts[2].split(",") if n)
+                    exempt |= nets
+        except Exception as e:  # noqa: BLE001
+            msg = f"ignoring unreadable waivers sidecar for ampacity rules: {e}"
+            logger.warning(msg)
+            result.warnings.append(msg)
+        try:
+            from ..router.current_paths import (
+                discover_current_paths_sidecar,
+                load_current_path_specs,
+            )
+
+            cpath = discover_current_paths_sidecar(pcb_path)
+            if cpath is not None:
+                exempt |= {spec.net_name for spec in load_current_path_specs(cpath)}
+        except Exception as e:  # noqa: BLE001
+            msg = f"ignoring unreadable current-paths sidecar for ampacity rules: {e}"
+            logger.warning(msg)
+            result.warnings.append(msg)
+        if not exempt:
+            return net_classes
+
+        kept = []
+        for nc in net_classes:
+            scope = tuple(getattr(nc, "net_scope", ()) or ())
+            if not scope:
+                kept.append(nc)
+                continue
+            remaining = tuple(n for n in scope if n not in exempt)
+            if remaining:
+                kept.append(replace(nc, net_scope=remaining))
+        return kept
+
     @staticmethod
     def _ampacity_block(dru_path: Path) -> list[str]:
         """Return the ampacity rule blocks of a ``.kicad_dru`` (empty if none).
@@ -1017,6 +1151,10 @@ class ManufacturingPackage:
             text = dru_path.read_text(encoding="utf-8")
         except OSError:
             return []
+        return ManufacturingPackage._ampacity_block_text(text)
+
+    @staticmethod
+    def _ampacity_block_text(text: str) -> list[str]:
         return re.findall(r'\(rule "Ampacity Min Width[^"]*"[^\n]*\n[^\n]*\n[^\n]*', text)
 
     def _apply_stackup_copper(self, rules):

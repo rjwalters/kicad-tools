@@ -424,3 +424,61 @@ def test_hierarchical_ladder_unchanged_for_preset_counts(
     ladder = adaptive._stacks_to_try()
     assert [s.num_layers for s in ladder] == expected
     assert all(any(s is preset for preset in adaptive.LAYER_STACKS) for s in ladder)
+
+
+# ---------------------------------------------------------------------------
+# Issue #8693: KiCad 10 writes a zone's net as ``(net "X")``, not ``(net_name)``
+# ---------------------------------------------------------------------------
+
+
+def _zone_k10(layer: str, net: str) -> str:
+    return f'  (zone (net "{net}") (layer "{layer}") (hatch edge 0.5))\n'
+
+
+@pytest.mark.parametrize("zone", [_zone, _zone_k10], ids=["legacy", "kicad10"])
+def test_four_layer_inner_pour_is_plane_in_both_spellings(zone) -> None:
+    stack = detect_layer_stack(_layer_table(4, extra=zone("In1.Cu", "GND")))
+    assert stack.name == "4-Layer (auto-detected)"
+    assert [(layer.name, layer.layer_type, layer.plane_net) for layer in stack.layers] == [
+        ("F.Cu", LayerType.SIGNAL, ""),
+        ("In1.Cu", LayerType.PLANE, "GND"),
+        ("In2.Cu", LayerType.PLANE, ""),
+        ("B.Cu", LayerType.SIGNAL, ""),
+    ]
+
+
+@pytest.mark.parametrize("zone", [_zone, _zone_k10], ids=["legacy", "kicad10"])
+def test_n_layer_inner_pours_are_planes_in_both_spellings(zone) -> None:
+    text = _layer_table(8, extra=zone("In1.Cu", "GND") + zone("In6.Cu", "+3V3"))
+    stack = {layer.name: layer.layer_type for layer in detect_layer_stack(text).layers}
+    assert stack["In1.Cu"] == LayerType.PLANE
+    assert stack["In6.Cu"] == LayerType.PLANE
+    assert stack["In2.Cu"] == LayerType.SIGNAL
+
+
+def test_kicad10_outer_zone_is_not_a_plane() -> None:
+    stack = detect_layer_stack(_layer_table(8, extra=_zone_k10("F.Cu", "GND")))
+    assert all(
+        layer.layer_type == LayerType.SIGNAL for layer in stack.layers if layer.name != "B.Cu"
+    )
+
+
+def test_numeric_net_without_name_is_not_read_as_a_net() -> None:
+    zone = '  (zone (net 1) (layer "In1.Cu") (hatch edge 0.5))\n'
+    stack = detect_layer_stack(_layer_table(4, extra=zone))
+    assert stack.name != "4-Layer (auto-detected)"
+
+
+@pytest.mark.parametrize("zone", [_zone, _zone_k10], ids=["legacy", "kicad10"])
+def test_redetection_on_routed_output_matches_input_stack(zone) -> None:
+    """Half 1 of #8693: the chained pass re-detects from ``-o`` under auto.
+
+    Routing adds segments/vias only; it never edits the layer table or zones,
+    so re-detection yields the stack the outer run resolved.
+    """
+    base = _layer_table(4, extra=zone("In1.Cu", "GND") + zone("In2.Cu", "+3V3"))
+    routed = base.rstrip()[:-1] + (
+        '  (segment (start 0 0) (end 1 0) (width 0.2) (layer "F.Cu") (net 1))\n'
+        '  (via (at 1 0) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))\n)\n'
+    )
+    assert detect_layer_stack(routed) == detect_layer_stack(base)
