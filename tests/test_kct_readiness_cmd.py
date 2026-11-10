@@ -1979,6 +1979,68 @@ def test_bundled_pcb_never_references_a_kiprjmod_model_missing_from_the_archive(
         assert "3dshapes/absent.wrl" not in zf.namelist()
 
 
+def _provenance_options(tmp_path, *, pcb_in_zip=True):
+    from kicad_tools.cli.readiness_cmd import ReadinessOptions
+
+    board = make_board(tmp_path)
+    output = board / "output"
+    pcb = output / PCB_NAME
+    pcb.write_text("(kicad_pcb)\n")
+    (output / "fp-lib-table").write_text("(fp_lib_table)\n")
+    (output / "local.pretty").mkdir()
+    (output / "local.pretty" / "FP.kicad_mod").write_text("(footprint FP)\n")
+    manufacturing = output / "manufacturing"
+    manufacturing.mkdir()
+    with zipfile.ZipFile(manufacturing / "kicad_project.zip", "w") as zf:
+        if pcb_in_zip:
+            zf.writestr(pcb.name, pcb.read_bytes())
+    return ReadinessOptions(
+        board_dir=board,
+        pcb=pcb,
+        schematic=None,
+        project=None,
+        manufacturer="jlcpcb",
+        mode="pcb_only",
+        output_dir=manufacturing,
+        evidence_dir=output / "readiness",
+    )
+
+
+def test_provenance_hints_reexport_when_only_local_libraries_missing(tmp_path, monkeypatch):
+    """Pre-#8727 bundles lack fp-lib-table / *.pretty; say to re-export (#8749)."""
+    options = _provenance_options(tmp_path)
+    lib = [
+        options.pcb.parent / "fp-lib-table",
+        options.pcb.parent / "local.pretty" / "FP.kicad_mod",
+    ]
+    monkeypatch.setattr(readiness_cmd, "_required_sources", lambda o: [o.pcb.resolve(), *lib])
+    problems = readiness_cmd._verify_project_provenance(options)
+    assert any("fp-lib-table is absent" in p for p in problems)
+    assert any("local.pretty/FP.kicad_mod is absent" in p for p in problems)
+    assert problems[-1] == readiness_cmd._PROJECT_LIB_REEXPORT_HINT
+    assert "re-run kct export" in problems[-1]
+
+
+def test_provenance_no_hint_when_board_file_missing(tmp_path, monkeypatch):
+    options = _provenance_options(tmp_path, pcb_in_zip=False)
+    lib = [options.pcb.parent / "fp-lib-table"]
+    monkeypatch.setattr(readiness_cmd, "_required_sources", lambda o: [o.pcb.resolve(), *lib])
+    problems = readiness_cmd._verify_project_provenance(options)
+    assert any(f"{PCB_NAME} is absent" in p for p in problems)
+    assert not any("re-run kct export" in p for p in problems)
+
+
+def test_provenance_no_hint_when_library_bytes_differ(tmp_path, monkeypatch):
+    options = _provenance_options(tmp_path)
+    lib = options.pcb.parent / "fp-lib-table"
+    with zipfile.ZipFile(options.output_dir / "kicad_project.zip", "a") as zf:
+        zf.writestr("fp-lib-table", "(different)\n")
+    monkeypatch.setattr(readiness_cmd, "_required_sources", lambda o: [o.pcb.resolve(), lib])
+    problems = readiness_cmd._verify_project_provenance(options)
+    assert any("differs from the checked source" in p for p in problems)
+    assert not any("re-run kct export" in p for p in problems)
+
+
 # ---------------------------------------------------------------------------
 # Copper cleanup step (issue #8218)
 # ---------------------------------------------------------------------------

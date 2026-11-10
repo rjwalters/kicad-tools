@@ -2473,10 +2473,30 @@ def _normalize_project_archive(options: ReadinessOptions) -> None:
     os.replace(tmp, archive)
 
 
+_PROJECT_LIB_REEXPORT_HINT = (
+    "bundle predates the exporter writing project-local libraries; "
+    "re-run kct export (or kct readiness --generate)"
+)
+
+
+def _is_project_local_library_member(relative: str) -> bool:
+    """True for ``fp-lib-table``/``sym-lib-table``, ``*.pretty/**``, ``footprints/**``, ``symbols/**``."""
+    parts = relative.split("/")
+    if parts[-1] in ("fp-lib-table", "sym-lib-table"):
+        return True
+    return any(part.endswith(".pretty") or part in ("footprints", "symbols") for part in parts[:-1])
+
+
 def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
-    """Match PCB and native dependencies by relative path, not basename."""
+    """Match PCB and native dependencies by relative path, not basename.
+
+    When every problem is a project-local library member missing from the zip,
+    one extra line says the bundle predates the exporter writing them (#8749).
+    Pass/fail is unchanged.
+    """
     archive = options.output_dir / "kicad_project.zip"
     problems: list[str] = []
+    missing_members: list[str] = []
     try:
         sources = set(_required_sources(options)) | {options.pcb.resolve()}
         if options.schematic is not None:
@@ -2490,12 +2510,19 @@ def _verify_project_provenance(options: ReadinessOptions) -> list[str]:
                 relative = names_for[source]
                 if relative not in names:
                     problems.append(f"{relative} is absent from kicad_project.zip")
+                    missing_members.append(relative)
                 elif zf.read(relative) != source.read_bytes():
                     problems.append(
                         f"{relative} inside kicad_project.zip differs from the checked source"
                     )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         problems.append(f"Project provenance could not be verified: {exc}")
+    if (
+        missing_members
+        and len(problems) == len(missing_members)
+        and all(_is_project_local_library_member(m) for m in missing_members)
+    ):
+        problems.append(_PROJECT_LIB_REEXPORT_HINT)
     return problems
 
 
