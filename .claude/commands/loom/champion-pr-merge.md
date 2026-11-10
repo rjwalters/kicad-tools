@@ -535,6 +535,22 @@ behavior is byte-for-byte unchanged from before #6850.
   malformed, the entry is skipped in both criteria. Opt-in only; no class
   enables it by default. The waiver is recorded in the pre-merge comment's
   critical-file bullet (scope `critical, additive-migrations waiver`).
+- `lockedDepsOnly` (2am#6942 ruling 2026-11-07, optional, default `false`) — a
+  literal `true` makes the class a `criticalFilesOnly` class (same matching, same
+  `merge-risk` ineligibility) that covers a `Cargo.toml` critical-file hit **only
+  when** `loom-daemon forge locked-deps-only <pr>` exits 0: no `Cargo.lock` in the
+  PR adds a `source =`/`checksum =` line or changes or drops an existing package
+  (a new registry or git package, a version bump), no changed `Cargo.toml` line
+  names `git =`, `registry =`, `build =`, `links =`, `[patch.*]`, `[replace]` or a
+  `path =` outside the repo, and a manifest change comes with a `Cargo.lock`
+  change. This is the new-workspace-crate-with-already-locked-deps shape; the
+  class exists because a `criticalFilesOnly` class never sees `Cargo.lock`. Every
+  critical-file hit the class covers must be a `Cargo.toml`, since the verb proves
+  nothing about other files. A non-zero exit, a forge error or an older daemon
+  without the verb leaves the hold as today. The kept set is untouched. Not a
+  boolean `true`/`false`: malformed, the entry is skipped in both criteria. Opt-in
+  only; no class enables it by default. The waiver is recorded in the pre-merge
+  comment's critical-file bullet (scope `critical, locked-deps-only waiver`).
 - `excludeFilePatterns` (#12528, optional) — globs, matched like
   `filePatterns`. A PR with **any** changed file matching one is disqualified
   from the class (e.g. `.github/workflows/*publish*`, `*release*`,
@@ -777,7 +793,8 @@ standing_auth_class_hits() {
 # STANDING_AUTH_COVERED (the files the classes matched), and STANDING_AUTH_WHY
 # (one line per class/hit that failed a check, for the hold comment), and
 # STANDING_AUTH_ADDITIVE=1 when a passing additiveMigrations class (#13102)
-# lifted the migrations kept-set entry for this PR. Every
+# lifted the migrations kept-set entry for this PR, and STANDING_AUTH_LOCKED=1
+# when a passing lockedDepsOnly class covered a Cargo.toml hit. Every
 # check fails closed. Reads PR_NUMBER, CONFIG_FILE, LABELS (judgeApproval),
 # read_ci_checks (greenCi) and, in "any" mode, FAST_PATH_FILES. In critical
 # mode $2 is the critical-files criterion's own $FILES and CRITICAL_PATTERNS its pattern list.
@@ -785,8 +802,9 @@ standing_auth_eval() {
   local mode="$1" crit_files="${2:-}" i NUM_CLASSES CLASS_ID PATTERNS CONDITIONS EXCLUDES FORBIDDEN PRIVILEGED
   local MATCH_FILES CHANGED_COUNT CRIT_DIFF="" CRIT_PATS_JSON CRIT_MATCH_FILES="" CFO ONLY_CRIT CLASS_FILES CLASS_DIFF
   local CLASS_HITS UNION_HITS="[]" USED_IDS="" CRIT_NAMES UNCOVERED
-  local ADD_MIG ADD_MIG_STATE="" ADD_MIG_LIFTED=0
+  local ADD_MIG ADD_MIG_STATE="" ADD_MIG_LIFTED=0 LOCKED_DEPS LOCKED_STATE="" LOCKED_USED=0
   STANDING_AUTH_ADDITIVE=0
+  STANDING_AUTH_LOCKED=0
   STANDING_AUTH_RESULT="NOT ELIGIBLE"
   STANDING_AUTH_ID=""
   STANDING_AUTH_WHY=""
@@ -863,6 +881,16 @@ standing_auth_eval() {
       *) continue ;;
     esac
 
+    # lockedDepsOnly (2am#6942): same shape as additiveMigrations. `true` makes the
+    # class criticalFilesOnly-shaped (critical mode only) and gates its Cargo.toml
+    # coverage on the locked-deps-only verb. Any other value is malformed.
+    LOCKED_DEPS=0
+    case "$(jq -c ".champion.standingAuthorizations[$i].lockedDepsOnly" "$CONFIG_FILE")" in
+      null | false) ;;
+      true) [ "$mode" = "critical" ] || continue; LOCKED_DEPS=1; ONLY_CRIT=1 ;;
+      *) continue ;;
+    esac
+
     # Critical mode: only an explicit boolean true opts the class in.
     if [ "$mode" = "critical" ] && [ "$ONLY_CRIT" -eq 0 ]; then
       [ "$(jq -r ".champion.standingAuthorizations[$i].coversCriticalFiles == true" "$CONFIG_FILE")" = "true" ] || continue
@@ -880,6 +908,10 @@ standing_auth_eval() {
       printf '%s' "$CLASS_HITS" | jq -e 'length > 0' >/dev/null 2>&1 || continue
       CLASS_DIFF="$CLASS_HITS"
       CLASS_FILES=$(printf '%s' "$CLASS_HITS" | jq -r '.[] | .filename, (.previous_filename // empty)') || continue
+      # lockedDepsOnly: the verb proves nothing about a non-Cargo.toml hit.
+      if [ "$LOCKED_DEPS" -eq 1 ]; then
+        printf '%s' "$CLASS_HITS" | jq -e 'all(.[]; (.filename | split("/") | last) == "Cargo.toml")' >/dev/null 2>&1 || { STANDING_AUTH_WHY+="class '$CLASS_ID': lockedDepsOnly covers only Cargo.toml hits"$'\n'; continue; }
+      fi
     fi
 
     # Fail safe: a malformed entry (no id, no patterns, or no conditions)
@@ -933,6 +965,17 @@ standing_auth_eval() {
       done <<<"$EXCLUDES"
     done <<<"$CLASS_FILES"
     [ "$ALL_MATCH" -eq 0 ] && continue
+    # lockedDepsOnly (2am#6942): the class covers its Cargo.toml hits only when the
+    # verb clears the PR. Run once; any non-zero exit (new registry/git package,
+    # version bump, source key, no lock change, forge error, older daemon) skips it.
+    LOCKED_USED=0
+    if [ "$LOCKED_DEPS" -eq 1 ]; then
+      if [ -z "$LOCKED_STATE" ]; then
+        if loom-daemon forge locked-deps-only "$PR_NUMBER" >/dev/null 2>&1; then LOCKED_STATE=ok; else LOCKED_STATE=held; fi
+      fi
+      [ "$LOCKED_STATE" = ok ] || { STANDING_AUTH_WHY+="class '$CLASS_ID': locked-deps-only verb did not clear the PR"$'\n'; continue; }
+      LOCKED_USED=1
+    fi
     if [ "$mode" = "critical" ]; then
       ADD_MIG_LIFTED=0
       while IFS= read -r file; do
@@ -1063,6 +1106,7 @@ standing_auth_eval() {
         # passes once the classes together cover every hit.
         UNION_HITS=$(printf '%s\n%s' "$UNION_HITS" "$CLASS_HITS" | jq -s -c '.[0] + .[1] | unique_by(.filename)') || continue
         [ "$ADD_MIG_LIFTED" -eq 1 ] && STANDING_AUTH_ADDITIVE=1
+        [ "$LOCKED_USED" -eq 1 ] && STANDING_AUTH_LOCKED=1
         USED_IDS="${USED_IDS:+$USED_IDS,}$CLASS_ID"
         continue
       fi
@@ -1139,6 +1183,9 @@ It is eligible only when **all** hold, each read live in this pass:
   comment-trust files, `config.json`): the gate never waives a change to itself (#12945). A file
   under `.loom/scripts/tests/` (name and previous name both) is not a gate path, since no merge
   path sources it: it is compared byte-for-byte like any kept-set file (#13486);
+  (This is Champion's proof. The daemon's own strict landing of its resync PR instead lets
+  byte-identical gate files land without a Judge when the tag is a published release, per
+  operator ruling r7-q33, #13665; a PR the daemon left for the lane still takes this rule.)
 - `.loom/install-metadata.json` at the PR head has `loom_version` equal to `<X.Y.Z>`, and
   `refs/tags/v<X.Y.Z>` exists in `rjwalters/loom`;
 - the files read is complete (count equals `changed_files`) and at least one changed file is a
@@ -2073,6 +2120,7 @@ standing_auth_load_config             # resolved effective config (#12591)
 STANDING_AUTH_RESULT="NOT ELIGIBLE"   # never inherit the merge-risk criterion's ELIGIBLE
 STANDING_AUTH_ID=""
 STANDING_AUTH_ADDITIVE=0
+STANDING_AUTH_LOCKED=0
 # Waiver record (#13031): set only when a class waives this criterion; the
 # pre-merge comment renders its critical-file bullet from these, so a waiver is
 # never reported as "No critical files modified".
@@ -2145,6 +2193,12 @@ if [ "$STANDING_AUTH_RESULT" = "ELIGIBLE" ] && [ "$STANDING_AUTH_SCOPE" = "criti
     # additiveMigrations class (#13102): migrations kept-set entry lifted by the verb.
     CRITERION3_WAIVER_SCOPE="critical, additive-migrations waiver"
     echo "PASS (standing authorization '$STANDING_AUTH_ID', #13102): additive-migrations waiver — migration files verified additive by loom-daemon forge additive-migrations; critical files: $STANDING_AUTH_COVERED"
+    exit 0
+  fi
+  if [ "$STANDING_AUTH_LOCKED" -eq 1 ]; then
+    # lockedDepsOnly class (2am#6942): Cargo.toml hit covered because the verb proved no third-party package is added.
+    CRITERION3_WAIVER_SCOPE="critical, locked-deps-only waiver"
+    echo "PASS (standing authorization '$STANDING_AUTH_ID', 2am#6942): locked-deps-only waiver — no new third-party package, verified by loom-daemon forge locked-deps-only; critical files: $STANDING_AUTH_COVERED"
     exit 0
   fi
   # #13042: STANDING_AUTH_ID names every class used (comma-joined); each hit

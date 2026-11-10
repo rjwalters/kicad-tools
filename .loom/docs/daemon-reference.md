@@ -2294,6 +2294,26 @@ directory, and otherwise prints an `un-synced drift` line naming the files.
 Rollout: keep running `resync-installed.sh` (or a fleet wrapper around it) until
 a release with these surfaces is the fleet floor.
 
+#### Landing the resync PR on the waiver proof (#13487, #13665)
+
+The daemon merges its own `chore(loom): resync installed Loom to vX` PR, with no
+Judge or Champion, when a **strict** proof holds and checks are green on the
+same head: every changed file is an added/modified byte-copy (blob SHA) of its
+`defaults/` counterpart at tag `vX` (`.loom/roles/<f>` maps to `defaults/roles/<f>`,
+`.agents/skills/<f>` to `defaults/.agents/skills/<f>`). Operator ruling r7-q33
+makes the release tag the review point for gate content, so **byte-identical
+merge-gate files land without a Judge**, provided the tag is a published,
+non-draft GitHub Release in `rjwalters/loom` (a bare ref is not enough). Any
+other outcome keeps the `loom:review-requested` lane: a differing byte, a
+rename or removal, an unmapped file or one outside the install set, or a path
+pinned in `.loom/resync-ignore` at the PR head (or an unreadable pin file). The
+Repo Skills kind still refuses gate paths, and Champion's own (non-strict)
+`forge resync-waiver` proof is unchanged; `forge resync-waiver <PR> --strict` replays the
+daemon's strict proof read-only (#13668). The merge comment and the
+`landed-by-daemon` status line record the tag, the file count and
+`gate_paths_included`; the daemon log line `resync_waiver: PR #N landed:` carries
+the same fields.
+
 ### Checkout fast-forward (#10869)
 
 A resync lands on a repo's default branch **on the forge**. Each host

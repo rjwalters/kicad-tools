@@ -1689,6 +1689,56 @@ else
     fail "(#4403) removal not reported"
 fi
 
+# --- (#13680) a pin on the generic guard is not a dead pin ---------------------
+echo "Test group 15d: pin on hooks/guard-destructive-generic.sh is not reported dead (#13680)"
+_mk_canonical() {
+    mkdir -p "$1/.claude/skills/repo/hooks"
+    printf '#!/usr/bin/env bash\n# rjwalters/repo#29 canonical guard\n# implements worktree-write-confinement\n# masks --comment|--search and --arg|--argjson\n# denies gh-comment-body-literal-at\necho canonical\n' \
+        > "$1/.claude/skills/repo/hooks/guard-destructive.sh"
+}
+for FORM in "hooks/guard-destructive-generic.sh" ".loom/hooks/guard-destructive-generic.sh"; do
+    REPO="$(make_fixture)"
+    _mk_canonical "$REPO"
+    printf '#!/usr/bin/env bash\necho vendored\n' > "$REPO/defaults/hooks/guard-destructive-generic.sh"
+    printf '#!/usr/bin/env bash\necho vendored\n' > "$REPO/.loom/hooks/guard-destructive-generic.sh"
+    printf '%s  # keep\nhooks/gaurd-typo.sh  # dead\n' "$FORM" > "$REPO/.loom/resync-ignore"
+    for FLAGS in "" "--dry-run"; do
+        OUT="$(cd "$REPO" && bash "$SCRIPT" $FLAGS 2>&1)"
+        if ! grep -q "pin had no effect: '$FORM'" <<<"$OUT"; then
+            pass "(#13680) canonical present, pin '$FORM' ${FLAGS:-apply}: not reported dead"
+        else
+            fail "(#13680) canonical present, pin '$FORM' ${FLAGS:-apply}: wrongly reported dead"
+        fi
+        if grep -q "pin had no effect: 'hooks/gaurd-typo.sh'" <<<"$OUT"; then
+            pass "(#13680) mistyped pin still reported dead (${FLAGS:-apply})"
+        else
+            fail "(#13680) mistyped pin no longer reported dead (${FLAGS:-apply})"
+        fi
+    done
+done
+
+echo "Test group 15e: canonical guard absent + pin on generic guard is honoured, not dead (#13680)"
+REPO="$(make_fixture)"
+printf '#!/usr/bin/env bash\necho vendored-new\n' > "$REPO/defaults/hooks/guard-destructive-generic.sh"
+printf 'LOCAL-GUARD\n' > "$REPO/.loom/hooks/guard-destructive-generic.sh"
+printf 'hooks/guard-destructive-generic.sh  # keep\nhooks/gaurd-typo.sh  # dead\n' > "$REPO/.loom/resync-ignore"
+OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
+if [[ "$(cat "$REPO/.loom/hooks/guard-destructive-generic.sh")" == "LOCAL-GUARD" ]]; then
+    pass "(#13680) pinned local guard left unsynced"
+else
+    fail "(#13680) pinned local guard was overwritten"
+fi
+if ! grep -q "pin had no effect: 'hooks/guard-destructive-generic.sh'" <<<"$OUT"; then
+    pass "(#13680) valid pin not reported dead (canonical absent)"
+else
+    fail "(#13680) valid pin reported dead (canonical absent)"
+fi
+if grep -q "pin had no effect: 'hooks/gaurd-typo.sh'" <<<"$OUT"; then
+    pass "(#13680) mistyped pin still reported dead (canonical absent)"
+else
+    fail "(#13680) mistyped pin not reported dead (canonical absent)"
+fi
+
 # --- (#4894) capability-gap canonical guard: vendored guard must be KEPT ----
 # The canonical guard carries the repo#29 VERSION marker but NOT the
 # write-confinement CAPABILITY marker (the Repo Skills 0.7.0 shape that

@@ -225,6 +225,27 @@ target, so its `loom.role_attempt` root — present only when the tick launched
 (#9303). All of this is best-effort after the tick's child has exited; it
 never fails the tick.
 
+A launched **Judge** role-runner `loom.role_attempt` (#12362) also says whether
+the tick did anything, from local state only (its pick journal and role log;
+no forge read):
+
+- `loom.found_work` — `"true"` when the tick won a PR claim (or its prompt named
+  a PR) or wrote a verdict, else `"false"`; never absent on a launched Judge
+  tick. `loom.attempt.worked` says the interval was a real session; this says
+  the session reviewed something.
+- `loom.noop_reason` — set when `loom.found_work="false"`: the session's own
+  `LOOM_STEP_OUTCOME` reason when it printed one, else `no_claim_no_verdict`.
+- `loom.judge_verdict` — the **observed** verdict (`approved` or
+  `changes_requested`), taken from the `forge verdict-labels` write and the
+  PR's `loom:verdict-sha` marker word; **absent** when the tick wrote none. It
+  is no longer derived from the checkpoint phase (before #12362 a
+  `judge-rejected` checkpoint read as `rejected`, which is not the marker's
+  word), so sweep-checkpoint Judge spans carry no `loom.judge_verdict` until a
+  sidecar for sweep sessions lands; `loom.result` is unchanged.
+- `loom.head_sha` — the head that verdict was written against.
+- `loom.pr_number` — from the verdict write when neither the prompt nor a claim
+  named a PR.
+
 Role attempts and their runtime spans additionally carry a measured host
 memory state at each observed boundary — span begin and span end — as
 `loom.host.*` attributes (physical and available memory, the compressed page

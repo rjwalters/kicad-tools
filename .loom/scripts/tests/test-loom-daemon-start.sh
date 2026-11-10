@@ -2620,7 +2620,19 @@ pf_unit=$( cd "$PF_REPO" && env -u LOOM_WORK_FINDER -u LOOM_MAIN_HEALTH_GATE -u 
     HOME="$PF_HOME" LOOM_PID_FILE="$PF_INBOUND" LOOM_SYSTEMD_UNIT="loom-daemon-pidfile-test-$$.service" LOOM_DAEMON_BIN="$FAKE_BIN" \
     bash "$START_SCRIPT" --print-unit 2>/dev/null )
 pf_unit_value=$( echo "$pf_unit" | sed -n 's/^Environment=LOOM_PID_FILE=//p' )
-assert_eq "$PF_DERIVED" "$pf_unit_value" "#6420: an inbound LOOM_PID_FILE does NOT displace the derived pid file in the rendered systemd unit"
+# The systemd unit no longer renders LOOM_PID_FILE at all (it is an unrendered
+# key; stop/update/watchdog re-derive it via daemon_pidfile tiers 2-4). The
+# #6420 invariant now reads: no LOOM_PID_FILE line, and the inbound value
+# never leaks into the unit.
+assert_eq "" "$pf_unit_value" "#6420: the rendered systemd unit carries no LOOM_PID_FILE (derived path is not rendered, inbound value does not displace it)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if grep -qF "$PF_INBOUND" <<<"$pf_unit"; then
+    TESTS_FAILED=$((TESTS_FAILED + 1))
+    echo -e "${RED}✗${NC} #6420: an inbound LOOM_PID_FILE leaked into the rendered systemd unit"
+else
+    TESTS_PASSED=$((TESTS_PASSED + 1))
+    echo -e "${GREEN}✓${NC} #6420: an inbound LOOM_PID_FILE does not leak into the rendered systemd unit"
+fi
 
 # Control: the derived path is a real choice, not "the inbound value happens to
 # be unreadable". Moving the STATE HOME (the supported lever) does move it.
