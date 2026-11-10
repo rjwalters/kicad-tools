@@ -108,6 +108,8 @@ Indexes: [Research notes](research/README.md) (ecosystem evaluations, router exp
 
 ## Module Overview
 
+Partial listing: the main sub-packages only. See `src/kicad_tools/` for the rest.
+
 ```
 kicad_tools/
 ├── core/          # S-expression parsing, file I/O
@@ -214,6 +216,9 @@ Complete working examples are organized into two directories:
 | `05-bldc-motor-controller/` | Complex | Three-phase motor drive, thermal + high-current routing |
 | `06-diffpair-test/` | Medium | Differential-pair routing regression testbench |
 | `07-matchgroup-test/` | Medium | N-trace match-group routing regression testbench |
+| `08-precision-acquisition/` | — | Four-channel precision acquisition with USB streaming (planned; no PCB yet) |
+| `09-usbc-pd-power/` | — | USB-C PD sink with a 5 V / 3 A buck and I2C telemetry (in development) |
+| `synthetic-mains-complete/` | — | Synthetic mains-style fixture for `--complete` creepage verification (#8422); not a demo board |
 
 ---
 
