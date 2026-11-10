@@ -28,6 +28,13 @@ error), each with a location:
     (joints, bends near the via) and layers where a track already ends on
     the via centre are not flagged.
 
+``redundant_copper_covered``
+    A segment whose both ends lie on the centreline of a strictly longer,
+    no-narrower, same-net, same-layer collinear segment (~1 micron), i.e.
+    it is wholly hidden under the longer one.  Exact duplicates are only
+    reported as ``redundant_copper_duplicate``.  Repair with
+    ``kct pcb prune`` (connectivity-guarded), not ``dedupe``.
+
 Redundant *branches* and the repair passes are the scope of #8216; this
 rule only reports.
 """
@@ -59,7 +66,22 @@ DETOUR_MIN_LENGTH_MM = 2.0
 OFFCENTRE_MIN_MM = 0.1
 OFFCENTRE_MAX_MM = 0.4
 
+#: Tolerance (mm) for "lies on the centreline" in the covered check.
+COVERED_TOL_MM = 0.001
+
 _QUANT = 3
+
+
+def _point_seg_dist(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> float:
+    """Distance from point ``p`` to segment ``a``-``b``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    len2 = dx * dx + dy * dy
+    if len2 == 0:
+        return math.dist(p, a)
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2))
+    return math.dist(p, (a[0] + t * dx, a[1] + t * dy))
 
 
 def _q(point: tuple[float, float]) -> tuple[float, float]:
@@ -84,6 +106,7 @@ class RedundantCopperRule(DRCRule):
             "redundant_copper_fragments",
             "redundant_copper_detour",
             "redundant_copper_via_offcentre",
+            "redundant_copper_covered",
         ):
             results.rules_checked_by_rule[rid] = 1
 
@@ -95,6 +118,7 @@ class RedundantCopperRule(DRCRule):
             groups[(seg.net_number, seg.layer)].append(seg)
         for (_net, _layer), segs in groups.items():
             self._check_chains(segs, results)
+            self._check_covered(segs, results)
 
         self._check_via_offcentre(pcb, segments, results)
         return results
@@ -132,6 +156,38 @@ class RedundantCopperRule(DRCRule):
                     nets=(label,),
                 )
             )
+
+    def _check_covered(self, segs: list[Any], results: DRCResults) -> None:
+        """Flag segments wholly lying on a longer collinear same-net segment."""
+        for seg in segs:
+            length = math.dist(seg.start, seg.end)
+            for other in segs:
+                if other is seg or other.width < seg.width - 1e-9:
+                    continue
+                # Strictly longer: equal-length containers are duplicates
+                # (reported elsewhere) and cannot hide a longer segment.
+                if math.dist(other.start, other.end) <= length + COVERED_TOL_MM:
+                    continue
+                if all(
+                    _point_seg_dist(p, other.start, other.end) <= COVERED_TOL_MM
+                    for p in (seg.start, seg.end)
+                ):
+                    label = self._net_label(seg)
+                    results.add(
+                        DRCViolation(
+                            rule_id="redundant_copper_covered",
+                            severity="warning",
+                            message=(
+                                f"Track segment lies wholly on a longer collinear "
+                                f"segment: [{label}] on {seg.layer} "
+                                f"(removable with `kct pcb prune`)"
+                            ),
+                            location=seg.start,
+                            layer=seg.layer,
+                            nets=(label,),
+                        )
+                    )
+                    break
 
     def _check_chains(self, segs: list[Any], results: DRCResults) -> None:
         """Fragment-run and detour detection over same-net/layer chains."""
