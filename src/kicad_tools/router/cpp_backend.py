@@ -5600,6 +5600,13 @@ def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) ->
         def project(layers):
             return project_via_spans(cpp_grid, layers)
 
+    # Issue #8769: a class map merged after loading can change a kept route's
+    # item floor without changing the route count; rebuild the stored copper.
+    floor_version = getattr(py_grid, "_authored_route_floor_version", 0)
+    if floor_version != getattr(cpp_grid, "_stored_route_floor_version", 0):
+        cpp_grid.invalidate_stored_routes()
+        cpp_grid._stored_route_floor_version = floor_version
+
     current_count = len(py_grid.routes)
     if current_count <= cpp_grid._synced_route_count:
         return
