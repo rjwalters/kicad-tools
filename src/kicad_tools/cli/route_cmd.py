@@ -3332,6 +3332,7 @@ def _make_checkpoint_callback(
             routed,
             stub_net_ids=_kept_preserved_net_ids(router),
             name_only=name_only,
+            board_net_ids=_router_board_net_ids(router),
         )
 
     # Mutable container so the closure can write back the timestamp.
@@ -3560,6 +3561,9 @@ def _capture_preserved_routes(pcb_path: Path) -> list["Route"]:
     so this list carries the same ids as ``router.existing_routes``.  Otherwise
     the short check reads a new trace joining its own net's kept copper as a
     short against "Net 0".  Copper with no resolvable net name stays at id 0.
+    Those ids are only this text's: a later attempt's router can number the
+    same names differently, so consumers match these routes by net name
+    (:func:`_preserved_route_router_net`), never by comparing ids.
 
     Returns an empty list when the file has no routed copper or cannot be read.
     """
@@ -3632,6 +3636,57 @@ def _kept_preserved_net_ids(router) -> set[int]:
     return set(getattr(router, "_stub_terminals", None) or {})
 
 
+def _router_board_net_ids(router) -> dict[str, int]:
+    """The current router's net name -> id map, or ``{}`` when it has none."""
+    ids = getattr(router, "board_net_ids", None)
+    return ids if isinstance(ids, dict) else {}
+
+
+def _preserved_route_router_net(route: "Route", board_net_ids: "dict[str, int] | None") -> int:
+    """The id ``route``'s net has in the CURRENT router; 0 when it has none (#8658).
+
+    Preserved routes are captured once, from the pristine staged file.  On a
+    name-only board their ids are synthetic (first-seen order of the names in
+    that text), while a later layer-escalation attempt loads a file ``kct``
+    has rewritten, where the same names can get different ids.  So a captured
+    id must never be compared with a routed id directly: the route's net
+    *name* is resolved through the current router's ``board_net_ids``.
+
+    A named route the current router does not know, and copper with no net
+    name under id 0, return 0 -- such copper cannot have been re-routed and is
+    never dropped.  Without a map (stand-in routers) or without a name the
+    captured id is used: numeric ids come from the file and do not drift.
+    """
+    if board_net_ids and route.net_name:
+        return max(int(board_net_ids.get(route.net_name, 0) or 0), 0)
+    return route.net if route.net > 0 else 0
+
+
+def _preserved_route_is_rerouted(
+    route: "Route", routed_net_ids, board_net_ids: "dict[str, int] | None"
+) -> bool:
+    """Whether the current router re-routed ``route``'s net (matched by name)."""
+    router_net = _preserved_route_router_net(route, board_net_ids)
+    return router_net > 0 and router_net in routed_net_ids
+
+
+def _rekey_preserved_route(route: "Route", router_net: int) -> "Route":
+    """``route`` under the current router's id for its net (#8658).
+
+    The short check and the kept-copper audits compare the emitted preserved
+    routes with this attempt's routed copper by id.  Unchanged when the ids
+    already agree or the current router has no id for the net.
+    """
+    if router_net <= 0 or router_net == route.net:
+        return route
+    return replace(
+        route,
+        net=router_net,
+        segments=[replace(seg, net=router_net) for seg in route.segments],
+        vias=[replace(via, net=router_net) for via in route.vias],
+    )
+
+
 def _dedupe_preserved_sexp(
     preserved_sexp: str,
     preserved_routes: "list[Route] | None",
@@ -3639,6 +3694,7 @@ def _dedupe_preserved_sexp(
     *,
     stub_net_ids=(),
     name_only: bool = False,
+    board_net_ids: "dict[str, int] | None" = None,
 ) -> str:
     """Drop preserved copper that a re-routed net replaces (issue #6626).
 
@@ -3647,6 +3703,11 @@ def _dedupe_preserved_sexp(
     their preserved copper) to the already-serialized ``preserved_sexp`` that
     partial saves and checkpoints append.  Verbatim blocks that are not in
     ``preserved_routes`` (placement-preserved nets) are left untouched.
+
+    ``routed`` and ``stub_net_ids`` carry the current router's ids;
+    ``board_net_ids`` is that router's name -> id map, through which each
+    preserved route is matched by net name rather than by its captured id
+    (:func:`_preserved_route_router_net`).
     """
     if not preserved_sexp or not preserved_routes:
         return preserved_sexp
@@ -3655,9 +3716,13 @@ def _dedupe_preserved_sexp(
         return preserved_sexp
     # ``Route.to_sexp`` mints a fresh uuid per call, so the serialized text
     # cannot be matched against re-serialized routes: filter it by net instead.
-    drop_ids = {r.net for r in preserved_routes if r.net in routed_ids}
-    drop_names = {r.net_name for r in preserved_routes if r.net in routed_ids and r.net_name}
-    if not drop_ids:
+    # The text carries the CAPTURED ids and names, so those select the blocks.
+    dropped = [
+        r for r in preserved_routes if _preserved_route_is_rerouted(r, routed_ids, board_net_ids)
+    ]
+    drop_ids = {r.net for r in dropped if r.net > 0}
+    drop_names = {r.net_name for r in dropped if r.net_name}
+    if not dropped:
         return preserved_sexp
     from kicad_tools.router.optimizer.pcb import _extract_balanced_blocks
 
@@ -3679,12 +3744,16 @@ def _serialize_preserved_routes(
     exclude_net_ids: set[int] | None = None,
     *,
     name_only: bool = False,
+    board_net_ids: "dict[str, int] | None" = None,
 ) -> str:
     """Serialize preserved routes, skipping any net in ``exclude_net_ids``.
 
     The exclusion set is the freshly-routed net ids: a net that was both
     pre-existing *and* re-routed must be emitted from the routed copy only,
-    never twice (#3155 defensive dedupe).
+    never twice (#3155 defensive dedupe).  Those are the current router's
+    ids; ``board_net_ids`` (its name -> id map) lets each preserved route be
+    matched by net name instead of by its captured id
+    (:func:`_preserved_route_router_net`, #8658).
 
     Issue #4416: ``name_only`` re-emits preserved copper in the board's
     ``(net "name")`` dialect so an incremental route pass does not flip the
@@ -3693,7 +3762,7 @@ def _serialize_preserved_routes(
     exclude = exclude_net_ids or set()
     parts: list[str] = []
     for route in preserved_routes:
-        if route.net in exclude:
+        if _preserved_route_is_rerouted(route, exclude, board_net_ids):
             continue
         sexp = route.to_sexp(name_only=name_only)
         if sexp:
@@ -4102,10 +4171,22 @@ def _finalize_routes(
             stub_net_ids = _kept_preserved_net_ids(router)
             if stub_net_ids:
                 routed_net_ids = routed_net_ids - stub_net_ids
+            # Issue #8658: ``source_routes`` carry the ids of the pristine
+            # capture, ``routed_net_ids`` those of this attempt's router.  On
+            # a name-only board the two can differ once kct has rewritten the
+            # staged file, so each preserved route is matched by net name.
+            board_net_ids = _router_board_net_ids(router)
             preserved_sexp = _serialize_preserved_routes(
-                source_routes, exclude_net_ids=routed_net_ids, name_only=name_only
+                source_routes,
+                exclude_net_ids=routed_net_ids,
+                name_only=name_only,
+                board_net_ids=board_net_ids,
             )
-            _emitted_preserved = [r for r in source_routes if r.net not in routed_net_ids]
+            _emitted_preserved = [
+                _rekey_preserved_route(r, _preserved_route_router_net(r, board_net_ids))
+                for r in source_routes
+                if not _preserved_route_is_rerouted(r, routed_net_ids, board_net_ids)
+            ]
             if preserved_sexp:
                 emitted = _emitted_preserved
                 preserved_segments = sum(len(r.segments) for r in emitted)
@@ -4585,6 +4666,7 @@ def _save_partial_results() -> bool:
             router.routes,
             stub_net_ids=_kept_preserved_net_ids(router),
             name_only=name_only,
+            board_net_ids=_router_board_net_ids(router),
         )
         if source_copper and route_sexp:
             route_sexp = f"{route_sexp}\n\t{source_copper}"
