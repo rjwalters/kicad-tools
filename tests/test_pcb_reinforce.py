@@ -2345,3 +2345,486 @@ class TestEndAnchorCLINoAnchors:
         assert "Anchors refused: 2" in out
         assert "Anchored run:   none" in out
         assert "segment(s)" not in out.split("Anchored run:", 1)[1].splitlines()[0]
+
+
+# --------------------------------------------------------------------------
+# ends mode, second review of PR #8751: end copper by overlap (whole trunk,
+# track ending just outside a pad), both anchors decided together (never one
+# for geometry), zero-length segments. Distances here are computed with
+# shapely, independently of the production signed-distance helpers.
+# --------------------------------------------------------------------------
+
+_ANCHOR_DRILL = anchor_drill_for_awg(16)
+
+
+def _pad_poly(shape: str, size, rotation: float, center, rratio: float = 0.25):
+    """Pad copper as a shapely polygon: built pad-local, then rotated with
+    KiCad's negated angle (``rotate(..., -rotation)`` in shapely's CCW sense)."""
+    from shapely import affinity
+    from shapely.geometry import LineString, Point, box
+
+    hw, hh = size[0] / 2.0, size[1] / 2.0
+    if shape == "circle":
+        geom = Point(0, 0).buffer(hw, quad_segs=64)
+    elif shape == "oval":
+        r = min(hw, hh)
+        geom = LineString([(-(hw - r), -(hh - r)), (hw - r, hh - r)]).buffer(r, quad_segs=64)
+        if hw == hh:
+            geom = Point(0, 0).buffer(r, quad_segs=64)
+    elif shape == "roundrect":
+        r = 2.0 * min(hw, hh) * min(rratio, 0.5)
+        geom = box(-(hw - r), -(hh - r), hw - r, hh - r).buffer(r, quad_segs=64)
+    else:
+        geom = box(-hw, -hh, hw, hh)
+    geom = affinity.rotate(geom, -rotation, origin=(0, 0))
+    return affinity.translate(geom, center[0], center[1])
+
+
+def _track_poly(points, width: float):
+    from shapely.geometry import LineString
+
+    return LineString(points).buffer(width / 2.0, quad_segs=64)
+
+
+def _anchor_gaps(anchor, copper) -> tuple[float, float]:
+    """(pad-edge gap, drill-edge gap) from an anchor to ``copper``."""
+    from shapely.geometry import Point
+
+    d = copper.distance(Point(anchor.x, anchor.y))
+    if copper.contains(Point(anchor.x, anchor.y)):
+        d = -d
+    return d - _ANCHOR_PAD / 2, d - _ANCHOR_DRILL / 2
+
+
+def _y_pcb(trunk_pts, branch_pts, width: float = 2.0) -> PCB:
+    pcb = PCB.create(width=300, height=300, center=False)
+    for pts in (trunk_pts, branch_pts):
+        for a, b in zip(pts[:-1], pts[1:], strict=True):
+            pcb.add_trace(a, b, width=width, layer="F.Cu", net="N")
+    return pcb
+
+
+def _fragmented(a, b, piece: float) -> list[tuple[float, float]]:
+    n = max(1, round(math.dist(a, b) / piece))
+    return [(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n) for k in range(n + 1)]
+
+
+def _junction_anchor(branch, junction):
+    return min(branch.anchors, key=lambda a: math.dist((a.x, a.y), junction))
+
+
+class TestEndCopperWholeTrunk:
+    """Finding 1: a branch's junction anchor cleared only the trunk pieces
+    that contained the junction, so a fragmented or bent trunk let it sit on
+    trunk copper (1 mm fragments at 15 deg: pad 0.704 mm inside the trunk)."""
+
+    @pytest.mark.parametrize(
+        ("piece", "angle_deg"),
+        [(1.0, 15.0), (1.0, 30.0), (1.0, 150.0), (0.5, 30.0), (10.0, 15.0), (1.0, 60.0)],
+    )
+    def test_branch_clears_fragmented_trunk(self, piece, angle_deg):
+        trunk = _fragmented((20.0, 100.0), (100.0, 100.0), piece)[:-1] + _fragmented(
+            (100.0, 100.0), (180.0, 100.0), piece
+        )
+        c, s = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
+        branch_pts = [(100.0, 100.0), (100.0 + 30 * c, 100.0 + 30 * s)]
+        result = reinforce_net(_y_pcb(trunk, branch_pts), "N", all_runs=True, dry_run=True)
+        branch = next(leg for leg in result.legs if leg.kind == "branch")
+        assert branch.status == "full" and len(branch.anchors) == 2
+        trunk_copper = _track_poly(trunk, 2.0)
+        gaps = [_anchor_gaps(a, trunk_copper)[0] for a in branch.anchors]
+        assert min(gaps) >= 1.0 - 1e-3
+        # The junction anchor sits exactly on the clearance, not further in.
+        assert _anchor_gaps(_junction_anchor(branch, (100.0, 100.0)), trunk_copper)[
+            0
+        ] == pytest.approx(1.0, abs=1e-3)
+
+    @pytest.mark.parametrize("side", [1.0, -1.0])
+    def test_branch_clears_trunk_bend_past_junction(self, side):
+        """Judge fixture: trunk arm bends 45 deg 1.5 mm past the junction;
+        a 60 deg branch toward the bend put its pad 0.015 mm onto the trunk.
+        Also kills the ``_segment_distance`` clamp mutation: an unclamped
+        (infinite-line) distance pushes the anchor off the exact clearance."""
+        trunk = [(20.0, 100.0), (100.0, 100.0), (101.5, 100.0), (141.5, 100.0 - side * 40.0)]
+        c, s = math.cos(math.radians(60.0)), -side * math.sin(math.radians(60.0))
+        branch_pts = [(100.0, 100.0), (100.0 + 30 * c, 100.0 + 30 * s)]
+        result = reinforce_net(_y_pcb(trunk, branch_pts), "N", all_runs=True, dry_run=True)
+        branch = next(leg for leg in result.legs if leg.kind == "branch")
+        assert branch.status == "full" and len(branch.anchors) == 2
+        trunk_copper = _track_poly(trunk, 2.0)
+        junction = _junction_anchor(branch, (100.0, 100.0))
+        assert _anchor_gaps(junction, trunk_copper)[0] == pytest.approx(1.0, abs=1e-3)
+        far = next(a for a in branch.anchors if a is not junction)
+        assert _anchor_gaps(far, trunk_copper)[0] >= 1.0 - 1e-3
+
+
+def _folded_leg_pcb(jog: float, rotation: float, shape: str = "oval") -> PCB:
+    """Judge fixture: two 2x6 pads 6 mm apart joined by a track with a
+    ``jog`` mm detour, so the leg folds back on itself."""
+    pcb = PCB.create(width=200, height=200, center=False)
+    for ref, x in (("U1", 40.0), ("U2", 46.0)):
+        _add_shaped_pad_footprint(
+            pcb, ref=ref, x=x, y=100.0, net="N", shape=shape, size=(2.0, 6.0), rotation=rotation
+        )
+    pts = [
+        (40.0, 100.0),
+        (41.8, 100.0),
+        (41.8, 100.0 - jog),
+        (44.2, 100.0 - jog),
+        (44.2, 100.0),
+        (46.0, 100.0),
+    ]
+    for a, b in zip(pts[:-1], pts[1:], strict=True):
+        pcb.add_trace(a, b, width=1.0, layer="F.Cu", net="N")
+    return pcb
+
+
+class TestEndAnchorPairNeverOne:
+    """Finding 2: the too_short gate measured the anchor gap ALONG the leg,
+    placement STRAIGHT-LINE; a folded leg passed the first, failed the
+    second, and wrote ONE via with no rule behind the refusal."""
+
+    def test_folded_leg_places_none_not_one(self):
+        pcb = _folded_leg_pcb(3.0, 45.0)
+        before = len(pcb.vias)
+        result = reinforce_net(pcb, "N")
+        (leg,) = result.legs
+        assert leg.status == "too_short"
+        assert leg.anchors == [] and result.placed_count == 0
+        assert result.refused_count == 0
+        assert len(pcb.vias) == before
+
+    def test_folded_leg_straight_line_gate(self):
+        """A U-shaped leg whose two anchor targets are far apart along the
+        track but only 1.0 mm apart straight-line: the straight-line gate,
+        not the along-leg one, makes it ``too_short``."""
+        pcb = PCB.create(width=200, height=200, center=False)
+        for ref, x in (("U1", 40.0), ("U2", 44.0)):
+            _add_shaped_pad_footprint(
+                pcb, ref=ref, x=x, y=100.0, net="N", shape="rect", size=(1.0, 1.0)
+            )
+        pts = [
+            (40.0, 100.0),
+            (41.5, 100.0),
+            (41.5, 97.0),
+            (42.5, 97.0),
+            (42.5, 100.0),
+            (44.0, 100.0),
+        ]
+        for a, b in zip(pts[:-1], pts[1:], strict=True):
+            pcb.add_trace(a, b, width=0.5, layer="F.Cu", net="N")
+        before = len(pcb.vias)
+        result = reinforce_net(pcb, "N")
+        (leg,) = result.legs
+        assert leg.status == "too_short"
+        assert leg.anchors == [] and result.refused_count == 0
+        assert len(pcb.vias) == before
+        assert "folds back" in leg.reason
+
+    @pytest.mark.parametrize("shape", ["oval", "rect"])
+    @pytest.mark.parametrize("rotation", [0.0, 30.0, 45.0, 90.0, 135.0])
+    @pytest.mark.parametrize("jog", [1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0])
+    def test_folded_leg_sweep_zero_or_two(self, jog, rotation, shape):
+        pcb = _folded_leg_pcb(jog, rotation, shape)
+        before = len(pcb.vias)
+        result = reinforce_net(pcb, "N")
+        (leg,) = result.legs
+        assert len(leg.anchors) in (0, 2)
+        assert leg.status in ("full", "too_short")
+        assert len(pcb.vias) - before == len(leg.anchors)
+        if len(leg.anchors) == 2:
+            a, b = leg.anchors
+            assert math.dist((a.x, a.y), (b.x, b.y)) >= _ANCHOR_PAD - 1e-9
+
+    def test_rule_refusal_partial_keeps_its_rule(self):
+        """``partial`` remains only for a real rule refusal: the one
+        refused anchor carries the rule that refused it."""
+        result = reinforce_net(_blocked_by_foreign_track(0.05), "FUSED_LINE", dry_run=True)
+        for leg in result.legs:
+            assert len(leg.anchors) != 1 or leg.status == "partial"
+        assert all(r.rule for r in result.refused)
+
+
+class TestEndCopperOverlap:
+    """Finding 3: a track ending just OUTSIDE the pad edge, its copper still
+    on the pad, was not treated as landing on it; the drill went 0.108 mm
+    into the pad."""
+
+    @pytest.mark.parametrize("start_x", [41.05, 41.2, 41.45])
+    def test_track_end_just_outside_pad_edge(self, start_x):
+        pcb = PCB.create(width=200, height=200, center=False)
+        _add_shaped_pad_footprint(
+            pcb, ref="U1", x=40.0, y=100.0, net="N", shape="rect", size=(2.0, 6.0)
+        )
+        pts = [(start_x, 100.0), (41.6, 100.0), (41.6, 60.0), (80.0, 60.0)]
+        for a, b in zip(pts[:-1], pts[1:], strict=True):
+            pcb.add_trace(a, b, width=1.0, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", dry_run=True)
+        (leg,) = result.legs
+        assert leg.status == "full" and len(leg.anchors) == 2
+        pad = _pad_poly("rect", (2.0, 6.0), 0.0, (40.0, 100.0))
+        near = min(leg.anchors, key=lambda a: math.dist((a.x, a.y), (40.0, 100.0)))
+        pad_gap, drill_gap = _anchor_gaps(near, pad)
+        assert pad_gap == pytest.approx(1.0, abs=1e-3)
+        assert drill_gap > 1.0
+
+    def test_track_end_clear_of_pad_is_free_end(self):
+        """A track whose copper does not reach the pad is a free end: the
+        anchor is measured from the track end, not kept off the pad."""
+        pcb = PCB.create(width=200, height=200, center=False)
+        _add_shaped_pad_footprint(
+            pcb, ref="U1", x=40.0, y=100.0, net="N", shape="rect", size=(2.0, 6.0)
+        )
+        pcb.add_trace((41.6, 100.0), (90.0, 100.0), width=1.0, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", dry_run=True)
+        near = min(result.placed, key=lambda a: a.x)
+        assert near.x == pytest.approx(41.6 + 1.0 + _ANCHOR_PAD / 2)
+
+
+class TestEndAnchorReviewMutations:
+    def test_zero_length_segment_does_not_make_a_loop(self):
+        """A zero-length segment used to mark the leg ``unhandled`` as a
+        'copper loop'; it carries no copper of its own and is dropped."""
+        pcb = _padded_straight_pcb()
+        pcb.add_trace((70.0, 50.0), (70.0, 50.0), width=2.0, layer="F.Cu", net="FUSED_LINE")
+        result = reinforce_net(pcb, "FUSED_LINE", dry_run=True)
+        (leg,) = result.legs
+        assert leg.status == "full" and len(leg.anchors) == 2
+        assert "loop" not in leg.reason
+
+    def test_nudged_start_candidates_respect_end_clearance(self):
+        """The leg turns back toward its pad right after the start target,
+        and a foreign track refuses the target. Every inward nudge is inside
+        the end clearance, so the start anchor is refused (a rule refusal)
+        rather than nudged onto a spot within 1 mm of the pad (mutation:
+        nudged positions not checked against the end clearance)."""
+        pcb = PCB.create(width=200, height=200, center=False)
+        _add_shaped_pad_footprint(
+            pcb, ref="U1", x=20.0, y=50.0, net="N", shape="rect", size=(2.0, 2.0)
+        )
+        pts = [(20.0, 50.0), (23.0, 50.0), (21.5, 51.8), (21.5, 90.0)]
+        for a, b in zip(pts[:-1], pts[1:], strict=True):
+            pcb.add_trace(a, b, width=0.5, layer="F.Cu", net="N")
+        dy = 0.3 + _ANCHOR_PAD / 2 + 0.1
+        pcb.add_trace((22.0, 50 - dy), (24.5, 50 - dy), width=0.2, layer="F.Cu", net="OTHER")
+        result = reinforce_net(pcb, "N", net_class_clearances={"OTHER": 0.4}, dry_run=True)
+        pad = _pad_poly("rect", (2.0, 2.0), 0.0, (20.0, 50.0))
+        for a in result.placed:
+            assert _anchor_gaps(a, pad)[0] >= 1.0 - 1e-3
+        (leg,) = result.legs
+        assert leg.status == "partial" and len(leg.anchors) == 1
+        assert [r.rule for r in result.refused] != [""] and all(r.rule for r in result.refused)
+
+    def test_leg_wholly_inside_its_pad_is_reported_as_covered(self):
+        """Kills ``whole leg covered -> None`` turned into ``continue``: the
+        leg is too short for the right reason."""
+        pcb = PCB.create(width=200, height=200, center=False)
+        _add_shaped_pad_footprint(
+            pcb, ref="U1", x=20.0, y=50.0, net="N", shape="rect", size=(40.0, 10.0)
+        )
+        pcb.add_trace((10.0, 50.0), (30.0, 50.0), width=1.0, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", dry_run=True)
+        (leg,) = result.legs
+        assert leg.status == "too_short"
+        assert leg.reason == "same-net pad/via copper covers the whole leg"
+        assert result.placed_count == 0
+
+    def test_roundrect_ratio_above_half_is_clamped(self):
+        """KiCad caps the corner ratio at 0.5 (a fully rounded end); a
+        larger stored ratio must measure like the 0.5 shape, i.e. an oval.
+        The leg leaves through the rounded short end (mutation: ratio clamp
+        removed, which shrinks that end inward)."""
+        anchors = []
+        for shape, rratio in (("oval", 0.25), ("roundrect", 0.5), ("roundrect", 0.9)):
+            pcb = _straight_run_pcb()
+            _add_shaped_pad_footprint(
+                pcb, ref="U1", x=20.0, y=50.0, net="FUSED_LINE", shape=shape, size=(4.0, 2.0)
+            )
+            pcb.footprints[-1].pads[0].roundrect_rratio = rratio
+            result = reinforce_net(pcb, "FUSED_LINE", dry_run=True)
+            anchors.append(min(a.x for a in result.placed))
+        assert anchors[0] == pytest.approx(20.0 + 2.0 + 1.0 + _ANCHOR_PAD / 2, abs=1e-3)
+        assert anchors[1] == pytest.approx(anchors[0], abs=1e-6)
+        assert anchors[2] == pytest.approx(anchors[0], abs=1e-6)
+
+    def test_segment_distance_is_to_the_segment_not_its_line(self):
+        """A branch parallel to the BACKWARD extension of a bent trunk arm,
+        1.06 mm off that line but nowhere near the arm itself, is anchored
+        normally (mutation: ``_segment_distance`` clamp removed turns every
+        trunk piece into an infinite line, and this leg into too_short)."""
+        trunk = [(20.0, 100.0), (100.0, 100.0), (101.5, 100.0), (141.5, 60.0)]
+        branch_pts = [(100.0, 100.0), (100.0 - 21.0, 100.0 + 21.0)]
+        result = reinforce_net(_y_pcb(trunk, branch_pts), "N", all_runs=True, dry_run=True)
+        branch = next(leg for leg in result.legs if leg.kind == "branch")
+        assert branch.status == "full" and len(branch.anchors) == 2
+        trunk_copper = _track_poly(trunk, 2.0)
+        junction = _junction_anchor(branch, (100.0, 100.0))
+        assert _anchor_gaps(junction, trunk_copper)[0] == pytest.approx(1.0, abs=1e-3)
+
+    def test_t_joined_copper_counts_as_one_end_feature(self):
+        """A leg starts on the middle of a stub that is itself T-joined onto
+        a long same-net track (no shared vertices anywhere). The stub and
+        the long track are one piece of copper, so the leg's anchors keep
+        1 mm from the long track too (mutation: T-joins not grouped)."""
+        pcb = PCB.create(width=200, height=200, center=False)
+        pcb.add_trace((20.0, 100.0), (180.0, 100.0), width=2.0, layer="F.Cu", net="N")
+        pcb.add_trace((100.0, 100.0), (100.0, 80.0), width=2.0, layer="F.Cu", net="N")
+        pcb.add_trace((100.0, 97.6), (140.0, 97.6), width=1.0, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", all_runs=True, dry_run=True)
+        long_track = _track_poly([(20.0, 100.0), (180.0, 100.0)], 2.0)
+        leg = next(lg for lg in result.legs if lg.polyline[0][1] == pytest.approx(97.6))
+        assert len(leg.anchors) in (0, 2)
+        for a in leg.anchors:
+            assert _anchor_gaps(a, long_track)[0] >= 1.0 - 1e-3
+        assert leg.status == "too_short"
+
+    @staticmethod
+    def _two_close_legs(gap: float = 1.0, rules: DesignRules | None = None):
+        pcb = PCB.create(width=200, height=200, center=False)
+        pcb.add_trace((20.0, 100.0), (80.0, 100.0), width=0.3, layer="F.Cu", net="N")
+        pcb.add_trace((20.0, 100.0 + gap), (79.0, 100.0 + gap), width=0.3, layer="F.Cu", net="N")
+        return reinforce_net(pcb, "N", all_runs=True, dry_run=True, design_rules=rules)
+
+    def test_anchor_does_not_overlap_another_legs_anchor(self):
+        """Two separate same-net legs 1 mm apart: the second leg's anchors
+        are nudged inward off the first leg's (mutation: other legs'
+        anchors ignored, which stacks them 1 mm apart)."""
+        result = self._two_close_legs()
+        placed = [(a.x, a.y) for a in result.placed]
+        for i, p in enumerate(placed):
+            for q in placed[i + 1 :]:
+                assert math.dist(p, q) >= _ANCHOR_PAD - 1e-9
+        first, second = result.legs
+        assert first.status == "full" and second.status == "full"
+        assert min(a.x for a in second.anchors) > min(a.x for a in first.anchors)
+
+    @pytest.mark.parametrize(
+        ("gap", "annular", "hole_to_hole", "rule"),
+        [(1.0, 0.25, 0.5, "hole_to_hole"), (1.9, 0.4, 0.2, "anchor_spacing")],
+    )
+    def test_anchor_overlap_without_nudge_room_is_a_named_refusal(
+        self, monkeypatch, gap, annular, hole_to_hole, rule
+    ):
+        """With no nudge window, both of the second leg's anchors are
+        refused with a named rule and the leg places none: ``hole_to_hole``
+        when the drills are too close, ``anchor_spacing`` when only the
+        (larger-ring) anchor pads overlap."""
+        from kicad_tools.pcb import reinforce as reinforce_mod
+
+        monkeypatch.setattr(reinforce_mod, "END_NUDGE_MAX_MM", 0.0)
+        rules = DesignRules(
+            min_trace_width_mm=0.127,
+            min_clearance_mm=0.2,
+            min_via_drill_mm=0.3,
+            min_via_diameter_mm=0.6,
+            min_annular_ring_mm=annular,
+            min_hole_to_hole_mm=hole_to_hole,
+        )
+        result = self._two_close_legs(gap, rules)
+        first, second = result.legs
+        assert first.status == "full" and len(first.anchors) == 2
+        assert second.status == "unanchored" and second.anchors == []
+        assert [r.rule for r in result.refused] == [rule, rule]
+
+
+def _random_pad(rng):
+    shape = rng.choice(["rect", "oval", "roundrect", "circle"])
+    if shape == "circle":
+        d = rng.uniform(1.0, 4.0)
+        return shape, (d, d), 0.0
+    return shape, (rng.uniform(1.0, 4.0), rng.uniform(1.0, 7.0)), rng.choice([0, 30, 45, 90, 135])
+
+
+class TestEndAnchorPropertySweep:
+    """Seeded random sweep: every anchored leg has exactly 2 anchors, and
+    every anchor's pad AND drill is >= the end offset from all copper the
+    leg ends on (pads it overlaps; for a branch, the whole trunk). Gaps are
+    measured with shapely, not the production helpers."""
+
+    CASES = 300
+
+    def _check(self, pcb, pads, legs_copper, result):
+        for leg in result.legs:
+            assert len(leg.anchors) in (0, 2), (leg.status, leg.reason)
+            assert leg.status != "partial", leg.reason  # no foreign copper here
+            if not leg.anchors:
+                continue
+            a, b = leg.anchors
+            assert math.dist((a.x, a.y), (b.x, b.y)) >= _ANCHOR_PAD - 1e-9
+            from shapely.geometry import Point
+
+            end_copper = []
+            for end in (leg.polyline[0], leg.polyline[-1]):
+                cap = Point(end).buffer(leg.width_mm / 2.0, quad_segs=64)
+                end_copper += [p for p in pads if p.intersects(cap)]
+            if leg.kind == "branch":
+                end_copper.append(legs_copper["trunk"])
+            for anchor in leg.anchors:
+                for copper in end_copper:
+                    pad_gap, drill_gap = _anchor_gaps(anchor, copper)
+                    assert pad_gap >= 1.0 - 1e-3
+                    assert drill_gap >= 1.0 - 1e-3
+
+    def test_random_bent_legs_between_pads(self):
+        import random
+
+        rng = random.Random(8742)
+        anchored = 0
+        for _ in range(self.CASES):
+            pcb = PCB.create(width=300, height=300, center=False)
+            width = rng.uniform(0.4, 2.0)
+            c0 = (100.0, 100.0)
+            c1 = (100.0 + rng.uniform(4.0, 25.0), 100.0 + rng.uniform(-4.0, 4.0))
+            pads = []
+            for ref, c in (("U1", c0), ("U2", c1)):
+                shape, size, rot = _random_pad(rng)
+                _add_shaped_pad_footprint(
+                    pcb, ref=ref, x=c[0], y=c[1], net="N", shape=shape, size=size, rotation=rot
+                )
+                pads.append(_pad_poly(shape, size, rot, c))
+            # Leave from the pad centre, or from just past its edge (copper
+            # still overlapping it), then wander with sharp bends.
+            start = c0
+            if rng.random() < 0.3:
+                edge = pads[0].exterior.coords
+                ex = max(edge, key=lambda p: p[0])
+                start = (ex[0] + rng.uniform(0.0, 0.45 * width), ex[1])
+            pts = [start]
+            for _k in range(rng.randint(1, 4)):
+                pts.append((rng.uniform(c0[0] - 3, c1[0] + 3), rng.uniform(c0[1] - 8, c0[1] + 8)))
+            pts.append(c1)
+            pts = [p for i, p in enumerate(pts) if i == 0 or math.dist(p, pts[i - 1]) > 0.05]
+            for a, b in zip(pts[:-1], pts[1:], strict=True):
+                pcb.add_trace(a, b, width=width, layer="F.Cu", net="N")
+            result = reinforce_net(pcb, "N", all_runs=True, dry_run=True)
+            self._check(pcb, pads, {}, result)
+            anchored += sum(1 for leg in result.legs if leg.anchors)
+        assert anchored > self.CASES // 4  # the sweep is not vacuous
+
+    def test_random_branches_off_bent_fragmented_trunks(self):
+        import random
+
+        rng = random.Random(87420)
+        anchored = 0
+        for _ in range(self.CASES // 2):
+            width = rng.uniform(0.5, 3.0)
+            piece = rng.choice([0.5, 1.0, 3.0, 100.0])
+            bend = rng.uniform(1.0, 6.0)
+            turn = math.radians(rng.choice([-60, -45, -30, 30, 45, 60]))
+            far = (100.0 + bend + 50 * math.cos(turn), 100.0 + 50 * math.sin(turn))
+            trunk = (
+                _fragmented((20.0, 100.0), (100.0, 100.0), piece)[:-1]
+                + _fragmented((100.0, 100.0), (100.0 + bend, 100.0), piece)[:-1]
+                + _fragmented((100.0 + bend, 100.0), far, piece)
+            )
+            ang = math.radians(rng.choice([15, 25, 40, 60, 90, 120, 150, 165, -30, -60, -150]))
+            blen = rng.uniform(12.0, 30.0)
+            branch_pts = [(100.0, 100.0), (100 + blen * math.cos(ang), 100 + blen * math.sin(ang))]
+            pcb = _y_pcb(trunk, branch_pts, width=width)
+            result = reinforce_net(pcb, "N", all_runs=True, dry_run=True)
+            kinds = {leg.kind for leg in result.legs}
+            if "branch" not in kinds:
+                continue  # the branch crossed the trunk: not a single Y
+            self._check(pcb, [], {"trunk": _track_poly(trunk, width)}, result)
+            anchored += sum(1 for leg in result.legs if leg.kind == "branch" and leg.anchors)
+        assert anchored > self.CASES // 8

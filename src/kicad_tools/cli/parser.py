@@ -2518,8 +2518,13 @@ def _add_pcb_parser(subparsers) -> None:
         "net's routed copper into legs (a run on one copper layer with no "
         "junction inside it) and places exactly two same-net plated through-hole "
         "(PTH) anchor vias per leg, one near each end, none in between, each "
-        "at least --end-offset mm clear (straight-line) of the same-net pad (or "
-        "via, or trunk) the leg ends on. A Y junction becomes a trunk plus a branch; loops and "
+        "at least --end-offset mm clear (straight-line) of the same-net copper "
+        "the leg ends on: a pad or via its track overlaps, or the whole trunk a "
+        "branch tees off. A leg with no room for two such anchors (too short, or "
+        "folding back so they would overlap) gets none and is reported "
+        "too_short; a leg gets ONE anchor only when a clearance or hole-to-hole "
+        "rule refused the other (partial, listed under refused). A Y junction "
+        "becomes a trunk plus a branch; loops and "
         "higher-degree junctions are reported as unhandled. --anchor-mode "
         "spaced keeps the old row of anchors every --spacing mm. Anchors are "
         "sized to the wire gauge, respect the annular-ring floor and are "
@@ -2559,7 +2564,8 @@ def _add_pcb_parser(subparsers) -> None:
         default=1.0,
         metavar="MM",
         help="ends mode: minimum straight-line clearance in mm from each end "
-        "anchor's pad edge to the same-net component pad (or via, or trunk) "
+        "anchor's pad edge to the same-net component pad (or via, or the whole "
+        "trunk) "
         "the leg ends on (default: 1.0); a leg that bends near its end moves "
         "the anchor further inward. A leg too short for two anchors at this "
         "offset is reported too_short and gets none.",

@@ -18,10 +18,13 @@ Two placement modes (``anchor_mode``, Issue #8742):
   maximal run on ONE copper layer with no junction inside it -- and each leg
   gets exactly two anchors, one near each end, none in between. Each end
   anchor's pad edge sits at least ``end_offset_mm`` clear, in straight-line
-  distance, of the same-net copper the leg end lands on: the component pad, a
-  via, or the trunk a branch tees off (a leg that bends near its end moves the
-  anchor further inward until that holds). A leg too short for two anchors is reported
-  ``too_short`` and gets none. A Y junction is a trunk (the longest
+  distance, of the same-net copper the leg end lands on: a component pad or
+  via the end of its track overlaps, or the whole trunk a branch tees off (a
+  leg that bends near its end moves the anchor further inward until that
+  holds). Both anchors are decided together: a leg with no room for two (too
+  short, or folding back so they would overlap) is reported ``too_short``
+  and gets none, and a leg ends with one anchor (``partial``) only when a
+  clearance / hole-to-hole rule refused the other. A Y junction is a trunk (the longest
   through-path) plus a branch; loops and higher-degree junctions are
   reported ``unhandled``, never guessed. The per-leg result
   (:class:`LegSummary`, on :attr:`ReinforceResult.legs`) keeps each leg's
@@ -162,6 +165,9 @@ RULE_HOLE_TO_HOLE = "hole_to_hole"
 RULE_DRU_CLASS_FLOOR = "dru_class_floor"
 RULE_VOLTAGE_MAP_PAIRWISE = "voltage_map_pairwise"
 RULE_DRU_CONDITIONAL = "dru_conditional"
+#: ``ends`` mode: the candidate's pad would overlap an anchor already placed
+#: for another leg (centre-to-centre below one anchor pad; Issue #8742).
+RULE_ANCHOR_SPACING = "anchor_spacing"
 
 _RULE_EPS = 1e-9
 
@@ -174,7 +180,8 @@ class RefusedAnchor:
     y: float
     reason: str
     #: Governing rule (``hole_to_hole`` / ``dru_class_floor`` /
-    #: ``dru_conditional`` / ``voltage_map_pairwise``) of the first candidate tried at this position.
+    #: ``dru_conditional`` / ``voltage_map_pairwise``, and in ``ends`` mode
+    #: ``anchor_spacing``) of the first candidate tried at this position.
     rule: str = ""
     #: Requirement of that rule (mm) and the measured gap (mm); ``0.0`` unknown.
     required_mm: float = 0.0
@@ -216,7 +223,8 @@ class LegSummary:
     #: The anchors actually placed on this leg this pass, in leg order
     #: (0, 1 or 2). In ``full`` status: ``[start-end anchor, far-end anchor]``.
     anchors: list[PlacedAnchor] = field(default_factory=list)
-    #: ``full`` (2 placed) / ``partial`` (1) / ``unanchored`` (0: refused or
+    #: ``full`` (2 placed) / ``partial`` (1: the other refused by a rule,
+    #: listed in ``refused``) / ``unanchored`` (0: refused or
     #: not selected) / ``too_short`` / ``unhandled`` (loop, degree>=4 or
     #: multi-junction topology, or copper on a layer this call does not
     #: process).
@@ -894,11 +902,13 @@ def reinforce_net(
             the table's value. ``None`` keeps the scalar-floor behavior.
         anchor_mode: ``"ends"`` (default) or ``"spaced"`` (Issue #8742).
         end_offset_mm: ``ends`` mode: minimum straight-line clearance in mm
-            from an end anchor's pad edge to the same-net pad / via / trunk
-            copper the leg end lands on (default 1.0). The anchor starts that
-            far along the leg past the copper edge and moves further inward
-            while a bend brings it closer than that; a leg where no such
-            position remains is ``too_short``.
+            from an end anchor's pad edge to the same-net copper the leg end
+            lands on (default 1.0): a pad or via its track's end overlaps, or
+            the whole trunk for a branch. The anchor starts that far along the
+            leg past the copper edge and moves further inward while a bend
+            brings it closer than that; a leg with no room for two such
+            anchors, measured along the leg and straight-line, is
+            ``too_short`` and gets none.
 
     Returns:
         A :class:`ReinforceResult` summarising placed/refused anchors, the
@@ -1159,11 +1169,6 @@ class _LegCandidate:
     layer: str
     kind: str
     run: list[Segment]
-    #: Same-net copper at the leg START that is not a pad or via -- the
-    #: trunk's segments for a branch, which starts at the junction. Its end
-    #: anchor keeps the same straight-line ``end_offset_mm`` clearance from
-    #: it as from a pad (Issue #8742).
-    start_features: list[_EndFeature] = field(default_factory=list)
     #: ``LEG_UNHANDLED`` when topology (or the layer selection) rules the leg
     #: out before placement; ``None`` when it may be anchored.
     status: str | None = None
@@ -1280,19 +1285,10 @@ def _derive_legs(
         ]
         arms.sort(key=_run_length, reverse=True)
         trunk = _reverse_run(arms[0], original_ids) + arms[1]
-        trunk_copper = [
-            _EndFeature(
-                s.start[0],
-                s.start[1],
-                0.0,
-                (),
-                via_radius=s.width / 2.0,
-                seg_end=s.end,
-            )
-            for s in trunk
-        ]
         legs.append(_LegCandidate(layer, LEG_KIND_TRUNK, trunk))
-        legs.append(_LegCandidate(layer, LEG_KIND_BRANCH, arms[2], start_features=trunk_copper))
+        # The branch starts on the trunk: its end copper there is the WHOLE
+        # trunk, found by ``_track_end_features`` (it touches the junction).
+        legs.append(_LegCandidate(layer, LEG_KIND_BRANCH, arms[2]))
     return legs
 
 
@@ -1448,23 +1444,87 @@ def _exit_arc(points: list[tuple[float, float]], contains) -> float | None:
     return None
 
 
+def _track_components(segments: list[Segment]) -> list[list[_EndFeature]]:
+    """Same-net track copper as capsules, grouped into connected components.
+
+    Two segments are connected when they share an end vertex or when one's
+    end lies on the other's copper (a T onto a segment's middle). A leg end
+    that touches any segment of a component lands on that whole component,
+    so a branch's junction anchor is kept clear of the entire trunk, not
+    just the trunk pieces that meet the junction (PR #8751 review).
+    """
+    feats = [
+        _EndFeature(
+            s.start[0], s.start[1], 0.0, (), via_radius=s.width / 2.0, seg_end=(s.end[0], s.end[1])
+        )
+        for s in segments
+    ]
+    parent = list(range(len(feats)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    by_vertex: dict[tuple[float, float], int] = {}
+    for i, s in enumerate(segments):
+        for v in (_vertex(s.start), _vertex(s.end)):
+            j = by_vertex.setdefault(v, i)
+            parent[find(i)] = find(j)
+    # T-joins: bucket each capsule's bounding box on a coarse grid so an end
+    # point is only tested against the segments near it.
+    cell = 5.0
+    buckets: dict[tuple[int, int], list[int]] = {}
+    for i, s in enumerate(segments):
+        r = s.width / 2.0
+        x0, x1 = sorted((s.start[0], s.end[0]))
+        y0, y1 = sorted((s.start[1], s.end[1]))
+        for cx in range(math.floor((x0 - r) / cell), math.floor((x1 + r) / cell) + 1):
+            for cy in range(math.floor((y0 - r) / cell), math.floor((y1 + r) / cell) + 1):
+                buckets.setdefault((cx, cy), []).append(i)
+    for i, s in enumerate(segments):
+        for p in (s.start, s.end):
+            for j in buckets.get((math.floor(p[0] / cell), math.floor(p[1] / cell)), ()):
+                if find(i) != find(j) and feats[j].contains(p):
+                    parent[find(i)] = find(j)
+    groups: dict[int, list[_EndFeature]] = {}
+    for i, f in enumerate(feats):
+        groups.setdefault(find(i), []).append(f)
+    return list(groups.values())
+
+
 def _end_copper(
     points: list[tuple[float, float]],
     layer: str,
     features: list[_EndFeature],
+    tracks: list[list[_EndFeature]],
+    cap_radius: float,
 ) -> list[_EndFeature] | None:
-    """The same-net copper on ``layer`` that ``points[0]`` (a leg end) lands on.
+    """The same-net copper on ``layer`` that the leg end ``points[0]`` lands on.
 
-    ``None`` when one of those features covers the whole leg.
+    "Lands on" is copper overlap, not centreline containment: the leg's
+    track ends in a round cap of ``cap_radius`` (half its width) around
+    ``points[0]``, so a pad or via whose copper comes within that radius is
+    connected to it even when the centreline stops just outside the pad
+    (PR #8751 review). Same-net track copper of another leg (``tracks``,
+    one list per connected component) is taken WHOLE when any piece of it
+    touches the cap: an anchor beside a trunk must clear every trunk
+    segment, including fragments and bends away from the junction.
+
+    ``None`` when a pad or via covers the whole leg.
     """
     start = points[0]
     found: list[_EndFeature] = []
     for feat in features:
-        if not feat.on_layer(layer) or not feat.contains(start):
+        if not feat.on_layer(layer) or feat.distance(start) > cap_radius + 1e-6:
             continue
-        if _exit_arc(points, feat.contains) is None:
+        if feat.contains(start) and _exit_arc(points, feat.contains) is None:
             return None
         found.append(feat)
+    for component in tracks:
+        if any(f.distance(start) <= cap_radius + 1e-6 for f in component):
+            found.extend(component)
     return found
 
 
@@ -1472,11 +1532,14 @@ def _end_extent(points: list[tuple[float, float]], copper: list[_EndFeature]) ->
     """Arc length from ``points[0]`` to the edge of the end ``copper``.
 
     The largest exit, measured along the leg, from every feature in
-    ``copper`` (all of which contain the start point). ``0.0`` for a free
-    track end.
+    ``copper`` that contains the start point; ``0.0`` for a free track end
+    or one that only overlaps the copper. This is only the starting guess:
+    the straight-line clearance test then moves the anchor further inward.
     """
     extent = 0.0
     for feat in copper:
+        if not feat.contains(points[0]):
+            continue
         t = _exit_arc(points, feat.contains)
         if t is not None:
             extent = max(extent, t)
@@ -1541,6 +1604,11 @@ def _reinforce_ends(
 
     by_layer: dict[str, list[Segment]] = {}
     for s in net_segments:
+        # A zero-length segment carries no copper of its own (its round cap
+        # sits inside its neighbours'), but as a self-loop vertex it made the
+        # chainer's component look closed and the whole leg ``unhandled``.
+        if _seg_length(s) <= 1e-9:
+            continue
         by_layer.setdefault(s.layer, []).append(s)
 
     original_ids: dict[int, int] = {}
@@ -1620,42 +1688,109 @@ def _reinforce_ends(
     step = END_NUDGE_MAX_MM / END_NUDGE_STEPS if END_NUDGE_STEPS > 0 else 0.0
     nudges = [k * step for k in range(END_NUDGE_STEPS + 1)] if step > 0 else [0.0]
 
-    def try_place(points, cum, arcs, clear):
-        """First clear arc among ``arcs``; else the first violation seen.
+    def violation_at(p: tuple[float, float]) -> _Violation | None:
+        """Rule check of one anchor candidate; ``None`` when it may be placed.
 
-        ``clear`` is the end-offset test: a candidate inside the end-offset
-        clearance of the leg's end copper is skipped, never placed.
+        An anchor already placed for another leg is a drilled hole and a pad
+        too: a hole gap below the hole-to-hole minimum is ``hole_to_hole``,
+        otherwise overlapping anchor pads are ``anchor_spacing``.
         """
-        first: _Violation | None = None
-        for t in arcs:
-            cx, cy = _point_at_arc(points, cum, t)
-            if not clear((cx, cy)) or _too_close((cx, cy), placed_positions, dedup_floor):
-                continue
-            violation = _position_violation(cx, cy, anchor_pad, anchor_drill, rules, other, policy)
-            if violation is None:
-                return t, (cx, cy), None
-            if first is None:
-                first = violation
-        return None, None, first
+        if placed_positions:
+            near = min(math.hypot(p[0] - q[0], p[1] - q[1]) for q in placed_positions)
+            if near < dedup_floor - 1e-9:
+                hole_gap = near - anchor_drill
+                if hole_gap < rules.min_hole_to_hole_mm - 1e-9:
+                    return _Violation(
+                        RULE_HOLE_TO_HOLE, rules.min_hole_to_hole_mm, max(0.0, hole_gap)
+                    )
+                return _Violation(RULE_ANCHOR_SPACING, anchor_pad, near)
+        return _position_violation(p[0], p[1], anchor_pad, anchor_drill, rules, other, policy)
 
-    def refuse(points, cum, t, violation: _Violation | None) -> None:
-        bx, by = _point_at_arc(points, cum, t)
+    def plan_pair(points, cum, t0: float, t1: float, clear):
+        """Decide BOTH end anchors before either is written (PR #8751 review).
+
+        Start candidates step inward from ``t0``, far candidates inward from
+        ``t1`` (``nudges``), each kept only where ``clear`` holds. A pair is
+        geometrically compatible when the far anchor is at least the anchor
+        spacing floor beyond the start one ALONG the leg (never past it) and
+        at least that far apart STRAIGHT-LINE (a leg that folds back can
+        meet the first and fail the second). Returns ``(pair, refusals)``:
+
+        * ``pair is None`` and no refusals -- no compatible pair exists, the
+          leg is ``too_short`` and nothing is placed;
+        * both positions set -- the first compatible pair with no rule
+          violation at either end;
+        * one position set -- every far (start) candidate compatible with the
+          placed start (far) anchor broke a clearance / hole-to-hole rule:
+          a rule-based refusal, listed in ``refused``;
+        * neither set, two refusals -- both ends refused by rules.
+        """
+        total = cum[-1]
+
+        def side(base: float, sign: float):
+            out = []
+            for d in nudges:
+                t = base + sign * d
+                if t < -1e-9 or t > total + 1e-9:
+                    continue
+                pos = _point_at_arc(points, cum, t)
+                if clear(pos):
+                    out.append((t, pos))
+            return out
+
+        starts, ends = side(t0, 1.0), side(t1, -1.0)
+
+        def compatible(s, e) -> bool:
+            return (
+                e[0] - s[0] >= dedup_floor - 1e-9
+                and math.hypot(e[1][0] - s[1][0], e[1][1] - s[1][1]) >= dedup_floor - 1e-9
+            )
+
+        pairs = [
+            (i, j)
+            for i in range(len(starts))
+            for j in range(len(ends))
+            if compatible(starts[i], ends[j])
+        ]
+        if not pairs:
+            return None, []
+        cache: dict[tuple[str, int], _Violation | None] = {}
+
+        def v(which: str, k: int) -> _Violation | None:
+            if (which, k) not in cache:
+                cache[(which, k)] = violation_at((starts if which == "s" else ends)[k][1])
+            return cache[(which, k)]
+
+        for i, j in pairs:
+            if v("s", i) is None and v("e", j) is None:
+                return (starts[i][1], ends[j][1]), []
+        # No clean pair. One anchor stands only when every counterpart that
+        # could pair with it is refused by a rule.
+        for i in dict.fromkeys(i for i, _ in pairs):
+            if v("s", i) is None:
+                j = next(j for ii, j in pairs if ii == i)
+                return (starts[i][1], None), [(ends[j][1], v("e", j))]
+        for j in dict.fromkeys(j for _, j in pairs):
+            if v("e", j) is None:
+                i = next(i for i, jj in pairs if jj == j)
+                return (None, ends[j][1]), [(starts[i][1], v("s", i))]
+        i, j = pairs[0]
+        return (None, None), [(starts[i][1], v("s", i)), (ends[j][1], v("e", j))]
+
+    def refuse(pos: tuple[float, float], violation: _Violation) -> None:
         result.refused.append(
             RefusedAnchor(
-                x=bx,
-                y=by,
+                x=pos[0],
+                y=pos[1],
                 reason=(
-                    "other-net clearance/hole-to-hole violation"
-                    if violation
-                    else (
-                        "no clear inward position: within one anchor pad of another "
-                        "anchor or inside the end-offset clearance"
-                    )
+                    "anchor pad overlaps another leg's anchor"
+                    if violation.rule == RULE_ANCHOR_SPACING
+                    else "other-net clearance/hole-to-hole violation"
                 ),
-                rule=violation.rule if violation else "",
-                required_mm=violation.required_mm if violation else 0.0,
-                actual_mm=violation.actual_mm if violation else 0.0,
-                obstacle_net=violation.obstacle_net if violation else "",
+                rule=violation.rule,
+                required_mm=violation.required_mm,
+                actual_mm=violation.actual_mm,
+                obstacle_net=violation.obstacle_net,
             )
         )
 
@@ -1688,8 +1823,10 @@ def _reinforce_ends(
             points = g.points
             cum = _cumulative_arc(points)
             total = cum[-1]
-            c0 = _end_copper(points, cand.layer, features + cand.start_features)
-            c1 = _end_copper(points[::-1], cand.layer, features)
+            own = {original_ids.get(id(s), id(s)) for s in cand.run}
+            tracks = _track_components([s for s in by_layer[cand.layer] if id(s) not in own])
+            c0 = _end_copper(points, cand.layer, features, tracks, cand.run[0].width / 2.0)
+            c1 = _end_copper(points[::-1], cand.layer, features, tracks, cand.run[-1].width / 2.0)
             half = anchor_pad / 2.0
             if c0 is None or c1 is None:
                 leg.status = LEG_TOO_SHORT
@@ -1711,39 +1848,40 @@ def _reinforce_ends(
                 t1_arc = total - (e1 + end_offset + half)
                 t0 = _clear_arc(points, cum, t0_arc, total, clear) if t0_arc <= total else None
                 t1 = _clear_arc(points, cum, t1_arc, 0.0, clear) if t1_arc >= 0.0 else None
-                if t0 is None or t1 is None or t1 - t0 < dedup_floor - 1e-9:
+                pair = None
+                refusals: list = []
+                if t0 is not None and t1 is not None:
+                    pair, refusals = plan_pair(points, cum, t0, t1, clear)
+                if pair is None:
+                    # Never one anchor for geometry: the leg gets none.
                     leg.status = LEG_TOO_SHORT
                     if t0 is None or t1 is None:
                         leg.reason = (
                             f"{total:.3f} mm leg has no point whose {anchor_pad:.3f} mm anchor "
                             f"is {end_offset:g} mm clear of the end copper"
                         )
-                    else:
+                    elif t1 - t0 < dedup_floor - 1e-9:
                         leg.reason = (
                             f"{total:.3f} mm leg needs "
                             f"{total - (t1 - t0) + dedup_floor:.3f} mm for two "
                             f"{anchor_pad:.3f} mm anchors {end_offset:g} mm clear of the "
                             "end copper"
                         )
+                    else:
+                        p0 = _point_at_arc(points, cum, t0)
+                        p1 = _point_at_arc(points, cum, t1)
+                        leg.reason = (
+                            f"leg folds back: its two end anchors, {end_offset:g} mm clear "
+                            f"of the end copper, would be {math.dist(p0, p1):.3f} mm apart "
+                            f"(need {dedup_floor:.3f} mm between {anchor_pad:.3f} mm anchors)"
+                        )
                 else:
-                    # Start anchor: inward only, never past the far anchor.
-                    start_arcs = [t0 + d for d in nudges if t0 + d <= t1 - dedup_floor + 1e-9]
-                    chosen_t, start_pos, v0 = try_place(points, cum, start_arcs, clear)
-                    start_t = t0 if chosen_t is None else chosen_t
-                    if start_pos is not None:
-                        leg.anchors.append(PlacedAnchor(x=start_pos[0], y=start_pos[1]))
-                        placed_positions.append(start_pos)
-                    else:
-                        refuse(points, cum, t0, v0)
-                        refused_here += 1
-                    # Far anchor: inward only, never past the start anchor.
-                    end_arcs = [t1 - d for d in nudges if t1 - d >= start_t + dedup_floor - 1e-9]
-                    _, end_pos, v1 = try_place(points, cum, end_arcs, clear)
-                    if end_pos is not None:
-                        leg.anchors.append(PlacedAnchor(x=end_pos[0], y=end_pos[1]))
-                        placed_positions.append(end_pos)
-                    else:
-                        refuse(points, cum, t1, v1)
+                    for pos in pair:
+                        if pos is not None:
+                            leg.anchors.append(PlacedAnchor(x=pos[0], y=pos[1]))
+                            placed_positions.append(pos)
+                    for pos, violation in refusals:
+                        refuse(pos, violation)
                         refused_here += 1
                     for a in leg.anchors:
                         if not dry_run:
@@ -1761,7 +1899,10 @@ def _reinforce_ends(
                         leg.status = LEG_FULL
                     elif leg.anchors:
                         leg.status = LEG_PARTIAL
-                        leg.reason = "1 of 2 end anchors refused (see refused)"
+                        leg.reason = (
+                            "1 of 2 end anchors refused by a clearance/hole-to-hole rule "
+                            "(see refused)"
+                        )
                     else:
                         leg.status = LEG_UNANCHORED
                         leg.reason = "both end anchors refused (see refused)"

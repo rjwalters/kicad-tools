@@ -318,11 +318,14 @@ Two placement modes:
   Every anchored leg gets exactly two anchors, one near each end, none in
   between. Each anchor's pad edge sits at least `--end-offset` mm (default
   1.0) clear, in straight-line distance, of the same-net copper the leg ends
-  on: the component pad (its real shape and rotation), a via, or, for a
-  branch, the trunk. If the leg bends soon after leaving that copper, the
+  on: a component pad (its real shape and rotation) or via that the end of
+  its track overlaps, even when the track centreline stops just short of it,
+  or, for a branch, the whole trunk (every trunk segment, not just the piece at
+  the junction). If the leg bends soon after leaving that copper, the
   anchor moves further inward until the clearance holds. A free end measures
-  from the track end. A leg too short for two
-  anchors is reported `too_short` and gets none, never one or three. A Y
+  from the track end. Both anchors are decided together: a leg with no room
+  for two (too short, or folding back so the two would overlap) is reported
+  `too_short` and gets none, never one or three. A Y
   junction becomes a `trunk` (the longest through-path, two end anchors) and
   a `branch` (one anchor at its free end, one beside the trunk); loops and
   higher-degree junctions are reported `unhandled`, not guessed.
@@ -333,7 +336,11 @@ Two placement modes:
   `--all-runs`, and copper on other layers is reported as unhandled.
   A refused end anchor is nudged inward along the leg only, by at most
   2 mm, and never past the other anchor; otherwise it is listed under
-  `refused` and the leg is `partial`/`unanchored`.
+  `refused` with the rule that refused it (including `hole_to_hole` /
+  `anchor_spacing` against another leg's anchor) and the leg is
+  `partial` (one anchor, the other rule-refused) or `unanchored`. One
+  anchor can't hold a two-ended wire, so treat `partial` as a placement to
+  fix.
 - **`--anchor-mode spaced`** keeps the pre-#8742 row of anchors at both run
   ends and every `--spacing` mm (default 15) along the run. `--spacing` is
   ignored, with a warning, in `ends` mode.
