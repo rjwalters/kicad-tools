@@ -1613,10 +1613,8 @@ def _physical_pad_covers(fp: Footprint, pad: Pad, point: tuple[float, float]) ->
 
     dx = point[0] - center[0]
     dy = point[1] - center[1]
-    angle = math.radians(-float(getattr(pad, "rotation", 0.0) or 0.0))
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    local_x = dx * cos_a - dy * sin_a
-    local_y = dx * sin_a + dy * cos_a
+    # Inverse of the forward KiCad pad rotation (board -> pad-local frame).
+    local_x, local_y = rotate_pad_offset(dx, dy, -float(getattr(pad, "rotation", 0.0) or 0.0))
 
     if pad.shape == "circle":
         radius = min(half_w, half_h)

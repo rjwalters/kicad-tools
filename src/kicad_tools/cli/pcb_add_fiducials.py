@@ -52,6 +52,36 @@ def _side_layers(side: str) -> tuple[str, str]:
     return ("F.Cu", "F") if side == "front" else ("B.Cu", "B")
 
 
+def stamp_child_uuids(pcb, refs) -> int:
+    """Give uuid-less properties/graphics of footprints ``refs`` a minted UUID.
+
+    Library footprints carry no per-item identities, and ``add_footprint`` only
+    stamps the footprint and its pads.  Stamping the rest keeps the saved board
+    in canonical-UUID form, so a later UUID remap is a pure rename (#8532).
+    """
+    from kicad_tools.sexp import SExp
+
+    wanted, count = set(refs), 0
+    for fp_node in pcb._sexp.find_all("footprint"):
+        ref_prop = next(
+            (c for c in fp_node.find_all("property") if c.get_string(0) == "Reference"), None
+        )
+        ref = ref_prop.get_string(1) if ref_prop is not None else None
+        if ref not in wanted:
+            continue
+        fp_uuid = fp_node.find_child("uuid")
+        key = fp_uuid.get_first_atom() if fp_uuid is not None else ref
+        for i, child in enumerate(fp_node.children):
+            if child.is_atom or child.name is None:
+                continue
+            if child.name != "property" and not child.name.startswith("fp_"):
+                continue
+            if child.find_child("uuid") is None:
+                child.append(SExp.list("uuid", pcb.mint_uuid(child.name, key, i)))
+                count += 1
+    return count
+
+
 def _is_fiducial(fp) -> bool:
     return str(getattr(fp, "name", "")).startswith("Fiducial:")
 
@@ -288,6 +318,7 @@ def run_add_fiducials(
                     if "board_only" not in fp._attr_unknown_tokens:
                         fp._attr_unknown_tokens = [*fp._attr_unknown_tokens, "board_only"]
                     placed.append({"reference": ref, "side": side, "x": x, "y": y})
+            stamp_child_uuids(pcb, [p["reference"] for p in placed])
         except Exception as e:
             _print_error(f"Failed to add fiducial footprint {lib_id}: {e}", output_format)
             return 1

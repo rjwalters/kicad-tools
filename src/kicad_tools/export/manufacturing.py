@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import zipfile
@@ -321,6 +322,44 @@ def _project_symbol_files(project_dir: Path) -> list[Path]:
     return files
 
 
+def _project_footprint_files(project_dir: Path) -> list[Path]:
+    """Project-local footprint library inventory (#8727).
+
+    ``fp-lib-table``, ``*.pretty`` / ``footprints`` / ``symbols`` directories and
+    the in-project ``${KIPRJMOD}`` (or relative) libraries the table references.
+    This mirrors the footprint half of ``kct readiness``'s dependency inventory
+    so ``kct export`` writes every file readiness requires of
+    ``kicad_project.zip``.  References leaving *project_dir* are skipped here
+    (archive names are project-relative); readiness collects those itself.
+    """
+    root = project_dir.resolve()
+    files: set[Path] = set()
+    table = project_dir / "fp-lib-table"
+    if table.is_file():
+        files.add(table)
+    for directory in project_dir.iterdir():
+        if directory.is_dir() and (
+            directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
+        ):
+            files.update(p for p in directory.rglob("*") if p.is_file())
+    if table.is_file():
+        for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text(errors="replace")):
+            if "${KIPRJMOD}" in uri:
+                dependency = Path(uri.replace("${KIPRJMOD}", str(root)))
+            elif not Path(uri).is_absolute() and "$" not in uri:
+                dependency = root / uri
+            else:
+                continue  # installed KiCad libraries are not project files
+            dependency = Path(os.path.normpath(dependency))
+            if not dependency.exists() or not dependency.resolve().is_relative_to(root):
+                continue
+            if dependency.is_dir():
+                files.update(p for p in dependency.rglob("*") if p.is_file())
+            else:
+                files.add(dependency)
+    return sorted(files)
+
+
 def _create_project_zip(
     pcb_path: Path,
     output_dir: Path,
@@ -334,7 +373,12 @@ def _create_project_zip(
     working copies, etc.) and backup files are excluded to keep the
     manufacturing package clean.
     """
-    project_dir = pcb_path.parent
+    # Resolve once: table-derived members are built from the resolved root, so
+    # every member (and its archive name) must share that spelling.  An
+    # unresolved/relative/symlinked project_dir (e.g. macOS /var -> /private/var
+    # TMPDIR) otherwise breaks ``relative_to`` below.
+    project_dir = pcb_path.parent.resolve()
+    pcb_path = project_dir / pcb_path.name
     zip_path = output_dir / zip_name
 
     # Always include the specific PCB being exported
@@ -360,6 +404,7 @@ def _create_project_zip(
         raise FileNotFoundError(f"No KiCad project files found in {project_dir}")
 
     project_files.extend(_project_symbol_files(project_dir))
+    project_files.extend(_project_footprint_files(project_dir))
     project_files = sorted(set(project_files))
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in project_files:
