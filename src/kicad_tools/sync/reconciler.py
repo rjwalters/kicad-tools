@@ -647,6 +647,9 @@ class Reconciler:
         """
         from kicad_tools.validate.netlist import NetlistValidator
 
+        if self._schematic_path is None or self._pcb_path is None:
+            return []
+
         try:
             validator = NetlistValidator(self._schematic_path, self._pcb_path)
             issues = validator.pad_net_mismatches()
