@@ -53,6 +53,12 @@ migrations) is never satisfiable by a class, with one exception (#13102): an opt
 `CREATE TABLE/INDEX IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN` or `INSERT OR IGNORE INTO … SELECT`);
 any other statement, an edited or deleted migration, or a failed read keeps the hold.
 
+A second opt-in class key, `"lockedDepsOnly": true` (2am#6942, operator ruling 2026-11-07), lets a
+class cover a `Cargo.toml` hit for a PR that `loom-daemon forge locked-deps-only <pr>` clears: a new
+workspace crate whose dependencies are all already in `Cargo.lock`. A new registry or git package,
+a version bump, a `git =`/`registry =`/`build =`/`links =`/`[patch]`/`[replace]` line, an out-of-repo
+`path =`, or a manifest change with no `Cargo.lock` change keeps the hold. It does not touch the kept set.
+
 A `"criticalFilesOnly": true` class (#12648) passes `critical-files` the same way, but is
 matched against the critical-file hits alone (the files `critical-files` flags, and each
 one's `previous_filename`): every hit must match its `filePatterns`, none its

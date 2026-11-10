@@ -594,13 +594,21 @@ esac
 # beats an approval, and of two identical verdicts the lowest comment id stands
 # (the other withdraws its comment). An approval stays non-actionable (no loom:pr)
 # until this succeeds, so an unreadable arbitration never leaves one live.
+# Telemetry (#12362): hand `verdict-labels` the head so the run's pick journal
+# records it. A daemon older than the script (a script roll) does not know
+# `--sha`, and clap would reject the call, so only pass it when advertised.
+VL_SHA_ARGS=()
+if "${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels --help 2>/dev/null | grep -q -- '--sha'; then
+  VL_SHA_ARGS=(--sha "$SHA")
+fi
+
 # An approval that lost a cross-host race: post the superseding marker, flip the
 # labels to changes-requested, exit 7. Used before AND after the label write.
 superseded_approval() {
   forge_gh_comment_rl_safe "$REPO" "$PR" "**Approval superseded (#10581)** — $1. A changes-requested verdict at this same head landed concurrently from another Judge; changes-requested wins. Read it, and re-review after the next push.
 
 <!-- loom:verdict-sha sha=$SHA verdict=changes-requested -->" 1 || true
-  "${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels "$PR" --repo "$REPO" --verdict changes-requested >/dev/null 2>&1 || echo "post-verdict.sh: could not flip the labels; run: loom-daemon forge verdict-labels $PR --repo $REPO --verdict changes-requested" >&2
+  "${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels "$PR" --repo "$REPO" --verdict changes-requested ${VL_SHA_ARGS[@]+"${VL_SHA_ARGS[@]}"} >/dev/null 2>&1 || echo "post-verdict.sh: could not flip the labels; run: loom-daemon forge verdict-labels $PR --repo $REPO --verdict changes-requested" >&2
   echo "post-verdict.sh: the approval on PR #$PR was SUPERSEDED by a concurrent changes-requested verdict at the same head; it does not stand: $1" >&2
   exit 7
 }
@@ -613,7 +621,7 @@ case "$RC_RC:$RC_OUT" in
   *) printf 'post-verdict.sh: %s verdict on PR #%s posted, but the cross-host reconcile was unconfirmed (#10581): %s\n' "$VERDICT" "$PR" "${RC_OUT:0:300}" >&2
      [[ "$VERDICT" == "approved" ]] && { echo "The approval is NOT live (no loom:pr applied). Re-run this command; the gate dedupes the comment and retries the arbitration." >&2; exit 8; } ;; # changes-requested: labels below, the safe side
 esac
-VL_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels "$PR" --repo "$REPO" --verdict "$VERDICT" 2>&1)" || { printf 'post-verdict.sh: the %s verdict on PR #%s is posted, but its label transition did not complete (#10581):\n%s\nRe-run: loom-daemon forge verdict-labels %s --repo %s --verdict %s\n' "$VERDICT" "$PR" "$VL_OUT" "$PR" "$REPO" "$VERDICT" >&2; exit 8; }
+VL_OUT="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge verdict-labels "$PR" --repo "$REPO" --verdict "$VERDICT" ${VL_SHA_ARGS[@]+"${VL_SHA_ARGS[@]}"} 2>&1)" || { printf 'post-verdict.sh: the %s verdict on PR #%s is posted, but its label transition did not complete (#10581):\n%s\nRe-run: loom-daemon forge verdict-labels %s --repo %s --verdict %s\n' "$VERDICT" "$PR" "$VL_OUT" "$PR" "$REPO" "$VERDICT" >&2; exit 8; }
 # Post-label re-arbitration (#10581): the reconcile above ran BEFORE the label
 # write, and another host can post a changes-requested verdict in between. Re-read
 # once the approval's labels are on: a rival that landed since then supersedes it
