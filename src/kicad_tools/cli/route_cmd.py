@@ -6112,8 +6112,11 @@ def _native_drc_failure_advice(geo) -> list[str]:
 # post-route DRC found, per resolved board path.  Declared current paths are
 # audited after routing, never planned by a search, so the chained completion
 # pass compares its staged board against the negotiated one here to tell
-# whether its copper added any.  Cleared at the start of each outermost
-# invocation.
+# whether its copper added any.  An entry exists for every board whose DRC
+# rule pass ran (an empty set when it found none, or none were declared); a
+# MISSING entry means the board was not audited (DRC skipped for --timeout,
+# failed before the rule pass, or never started) and must never be read as
+# "no errors".  Cleared at the start of each outermost invocation.
 _path_ampacity_errors: dict[str, frozenset[str]] = {}
 
 
@@ -6350,12 +6353,11 @@ def run_post_route_drc(
             current_path_specs=current_path_specs,
         )
         results = checker.check_all()
-        if current_path_specs:
-            _path_ampacity_errors[str(Path(output_path).resolve())] = frozenset(
-                f"{v.message} @ {v.location}"
-                for v in results.errors
-                if v.rule_id == "path_ampacity"
-            )
+        # Recorded even with no declared paths (an empty set): the entry is
+        # what tells the chained pass this board's audit ran at all.
+        _path_ampacity_errors[str(Path(output_path).resolve())] = frozenset(
+            f"{v.message} @ {v.location}" for v in results.errors if v.rule_id == "path_ampacity"
+        )
 
         error_count = results.error_count
         warning_count = results.warning_count
@@ -21859,10 +21861,15 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     original one.  A pass whose copper added a ``path_ampacity`` error against
     the declared ``--current-paths`` is refused with a message (Issue #8674):
     those paths are audited, not planned, and the inner exit 8 does not consult
-    the audit.  Copper-affecting recipe flags -- the layer stack, the HV
-    voltage map, the edge clearance and the current paths included (Issue
-    #8674) -- are forwarded (:func:`_chain_complete_argv`); ``--grid`` and the
-    engine flags are not, since ``--complete`` picks its own.
+    the audit.  The refusal fails closed: a pass whose audit did not run (its
+    DRC was skipped for ``--timeout``) is refused as "not audited", and so is
+    a pass whose board has ``path_ampacity`` errors when the negotiated board
+    was not audited and they cannot be compared.  Under ``--skip-drc`` nothing
+    is audited, as in the outer run, and a note says so.  Copper-affecting
+    recipe flags -- the layer stack, the HV voltage map, the edge clearance and
+    the current paths included (Issue #8674) -- are forwarded
+    (:func:`_chain_complete_argv`); ``--grid`` and the engine flags are not,
+    since ``--complete`` picks its own.
     """
     if (
         getattr(args, "no_chain_complete", False)
@@ -22001,19 +22008,44 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
             return result
         # Issue #8674: no search plans by --current-paths; the post-route DRC
         # audits them, and the inner exit 8 is returned before that audit is
-        # consulted.  Refuse copper that added a path_ampacity error.  An
-        # unaudited negotiated board (DRC skipped for --timeout) has none on
-        # record, so every error of the staged board counts as added.
-        ampacity_added = _path_ampacity_errors.get(
-            str(staged.resolve()), frozenset()
-        ) - _path_ampacity_errors.get(str(output.resolve()), frozenset())
-        if ampacity_added:
-            print(
-                "  Chained completion pass refused: its copper added "
-                f"{len(ampacity_added)} path_ampacity error(s) against the "
-                "declared --current-paths; negotiated output kept"
-            )
-            return result
+        # consulted.  Refuse copper that added a path_ampacity error -- and,
+        # fail-closed, copper whose audit cannot be shown to have run or
+        # cannot be compared: a missing record is "not audited", never "clean".
+        if "--current-paths" in chain_argv:
+            staged_errors = _path_ampacity_errors.get(str(staged.resolve()))
+            outer_errors = _path_ampacity_errors.get(str(output.resolve()))
+            if getattr(args, "skip_drc", False):
+                if not quiet:
+                    print(
+                        "  Note: --skip-drc: the declared --current-paths were NOT "
+                        "audited on the chained completion pass's copper "
+                        "(path_ampacity unchecked); run `kct check` on the output"
+                    )
+            elif staged_errors is None:
+                print(
+                    "  Chained completion pass refused: its copper was not audited "
+                    "against the declared --current-paths (the pass's post-route "
+                    "DRC did not run, e.g. skipped for --timeout); negotiated "
+                    "output kept"
+                )
+                return result
+            elif outer_errors is None:
+                if staged_errors:
+                    print(
+                        "  Chained completion pass refused: its board has "
+                        f"{len(staged_errors)} path_ampacity error(s) against the "
+                        "declared --current-paths and the negotiated board was not "
+                        "audited, so they could not be compared (the pass may not "
+                        "have added them); negotiated output kept"
+                    )
+                    return result
+            elif staged_errors - outer_errors:
+                print(
+                    "  Chained completion pass refused: its copper added "
+                    f"{len(staged_errors - outer_errors)} path_ampacity error(s) "
+                    "against the declared --current-paths; negotiated output kept"
+                )
+                return result
         # Sidecars first, the board last, so -o only changes once the rest is in place.
         # The receipt and constraint sidecars (.kicad_pro/.kicad_dru/.kicad_prl)
         # are not promoted: the outer run republishes the receipt for -o, and the

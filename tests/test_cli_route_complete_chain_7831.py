@@ -384,15 +384,28 @@ def test_no_current_paths_is_forwarded(tmp_path):
     assert _route_parser().parse_args(argv).no_current_paths
 
 
-def _pass_recording_ampacity(monkeypatch, staged_errors: set[str]):
+def _pass_recording_ampacity(monkeypatch, staged_errors: set[str] | None):
+    """Stub the inner pass: write the staged board, exit 8, and record its
+    path_ampacity audit -- or, with ``None``, record nothing (audit never ran)."""
+
     def fake_main(argv):
         staged = Path(argv[argv.index("-o") + 1])
         staged.write_text("completed")
-        route_cmd._path_ampacity_errors[str(staged.resolve())] = frozenset(staged_errors)
+        if staged_errors is not None:
+            route_cmd._path_ampacity_errors[str(staged.resolve())] = frozenset(staged_errors)
         return 8
 
     monkeypatch.setattr(route_cmd, "_main_impl", fake_main)
     monkeypatch.setattr(route_cmd, "_path_ampacity_errors", {})
+
+
+def _paths_args(board: Path, **overrides) -> argparse.Namespace:
+    return _args(board, current_paths="paths.json", **overrides)
+
+
+def _assert_kept(board: Path) -> None:
+    assert board.read_text() == "negotiated"
+    assert not list(board.parent.glob("*.chain*"))
 
 
 def test_pass_adding_a_path_ampacity_error_is_refused(board, monkeypatch, capsys):
@@ -401,11 +414,11 @@ def test_pass_adding_a_path_ampacity_error_is_refused(board, monkeypatch, capsys
     _stub_open(monkeypatch, [["A", "B"], ["B"]])
     _pass_recording_ampacity(monkeypatch, {"old", "too narrow for 10A"})
     route_cmd._path_ampacity_errors[str(board.resolve())] = frozenset({"old"})
-    assert _chain_complete_pass(_args(board, quiet=False), None, 2) == 2
-    assert board.read_text() == "negotiated"
-    assert not list(board.parent.glob("*.chain*"))
+    assert _chain_complete_pass(_paths_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
     out = capsys.readouterr().out
-    assert "refused" in out and "1 path_ampacity error(s)" in out and "--current-paths" in out
+    assert "refused" in out and "added 1 path_ampacity error(s)" in out
+    assert "--current-paths" in out
 
 
 def test_pass_adding_no_path_ampacity_error_is_promoted(board, monkeypatch):
@@ -413,5 +426,79 @@ def test_pass_adding_no_path_ampacity_error_is_promoted(board, monkeypatch):
     _stub_open(monkeypatch, [["A", "B"], ["B"]])
     _pass_recording_ampacity(monkeypatch, {"old"})
     route_cmd._path_ampacity_errors[str(board.resolve())] = frozenset({"old", "gone"})
+    assert _chain_complete_pass(_paths_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_unaudited_pass_is_refused_not_promoted(board, monkeypatch, capsys, quiet):
+    """A pass that wrote its board and exited 8 but whose current-path audit
+    never ran (no record: DRC skipped for --timeout) is not "clean"."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
+    route_cmd._path_ampacity_errors[str(board.resolve())] = frozenset()
+    assert _chain_complete_pass(_paths_args(board, quiet=quiet), None, 2) == 2
+    _assert_kept(board)
+    out = capsys.readouterr().out
+    assert "refused" in out and "not audited" in out and "--current-paths" in out
+    assert "added" not in out and "closed" not in out
+
+
+def test_unaudited_pass_is_refused_for_auto_discovered_paths(board, monkeypatch, capsys):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
+    args = _args(board, _current_paths_input_path=board.with_name("current_paths.json"))
+    assert _chain_complete_pass(args, None, 2) == 2
+    _assert_kept(board)
+    assert "not audited" in capsys.readouterr().out
+
+
+def test_unaudited_pass_without_current_paths_is_promoted(board, monkeypatch):
+    """No declared paths in force: there is nothing to audit, as before #8674."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
     assert _chain_complete_pass(_args(board), None, 2) == 2
     assert board.read_text() == "completed"
+    _pass_recording_ampacity(monkeypatch, None)
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    board.write_text("negotiated")
+    assert _chain_complete_pass(_args(board, no_current_paths=True), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_unaudited_negotiated_board_is_not_reported_as_added(board, monkeypatch, capsys):
+    """No record for -o: the pass's errors may pre-exist.  Still refused
+    (fail-closed), but as "could not be compared", never as "added"."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, {"e1", "e2", "e3"})
+    assert _chain_complete_pass(_paths_args(board, quiet=False), None, 2) == 2
+    _assert_kept(board)
+    out = capsys.readouterr().out
+    assert "refused" in out and "3 path_ampacity error(s)" in out
+    assert "negotiated board was not audited" in out and "could not be compared" in out
+    assert "copper added" not in out
+
+
+def test_clean_pass_over_unaudited_negotiated_board_is_promoted(board, monkeypatch):
+    """The pass's own audit ran and found nothing: there is nothing to compare."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, set())
+    assert _chain_complete_pass(_paths_args(board), None, 2) == 2
+    assert board.read_text() == "completed"
+
+
+def test_skip_drc_promotes_with_an_unaudited_note(board, monkeypatch, capsys):
+    """--skip-drc audits nothing, in the outer run and the pass alike; say so."""
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
+    assert _chain_complete_pass(_paths_args(board, quiet=False, skip_drc=True), None, 2) == 2
+    assert board.read_text() == "completed"
+    out = capsys.readouterr().out
+    assert "--skip-drc" in out and "NOT audited" in out and "refused" not in out
+
+
+def test_skip_drc_note_needs_current_paths(board, monkeypatch, capsys):
+    _stub_open(monkeypatch, [["A", "B"], ["B"]])
+    _pass_recording_ampacity(monkeypatch, None)
+    assert _chain_complete_pass(_args(board, quiet=False, skip_drc=True), None, 2) == 2
+    assert "NOT audited" not in capsys.readouterr().out
