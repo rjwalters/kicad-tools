@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8668**: feat(check): report segments covered by a longer collinear segment
+- **PR #8662**: fix: key kept copper on name-only boards by its real net
+- **Issue #8665** (closed): check: report segment wholly covered by collinear same-net segment as redundant copper
+- **Issue #8658** (closed): route --complete: kept copper on name-only (KiCad 10) boards is keyed to net 0, so the short check reports phantom shorts
 - **PR #8670**: fix(audit): keep netted MountingHoles footprints and treat NC nets as equivalent
 - **PR #8666**: fix: cut false-positive noise in detect-mistakes checks
 - **PR #8660**: fix(router): make _dilate_blocked independent of scipy
