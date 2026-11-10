@@ -16,6 +16,17 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8738**: test: allow redundant_copper_covered in board 03 DRC baseline
+- **Issue #8736** (closed): test_board03_routing_baseline: committed board 03 PCB newly reports redundant_copper_covered
+- **PR #8737**: fix(optimizer): keep staircase shortcuts off the net's own copper
+- **PR #8735**: fix: widen pin-1 marker search to courtyard and report effective radius
+- **Issue #8731** (closed): pin1_marker_missing still fires on stock HLK-PMxx footprint after #8688
+- **PR #8733**: fix: iterate kct pcb prune to a fixed point and reword covered-copper message
+- **Issue #8730** (closed): redundant_copper_covered says 'removable with kct pcb prune' but prune leaves T-joint cases; splitting the longer segment exposes spurs
+- **PR #8729**: feat(route): refuse chained pass copper that adds native-only DRC errors
+- **Issue #8717** (closed): Chained --complete DRC comparison: include native kicad-cli findings in the per-board record
+- **PR #8597**: feat(check): flag missing fiducials and board ID; add them in readiness generate
+- **Issue #8532** (closed): check rules fiducials_missing/board_id_missing and default tapeout/readiness step
 - **PR #8725**: fix: honour gr_text rotation in silk over-copper/overlap/edge checks
 - **Issue #8724** (closed): kct check silk_over_copper / silk_overlap: a board-level gr_text rotated 90 degrees is measured as if upright
 - **PR #8721**: fix(optimize-traces): roll back nets that raise any kicad-cli rule count
