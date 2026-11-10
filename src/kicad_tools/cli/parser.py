@@ -7374,6 +7374,24 @@ def _add_readiness_parser(subparsers) -> None:
         help="Accept through-hole parts in the CPL (excluded by default only for SMT-only fabs; JLCPCB includes them)",
     )
     rd_parser.add_argument(
+        "--skip-fiducials",
+        dest="readiness_skip_fiducials",
+        action="store_true",
+        help=(
+            "Skip adding global fiducials (pcb add-fiducials) during --generate; "
+            "the skip is recorded in the report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--skip-board-info",
+        dest="readiness_skip_board_info",
+        action="store_true",
+        help=(
+            "Skip adding the board-ID silkscreen text (pcb add-board-info) during "
+            "--generate; the skip is recorded in the report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
         "--no-archive",
         dest="readiness_no_archive",
         action="store_true",

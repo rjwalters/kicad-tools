@@ -145,6 +145,9 @@ def physical_fingerprint(path):
                 ],
             )
             for f in sorted(pcb.footprints, key=lambda f: f.reference)
+            # Issue #8532: assembly-prep fiducials are added after review and
+            # carry no pads on a net; they are not part of the reviewed design.
+            if not f.name.startswith("Fiducial:")
         ],
     ]
     return hashlib.sha256(json.dumps(rounded(data), sort_keys=True).encode()).hexdigest()
