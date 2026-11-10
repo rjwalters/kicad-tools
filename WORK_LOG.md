@@ -16,6 +16,12 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8670**: fix(audit): keep netted MountingHoles footprints and treat NC nets as equivalent
+- **PR #8666**: fix: cut false-positive noise in detect-mistakes checks
+- **PR #8660**: fix(router): make _dilate_blocked independent of scipy
+- **Issue #8669** (closed): audit sync: a header footprint with 'MountingHoles' in its name is dropped as a mounting hole and reported schematic-only; no-connect pins reported as net mismatches
+- **Issue #8663** (closed): detect-mistakes: 208 of 209 warnings on a clean board are noise (bypass cross-product, duplicates, 90° reported as acute, supply net as crystal trace)
+- **Issue #8657** (closed): route: _dilate_blocked uses scipy when importable — 8-17x slower and different results at the grid edge
 - **PR #8655**: chore(release): v0.29.0
 - **PR #8654**: test: cover project_rules call sites in kct check and readiness report
 - **PR #8626**: chore(deps): bump astral-sh/setup-uv from 10.3.0 to 10.3.2 in the github-actions group across 1 directory
