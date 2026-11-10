@@ -1932,3 +1932,49 @@ def _iter_zones_subparser_actions(parser, sub_name):
             for zaction in zones._actions:
                 if isinstance(zaction, argparse._SubParsersAction) and sub_name in zaction.choices:
                     yield from zaction.choices[sub_name]._actions
+
+
+class TestRelieveAndAsymmetryWarning:
+    """Issue #8659."""
+
+    def test_relieve_in_zones_help(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["--help"])
+        assert "relieve" in capsys.readouterr().out
+
+    def test_relieve_runs_revisit_loop(self, tmp_pcb, capsys):
+        with (
+            patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
+            patch(
+                "kicad_tools.cli.runner.relieve_solid_overrides", return_value=tmp_pcb
+            ) as relieve,
+            patch("kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[5, 2]),
+        ):
+            rc = main(["relieve", str(tmp_pcb)])
+        assert rc == 0
+        relieve.assert_called_once()
+        assert "thermal_asymmetry: 5 -> 2" in capsys.readouterr().out
+
+    def test_fill_warns_when_asymmetry_rises(self, tmp_pcb, capsys):
+        result = MagicMock(success=True, stderr="", fill_notes=[], fill_conflicts=[])
+        check = SavedFillCheck(ran=True, regressions=[], note="")
+        with (
+            patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
+            patch(_RUN_FILL, return_value=result),
+            patch(_CHECK_SAVED_FILL, return_value=check),
+            patch("kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[1, 4]),
+        ):
+            main(["fill", str(tmp_pcb)])
+        assert "thermal_asymmetry findings rose 1 -> 4" in capsys.readouterr().err
+
+    def test_fill_silent_when_asymmetry_flat(self, tmp_pcb, capsys):
+        result = MagicMock(success=True, stderr="", fill_notes=[], fill_conflicts=[])
+        check = SavedFillCheck(ran=True, regressions=[], note="")
+        with (
+            patch(_FIND_CLI, return_value=Path("/fake/kicad-cli")),
+            patch(_RUN_FILL, return_value=result),
+            patch(_CHECK_SAVED_FILL, return_value=check),
+            patch("kicad_tools.cli.zones_cmd._thermal_asymmetry_count", side_effect=[3, 3]),
+        ):
+            main(["fill", str(tmp_pcb)])
+        assert "rose" not in capsys.readouterr().err
