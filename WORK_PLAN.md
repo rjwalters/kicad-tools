@@ -35,18 +35,25 @@ Human-approved issues ready for implementation (`loom:issue`).
 
 Issues currently being built (`loom:building`).
 
-- **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs
-- **#8702**: Chained --complete DRC comparison: measure finding key and cover native kicad-cli findings
-- **#8719**: kct pcb prune is not idempotent: repeated runs alternate between two board states (0.01-0.07 mm in-pad segments)
-- **#8720**: optimize-traces --drc-aware (0.29.0): reports a new kicad-cli clearance error on the written board, then keeps the result and exits 0
+- **#8577**: route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class (fails kicad-cli DRC)
+- **#8603**: Board 07: classify and eliminate remaining redundant_copper warnings at source (part of #8399)
+- **#8727**: kct readiness --verify blocks a clean tapeout bundle: declared BOM exemption not honoured, sibling board versions demanded in kicad_project.zip (so tapeout-sign-off and submit-jlcpcb are unreachable)
+- **#8730**: redundant_copper_covered says 'removable with kct pcb prune' but prune leaves T-joint cases; splitting the longer segment exposes spurs
+- **#8731**: pin1_marker_missing still fires on stock HLK-PMxx footprint after #8688
+- **#8734**: redundant_copper_covered fires on a sub-0.03 mm same-layer loop that kct pcb prune reports nothing to remove for; fails readiness warning_review
+- **#8736**: test_board03_routing_baseline: committed board 03 PCB newly reports redundant_copper_covered
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8718**: fix(route): key chained-pass connectivity errors by net, not message
-- **#8721**: fix(optimize-traces): roll back nets that raise any kicad-cli rule count
-- **#8722**: test(prune): assert convergence on sub-0.1 mm in-pad segments
+- **#8597**: feat(check): flag missing fiducials and board ID; add them in readiness generate
+- **#8728**: fix(readiness): honour declared BOM exemptions and scope project-zip inventory to the board
+- **#8733**: fix: iterate kct pcb prune to a fixed point and reword covered-copper message
+- **#8735**: fix: widen pin-1 marker search to courtyard and report effective radius
+- **#8737**: fix(optimizer): keep staircase shortcuts off the net's own copper
+- **#8738**: test: allow redundant_copper_covered in board 03 DRC baseline
+- **#8739**: fix: make prune clear redundant_copper_covered findings
 
 ## Approved (Awaiting Merge)
 
@@ -71,9 +78,11 @@ Issues carrying `loom:curated`.
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
-- **#8702**: Chained --complete DRC comparison: measure finding key and cover native kicad-cli findings *(curated)*
-- **#8719**: kct pcb prune is not idempotent: repeated runs alternate between two board states (0.01-0.07 mm in-pad segments) *(curated)*
-- **#8720**: optimize-traces --drc-aware (0.29.0): reports a new kicad-cli clearance error on the written board, then keeps the result and exits 0 *(curated)*
+- **#8727**: kct readiness --verify blocks a clean tapeout bundle: declared BOM exemption not honoured, sibling board versions demanded in kicad_project.zip (so tapeout-sign-off and submit-jlcpcb are unreachable) *(curated)*
+- **#8730**: redundant_copper_covered says 'removable with kct pcb prune' but prune leaves T-joint cases; splitting the longer segment exposes spurs *(curated)*
+- **#8731**: pin1_marker_missing still fires on stock HLK-PMxx footprint after #8688 *(curated)*
+- **#8734**: redundant_copper_covered fires on a sub-0.03 mm same-layer loop that kct pcb prune reports nothing to remove for; fails readiness warning_review *(curated)*
+- **#8736**: test_board03_routing_baseline: committed board 03 PCB newly reports redundant_copper_covered *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -93,10 +102,10 @@ _None._
 | Very important | 0 |
 | Important | 1 |
 | Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 4 |
-| PRs awaiting review | 3 |
+| In Progress (`loom:building`) | 7 |
+| PRs awaiting review | 7 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 16 |
+| Curated | 18 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
