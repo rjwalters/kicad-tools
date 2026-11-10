@@ -4651,9 +4651,11 @@ def detect_layer_stack(pcb_text: str) -> LayerStack:
     # Detect which layers have zone fills (likely planes)
     zone_layers: dict[str, str] = {}  # layer_name -> net_name
 
-    # Parse zone definitions to find layers with fills
+    # Parse zone definitions to find layers with fills.  The zone's net is
+    # ``(net_name "X")`` in legacy files and ``(net "X")`` in KiCad 10
+    # (Issue #8693); the quoted form keeps the legacy numeric ``(net 1)`` out.
     for zone_match in re.finditer(
-        r'\(zone\s+.*?\(net_name\s+"([^"]+)"\).*?\(layer\s+"([^"]+)"\)',
+        r'\(zone\s+.*?\((?:net_name|net)\s+"([^"]+)"\).*?\(layer\s+"([^"]+)"\)',
         pcb_text,
         re.DOTALL,
     ):

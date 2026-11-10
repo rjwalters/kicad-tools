@@ -6243,6 +6243,13 @@ def run_post_route_drc(
     def _left() -> float | None:
         return None if _finish_by is None else _finish_by - time.monotonic()
 
+    # Issue #8692: the path_ampacity audit record means "the MOST RECENT call
+    # on this path ran its rule pass".  Drop any earlier call's entry before
+    # any early exit (skipped for time, PCB.load / DRCChecker / check_all
+    # failure) so a stale record cannot read as "this board was audited".
+    _record_key = str(Path(output_path).resolve())
+    _path_ampacity_errors.pop(_record_key, None)
+
     # Issue #3917 Defect 1: persist the net-class map as a sidecar next to
     # the routed PCB so ``kct check`` (and re-runs of this DRC) can
     # auto-load it and fire the sidecar-gated skew / continuity rules.
@@ -6366,8 +6373,6 @@ def run_post_route_drc(
         # it must never take the rest of this DRC down (the geometric
         # reconciliation below): on any failure NO entry is written, which
         # the chained pass reads as "not audited" and refuses (fail-closed).
-        _record_key = str(Path(output_path).resolve())
-        _path_ampacity_errors.pop(_record_key, None)
         try:
             _path_ampacity_errors[_record_key] = frozenset(
                 f"{v.message} @ {v.location}"
@@ -21765,7 +21770,10 @@ def _chain_complete_argv(
       passed by name, so the inner pass builds the same explicit stack instead
       of re-detecting one from the routed board.  Under ``auto`` the operator
       named no stack; the inner pass detects it from the board the outer run
-      wrote.
+      wrote.  That equals the outer run's stack (Issue #8693): routing never
+      edits the layer table or zones, and ``detect_layer_stack`` reads both
+      zone-net spellings, so no resolved-stack handoff is needed (a layer
+      count cannot name an 8+-layer stack anyway).
     * ``--voltage-map`` (Issue #8674) -- the HV pairwise-clearance table the
       lattice search rejects against and the completion creepage rollback
       measures against.
