@@ -38,7 +38,7 @@ from . import wall_deadline as _wall_deadline
 from .clearance_kernel import CLEARANCE_EPSILON_MM
 from .clearance_resolver import trace_via_clearance_mm
 from .geometry import segments_intersect as _geom_segments_intersect
-from .grid import RoutingGrid
+from .grid import RoutingGrid, SetupDeadlineExpired
 from .heuristics import DEFAULT_HEURISTIC, Heuristic, HeuristicContext
 from .layers import Layer
 from .pad_landing import landing_cost, pad_landing_geometry
@@ -113,16 +113,9 @@ class _PairwiseSearchState:
 _PAIRWISE_MASK_CACHE_MAX = 64
 
 
-class _SetupDeadlineExpired(Exception):
-    """The per-call wall budget ran out while building pre-search masks.
-
-    Issue #8414: ``Router._route_impl`` used to arm its deadline only after the
-    HV pairwise mask builders, which cost 127 s of a 128 s fallback call with a
-    10 s budget. The builders now check the call's deadline between foreign
-    domains and raise this. ``_route_impl`` turns it into a ``None`` result with
-    ``last_route_deadline_hit`` set. The raise always happens *before* a mask is
-    written to ``_pairwise_extra_cache``, so a cut-short build is never cached.
-    """
+# Issue #8645: the exception lives in ``grid`` so ``compute_expanded_blocked``
+# can raise it; ``_route_impl`` catches it under the historical name.
+_SetupDeadlineExpired = SetupDeadlineExpired
 
 
 def _check_setup_deadline(deadline: float | None) -> None:
@@ -4606,7 +4599,13 @@ class Router:
         # fallback call whose budget was 10 s, because the deadline was only
         # armed just before the A* loop.
         route_start = time.monotonic()
-        setup_deadline = route_start + per_net_timeout if per_net_timeout is not None else None
+        # Issue #8645: a corner-flanked start gets the escape-hint multiplier
+        # for setup too, so the mask builders are not stopped at 1x on a net
+        # the search would have been given 3x. ``_detect_escape_hint`` reads
+        # only grid cells and ``start_layers``, so it runs after the layer
+        # filters, before the first mask builder (hoisted below).
+        setup_timeout = per_net_timeout
+        setup_deadline = None
 
         # Issue #2330: Reset waypoint state for this route call
         self._waypoint_world_coords.clear()
@@ -4752,6 +4751,13 @@ class Router:
             if not start_layers or not end_layers:
                 return None
 
+        # Issue #8645: decide the budget multiplier once, before any mask
+        # builder, and derive both the setup and search deadlines from it.
+        escape_dir = self._detect_escape_hint(start, start_layers)
+        if per_net_timeout is not None and per_net_timeout > 0.0 and escape_dir is not None:
+            setup_timeout = per_net_timeout * self._ESCAPE_HINT_DEADLINE_MULT
+        setup_deadline = route_start + setup_timeout if setup_timeout is not None else None
+
         # A* setup
         open_set: list[AStarNode] = []
 
@@ -4776,17 +4782,24 @@ class Router:
         # _is_trace_blocked becomes a single array lookup per neighbor.
         # Issue #2559 / Phase 1C: Pass partner net id and tighter radius so
         # within-pair edges of a diff pair get the relaxed clearance.
-        expanded_blocked = self.grid.compute_expanded_blocked(
-            net_trace_half_width_cells,
-            start.net,
-            allow_sharing,
-            partner_net=partner_net_id,
-            partner_radius=net_partner_half_width_cells,
-            partner_active=partner_active_flag,
-            # Issue #3438: relief-probe mode -- foreign usage-0 cells are
-            # excluded from the hard bitmap (penalised per step instead).
-            relief_mode=self.relief_mode and allow_sharing,
-        )
+        try:
+            expanded_blocked = self.grid.compute_expanded_blocked(
+                net_trace_half_width_cells,
+                start.net,
+                allow_sharing,
+                partner_net=partner_net_id,
+                partner_radius=net_partner_half_width_cells,
+                partner_active=partner_active_flag,
+                # Issue #3438: relief-probe mode -- foreign usage-0 cells are
+                # excluded from the hard bitmap (penalised per step instead).
+                relief_mode=self.relief_mode and allow_sharing,
+                # Issue #8645: checked between dilations; raises, never
+                # returns a partial mask.
+                deadline=setup_deadline,
+            )
+        except _SetupDeadlineExpired:
+            self._note_setup_deadline_stop()
+            return None
 
         # Issue #8414: the HV pairwise builders below check the call's wall
         # deadline before every dilation they start. On expiry the search is
@@ -4938,7 +4951,6 @@ class Router:
         # The seed inherits ``direction = escape_dir`` so its
         # descendants get the turn-cost bonus for continuing outward.
         # When ``_detect_escape_hint`` declines, the block is a no-op.
-        escape_dir = self._detect_escape_hint(start, start_layers)
         if escape_dir is not None:
             for cx, cy, cl, edge_cost in self._escape_hint_cells(
                 start, escape_dir, start.net, start_layers
@@ -4976,9 +4988,9 @@ class Router:
         # converge.  This is a TARGETED extension -- it never widens
         # the global deadline, and nets whose pads don't trip the
         # predicate continue to honour ``per_net_timeout`` exactly.
-        effective_timeout = per_net_timeout
-        if per_net_timeout is not None and per_net_timeout > 0.0 and escape_dir is not None:
-            effective_timeout = per_net_timeout * self._ESCAPE_HINT_DEADLINE_MULT
+        # Issue #8645: the multiplier is decided once, up top (``setup_deadline``
+        # shares it), so setup and search draw on one budget.
+        effective_timeout = setup_timeout
         # Issue #8414: measured from ``route_start`` (the top of the call), so
         # the pre-search setup above is charged to the same budget.
         deadline = route_start + effective_timeout if effective_timeout is not None else None

@@ -156,3 +156,62 @@ def test_unstalled_fallback_still_routes_the_hv_net(per_net_timeout: float | Non
     assert routes, "the HV net must route on the armed fixture"
     assert search.last_route_deadline_hit is False
     assert len(search._pairwise_extra_cache) == len(LV_NAMES)
+
+
+# --- Issue #8645: shared setup/search budget and deadline-aware expansion ----
+
+
+def _stall(search: Router, seconds: float) -> None:
+    inner = search._dilate_zero_padded
+
+    def stalled(mask: np.ndarray, radius: int) -> np.ndarray:
+        time.sleep(seconds)
+        return inner(mask, radius)
+
+    search._dilate_zero_padded = stalled  # type: ignore[method-assign]
+
+
+@pytest.mark.parametrize("flanked", [False, True])
+def test_escape_hint_start_gets_the_widened_setup_budget(flanked: bool) -> None:
+    """Setup of ~1.7x the budget stops at 1x, unless the start is corner-flanked."""
+    router = _hv_autorouter()
+    search = _armed_search_router(router)
+    _stall(search, 0.15)  # ~11 dilations/bands -> ~1.7 s of setup on a 1 s budget
+    if flanked:
+        search._detect_escape_hint = lambda pad, layers: (1, 0)  # type: ignore[method-assign]
+    start, end = (router.pads[key] for key in router.nets[1])
+
+    search.route(start, end, per_net_timeout=1.0)
+
+    if flanked:
+        assert search.last_route_deadline_hit is False
+    else:
+        assert search.last_route_deadline_hit is True
+        assert search.last_route_deadline_iterations == 0
+
+
+def test_compute_expanded_blocked_deadline_raises_and_recovers() -> None:
+    from kicad_tools.router.grid import SetupDeadlineExpired
+
+    router = _hv_autorouter()
+    grid = router.router.grid
+    radius = 3
+
+    with pytest.raises(SetupDeadlineExpired):
+        grid.compute_expanded_blocked(radius, 1, deadline=time.monotonic() - 1.0)
+    # Partner branch (two dilations) honours it too.
+    with pytest.raises(SetupDeadlineExpired):
+        grid.compute_expanded_blocked(
+            radius,
+            1,
+            partner_net=2,
+            partner_radius=2,
+            partner_active=True,
+            deadline=time.monotonic() - 1.0,
+        )
+
+    full = grid.compute_expanded_blocked(radius, 1)
+    assert full.shape == (grid.num_layers, grid.rows, grid.cols)
+    assert full.tobytes() == grid.compute_expanded_blocked(radius, 1, deadline=None).tobytes()
+    far = time.monotonic() + 3600.0
+    assert full.tobytes() == grid.compute_expanded_blocked(radius, 1, deadline=far).tobytes()
