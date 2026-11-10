@@ -944,6 +944,11 @@ def create_stm32_pcb(output_dir: Path) -> Path:
     (legacy_teardrops no)
   )
   (paper "A4")
+  (title_block
+    (title "STM32F103C8 Development Board")
+    (date "2025-01")
+    (rev "A")
+  )
   (layers
     (0 "F.Cu" signal)
     (31 "B.Cu" signal)
@@ -2517,6 +2522,18 @@ def main() -> int:
         from kicad_tools.pcb_prune import cleanup_copper
 
         print(f"   Copper cleanup: {cleanup_copper(routed_path)}")
+
+        # Issue #8532: every board carries global fiducials and a board-ID
+        # silkscreen.  Added after the physical-design review (the reviewed
+        # fingerprint ignores fiducial footprints) and before the re-pour so
+        # the GND pour backs off the new copper.
+        from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+        from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+        if run_add_fiducials(routed_path, sides="populated") != 0:
+            raise RuntimeError("pcb add-fiducials failed")
+        if run_add_board_info(routed_path, auto=True) != 0:
+            raise RuntimeError("pcb add-board-info failed")
         fill_success = fill_zones(routed_path)
 
         # Step 7: Run DRC.  Issue #3912: run_drc still runs for its
