@@ -1006,6 +1006,8 @@ class CppGrid:
         # Track synced route count for incremental stored segment/via updates
         # (Issue #2439: C++ geometric validation)
         self._synced_route_count: int = 0
+        # Issue #8769: authored route-floor version last synced to C++.
+        self._stored_route_floor_version: int = 0
         # Issue #6243: what ``sync_authored_floors`` last installed.
         self._authored_key: tuple | None = None
 
@@ -5599,6 +5601,13 @@ def sync_stored_routes(cpp_grid: CppGrid, py_grid: RoutingGrid, project=None) ->
 
         def project(layers):
             return project_via_spans(cpp_grid, layers)
+
+    # Issue #8769: a class map merged after loading can change a kept route's
+    # item floor without changing the route count; rebuild the stored copper.
+    floor_version = getattr(py_grid, "_authored_route_floor_version", 0)
+    if floor_version != getattr(cpp_grid, "_stored_route_floor_version", 0):
+        cpp_grid.invalidate_stored_routes()
+        cpp_grid._stored_route_floor_version = floor_version
 
     current_count = len(py_grid.routes)
     if current_count <= cpp_grid._synced_route_count:
