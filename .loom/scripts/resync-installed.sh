@@ -2330,6 +2330,10 @@ if [[ -d "$DEFAULTS_DIR/hooks" && -d "$INSTALLED_HOOKS" ]]; then
         name="$(basename "$src")"
         # The vendored generic guard is conditional on the canonical guard (#4041).
         if [[ "$name" == "guard-destructive-generic.sh" && "$CANONICAL_GUARD_PRESENT" -eq 1 ]]; then
+            # #13680: this branch skips sync_one (the only other is_ignored caller),
+            # so a valid pin on this hook would be reported dead. Record the hit
+            # and seen path; output is unchanged.
+            is_ignored "hooks/$name" >/dev/null || true
             if [[ -f "$INSTALLED_HOOKS/$name" ]]; then
                 if git -C "$WRITE_ROOT" ls-files --error-unmatch -- ".loom/hooks/$name" >/dev/null 2>&1; then
                     # #4403: this target is git-tracked in the consuming repo, so it's

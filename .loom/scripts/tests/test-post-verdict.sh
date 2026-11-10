@@ -193,6 +193,8 @@ if [[ "${1:-} ${2:-}" == "forge verdict-body-check" ]]; then
 fi
 if [[ "${1:-}" == forge && "${2:-}" == verdict-* && "${3:-}" == --help ]]; then
   [[ -f "$D/old-daemon" ]] && { echo "error: unrecognized subcommand '$2'" >&2; exit 2; }
+  # #12362: verdict-labels advertises --sha unless the mock is a pre-#12362 daemon.
+  [[ "$2" == verdict-labels && ! -f "$D/no-sha-daemon" ]] && echo "      --sha <SHA>  the head the verdict was written against"
   exit 0
 fi
 # #13055: `lease pr check` answers from lease-state ("<rc> <line>"); default held-self.
@@ -666,6 +668,20 @@ assert_contains "$CALLS" "forge verdict-labels 300 --repo owner/repo --verdict a
 assert_contains "$CALLS" "forge verdict-lock acquire 300 --repo owner/repo" "the per-PR lock is taken before the gate"
 assert_contains "$CALLS" "forge verdict-lock release 300 --repo owner/repo" "the per-PR lock is released at exit"
 
+# #12362: the head reaches verdict-labels (journaled there for telemetry) and
+# nothing else about the call, its stdout or its exit code changes.
+assert_contains "$CALLS" "forge verdict-labels 300 --repo owner/repo --verdict approved --sha abc1234" "verdict-labels gets the head via --sha (main path)"
+
+# A daemon that predates --sha is never handed it (clap would reject the call
+# and stall the verdict): the labels still apply, exit 0.
+reset_state
+touch "$STUB_DIR/no-sha-daemon"
+run_pv 308 approved abc1234 --body "ok"
+assert_eq "0" "$EXIT_CODE" "pre-#12362 daemon: verdict still lands"
+assert_eq "0" "$(grep -c -- '--sha' <<<"$(grep 'forge verdict-labels 308' "$STUB_DIR/daemon-calls.log")")" "pre-#12362 daemon: no --sha on verdict-labels"
+assert_eq "1" "$(grep -c 'forge verdict-labels 308 --repo owner/repo --verdict approved' "$STUB_DIR/daemon-calls.log")" "pre-#12362 daemon: label transition still runs"
+rm -f "$STUB_DIR/no-sha-daemon"
+
 # Lock timeout: exit 9 (fail closed), the gate never runs, nothing is posted.
 reset_state
 touch "$STUB_DIR/lock-fail"
@@ -744,6 +760,8 @@ assert_contains "$(cat "$STUB_DIR/last-body.txt" 2>/dev/null || true)" "verdict=
 # The reconcile runs BEFORE the labels: an approval is never live while arbitration is pending.
 CALLS="$(cat "$STUB_DIR/daemon-calls.log")"
 assert_eq "yes" "$([[ "${CALLS%%forge verdict-labels*}" == *"forge verdict-reconcile"* ]] && echo yes || echo no)" "reconcile precedes verdict-labels"
+
+assert_contains "$CALLS" "forge verdict-labels 321 --repo owner/repo --verdict changes-requested --sha abc1234" "superseded path hands the head to its changes-requested flip"
 
 # A changes-requested that prevails re-asserts its own labels.
 reset_state

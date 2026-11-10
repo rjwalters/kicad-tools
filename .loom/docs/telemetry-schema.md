@@ -1359,6 +1359,10 @@ gradeable by a model or prompt experiment.
 | `prompt` | object | no | The checkout the session read its `/loom:<role>` prompt from, as it stood immediately before the spawn (#11989): `commit` (HEAD, full SHA), `loom_version` (the working tree's `.loom/install-metadata.json`), `commits_behind` (HEAD's distance behind the clone's `origin/<default>`), `on_branch` (`false` for a detached HEAD) and the remote fields of [`checkout.freshness`](#checkoutfreshness) (`remote_tip`, `commits_behind_remote`, `origin_ref_stale`, `remote_repo`, `remote_foreign`); each inner key is absent when it cannot be read. Absent on a tick that never resolved a launch. OTLP: `loom.prompt.commit`, `loom.prompt.loom_version`, `loom.prompt.commits_behind`, `loom.prompt.on_branch` and the remote fields' `loom.prompt.*` keys, so a role running stale prompts is `loom.prompt.commits_behind > 0`. Here `commits_behind` is against the local `origin/<default>` ref; `commits_behind_remote` measures against GitHub's tip from the head the daemon last heard (#12509). Additive, no `schema_version` bump. |
 | `source` | string | no | `step` when a step-engine step ran, not a role-runner tick (#11906). Mapped to `loom.role_tick.source`; absent on a role tick. Additive. |
 | `sweep_id` | string | no | The step's sweep id (`step-<role>-<item>-<ts>`), with `source`. Mapped to `loom.sweep_id`. |
+| `found_work` | bool | no | A **launched Judge** role-runner tick won a PR claim (or its prompt named a PR) or wrote a verdict (#12362). `false` is an observation (an idle, spawned tick), never a default; absent for any other role and for a tick that never launched. Mapped to `loom.found_work`. Additive. |
+| `noop_reason` | string | no | Set exactly when `found_work` is `false`: the session's own `LOOM_STEP_OUTCOME role=judge … reason=` (advisory, read from the role log after the tick's last `# LOOM_RUNTIME_RESOLVED` marker), else the daemon-observed `no_claim_no_verdict`. Mapped to `loom.noop_reason`. |
+| `verdicts` | array | no | One `{pr_number, head_sha?, verdict}` per PR a Judge tick wrote a verdict on, from the `forge verdict-labels` write via the pick journal (`verdict` is `approved` or `changes_requested`; `head_sha` is the `--sha` `post-verdict.sh` passed). Omitted when none. Mapped to `loom.role_tick.verdicts` (JSON). |
+| `step_class` / `step_reason` | string | no | On a step-sourced record: the step's `LOOM_STEP_OUTCOME` class and reason, which `result` collapses (`verdict`/`noop`/`refused` all read `success`). Mapped to `loom.role_tick.step_class` / `loom.role_tick.step_reason`. `result` itself is unchanged. |
 
 #### `result` — seven values, and why a skip is not a failure
 
@@ -2806,7 +2810,7 @@ Severity is `WARN` for a `failed` verdict and `INFO` otherwise.
 #### Role step verdicts: `step:<role>` (#12027)
 
 A role step also emits `pass.verdict`, with `mechanism=step:<role>` (today
-`step:champion`, `step:doctor` and `step:curator`; the judge row is #12029). The daemon builds the records from
+`step:champion`, `step:judge` (#12362), `step:doctor` and `step:curator`; the judge row is #12029). The daemon builds the records from
 facts the run already produced, so there is no new GitHub call and no prompt
 change: a `Marker` entry that `loom-daemon forge comment` appends to the pick
 journal (the body's first-line `<!-- ns:kind[:…] -->`), the agent gh front's
@@ -2828,7 +2832,7 @@ projected reason, so `passVerdictQuery` still parses both):
 | `head_sha` | the head evaluated, when the run recorded it (the Champion pin file, else the mirror); absent otherwise |
 | `step` | `champion_pr`, `champion_issue`, `doctor`, `curator` or `judge` |
 | `class` | `verdict`, `noop`, `refused` or `failed` |
-| `reason_set` | `champion_merge_v2`, `champion_promotion_v1`, `champion_triage_v1`, `doctor_step_v1`, `curator_step_v1` or `judge_step_v1` |
+| `reason_set` | `champion_merge_v2`, `champion_promotion_v1`, `champion_triage_v1`, `doctor_step_v1`, `curator_step_v1`, `judge_step_v1` or `judge_v1` |
 | `loom.sweep_id` | the step's sweep id, to join a verdict to its session (#12715) |
 | `reason_detail` | the raw `reason=` token of a `skipped` / `requeued` step (body `detail`), bounded to token characters (#12715) |
 | `ledger_class` / `ledger_reason` | the outcome ledger's own classification. It can differ from `class` / `reason`: a red-CI rejection keeps `loom:pr`, so the ledger says `failed unclassified` where the projection says `refused ci_failing`. `probe_failed` when the mirror was not fresh |
@@ -2867,6 +2871,18 @@ peer held a fresh `loom:evaluating`) or `not_eligible`. `failed` carries
 `failed` or `unclassified`. There is no `duplicate`: Champion has no duplicate
 close.
 
+**Judge verdict (`judge_v1`, `step=judge`, `artifact=pr`, #12362).** One record per
+PR a verdict was written on, from a step or a role-runner tick. The evidence is the `Applied` entry
+`loom-daemon forge verdict-labels` appends to the pick journal once the label
+transition held (`post-verdict.sh` passes `--sha "$SHA"`, on the main and the
+superseded path; a refused approval, a duplicate loser and a failed transition
+journal nothing). `verdict` carries `approved` or `changes_requested`, with
+`head_sha` from the write. It wins over the step projection below unless a
+CI refusal was journaled after it. A role-runner tick that wrote no verdict
+projects nothing; spawned-but-idle ticks are counted by
+`role_tick.outcome.found_work=false`. Telemetry only: no label, claim, retry,
+exit code or ledger effect changes.
+
 **Doctor step (`doctor_step_v1`, `step=doctor`, `artifact=pr`, #12921).**
 One record per Doctor step end, no-op included, read from the journal and the
 step's `LOOM_STEP_OUTCOME role=doctor` line (no forge call). `head_sha` is the
@@ -2881,7 +2897,7 @@ has no journaled signal and is not emitted.
 | `failed` | `failed` (`class=failed`, or no outcome line) |
 
 **Judge step (`judge_step_v1`, `step=judge`, `artifact=pr`, #13274).**
-One record per Judge step end. When `post-verdict.sh` refuses an approval at
+One record per Judge step end that wrote no verdict (a written verdict is the `judge_v1` record above). When `post-verdict.sh` refuses an approval at
 the exact-head CI gate (#10486; it posts nothing), it journals the refusal
 through `loom-daemon forge journal-ci-refusal` (best-effort; an older daemon
 changes nothing) and the step's record carries it, with `head_sha` set. Without

@@ -892,7 +892,9 @@ every span also names the endpoint: `github.route` (a template such as
 for an agent front read), so `api.rest` and `agent_gh_front` spend can be
 ranked by route. Role steps emit a
 `pass.verdict` per artifact; Champion
-steps add `pass.verdict` rows with `mechanism=step:champion`; see
+steps add `pass.verdict` rows with `mechanism=step:champion` (Judge steps and
+verdict-writing Judge ticks add `mechanism=step:judge`, #12362) and a
+`stage_items{state="pr_refused"}` gauge (#12027); see
 [`telemetry-schema.md`](telemetry-schema.md) and
 `defaults/observability/signoz/pass-queries.sql`.
 
