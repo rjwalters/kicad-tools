@@ -1158,6 +1158,70 @@ def test_route_emits_sibling_kicad_pro(monkeypatch, tmp_path: Path):
     assert defaults["track_min_width"] == rules.min_trace_width_mm
 
 
+def test_route_drc_survives_results_without_an_errors_list(monkeypatch, tmp_path: Path):
+    """Issue #8674: recording the path_ampacity audit must not abort the DRC.
+
+    ``run_post_route_drc`` records the ``path_ampacity`` errors of the rule
+    pass for the chained completion pass.  A results object that record cannot
+    be built from (no ``errors``, or one that raises) must leave the geometric
+    DRC running and write NO record -- a missing record reads as "not audited",
+    never as a clean audit, and a stale one for the same path is dropped.
+    """
+    import kicad_tools.drc as drc_mod
+    import kicad_tools.validate as validate_mod
+    from kicad_tools.cli import route_cmd
+    from kicad_tools.drc.geometric import GeometricDRCResult
+    from kicad_tools.schema import pcb as pcb_mod
+
+    monkeypatch.setattr(pcb_mod.PCB, "load", classmethod(lambda cls, p: object()))
+
+    class _NoErrors:
+        error_count = 0
+        warning_count = 0
+
+    class _RaisingErrors(_NoErrors):
+        @property
+        def errors(self):
+            raise RuntimeError("boom")
+
+    class _CleanErrors(_NoErrors):
+        errors: list = []
+
+    geometric_ran = []
+
+    def _geo(output_path, *a, **k):
+        geometric_ran.append(output_path)
+        return GeometricDRCResult(ran=True, error_count=0)
+
+    monkeypatch.setattr(drc_mod, "run_geometric_drc", _geo)
+    monkeypatch.setattr(route_cmd, "_path_ampacity_errors", {})
+    out = tmp_path / "board.kicad_pcb"
+    key = str(out.resolve())
+
+    def _run(results_cls):
+        class _Checker:
+            def __init__(self, *a, **k):
+                pass
+
+            def check_all(self, *a, **k):
+                return results_cls()
+
+        monkeypatch.setattr(validate_mod, "DRCChecker", _Checker)
+        geometric_ran.clear()
+        verdict = route_cmd.run_post_route_drc(
+            output_path=out, manufacturer="jlcpcb-tier1", layers=4, quiet=True
+        )
+        assert geometric_ran == [out], "the geometric DRC must still run"
+        assert verdict == (0, 0)
+
+    _run(_CleanErrors)
+    assert route_cmd._path_ampacity_errors[key] == frozenset()
+    for unreadable in (_NoErrors, _RaisingErrors):
+        route_cmd._path_ampacity_errors[key] = frozenset({"stale"})
+        _run(unreadable)
+        assert key not in route_cmd._path_ampacity_errors
+
+
 @pytest.fixture
 def authored_route_source(tmp_path):
     source = tmp_path / "source.kicad_pcb"

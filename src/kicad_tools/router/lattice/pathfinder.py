@@ -1290,12 +1290,43 @@ class LatticePathfinder:
         (``None``) treat every floor as designer-authored, as before.
         """
         extra = self._grown_pad_extra()
-        if extra is None:
-            return self._designer_pad_extra()
         designer_extra = self._designer_pad_extra()
-        if designer_extra is None:
+        if extra is None:
+            extra = designer_extra
+        elif designer_extra is not None:
+            extra = [max(a, b) for a, b in zip(extra, designer_extra, strict=True)]
+        npth_extra = self._npth_pad_extra()
+        if npth_extra is None:
             return extra
-        return [max(a, b) for a, b in zip(extra, designer_extra, strict=True)]
+        if extra is None:
+            return npth_extra
+        return [max(a, b) for a, b in zip(extra, npth_extra, strict=True)]
+
+    def _npth_pad_extra(self) -> list[float] | None:
+        """Issue #8684: keep-out growth so an NPTH honours ``hole_clearance``.
+
+        ``agent_radius`` only bakes in the copper clearance
+        (``rules.trace_clearance``); KiCad measures an NPTH against its hole
+        edge at ``_KICAD_HOLE_CLEARANCE_MM`` (the grid engine's term, #8677).
+        The growth is the shortfall (``max``, not a sum, with any other floor),
+        plus the hole radius where the drill exceeds the pad outline.
+        ``None`` when there is no NPTH, leaving other boards byte-identical.
+        """
+        from ..grid import _KICAD_HOLE_CLEARANCE_MM
+        from ..primitives import pad_half_extents
+
+        base = self.rules.trace_clearance
+        out: list[float] = []
+        any_npth = False
+        for p in self.pads:
+            if p.drill > 0 and not p.through_hole:
+                any_npth = True
+                half_w, half_h = pad_half_extents(p)
+                hole_over = max(0.0, p.drill / 2 - min(half_w, half_h))
+                out.append(max(0.0, _KICAD_HOLE_CLEARANCE_MM - base) + hole_over)
+            else:
+                out.append(0.0)
+        return out if any_npth else None
 
     def _grown_pad_extra(self) -> list[float] | None:
         """Issue #6489: keep-out growth for pads the repair could not clear."""

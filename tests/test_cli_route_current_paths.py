@@ -448,6 +448,40 @@ class TestRoutePostDrcPathAmpacity:
 
         assert _path_ampacity_violations(captured) == []
 
+    def test_audit_record_distinguishes_ran_from_skipped(self, tmp_path, monkeypatch, capsys):
+        """Issue #8674: the chained completion pass reads this record.  An entry
+        means the rule pass ran (empty = no errors); a board whose DRC was
+        skipped for --timeout has NO entry, which must not read as clean."""
+        _patch_geometric_absent(monkeypatch)
+        monkeypatch.setattr(route_cmd, "_path_ampacity_errors", {})
+        narrow = _write_t_network_pcb(
+            tmp_path / "narrow.kicad_pcb", trunk_width=NARROW_TRUNK_WIDTH_MM
+        )
+        undeclared = _write_t_network_pcb(
+            tmp_path / "undeclared.kicad_pcb", trunk_width=NARROW_TRUNK_WIDTH_MM
+        )
+        skipped = _write_t_network_pcb(
+            tmp_path / "skipped.kicad_pcb", trunk_width=NARROW_TRUNK_WIDTH_MM
+        )
+
+        _run_gate(narrow, [_trunk_spec(), _sense_spec()])
+        _run_gate(undeclared, None)
+        verdict = route_cmd.run_post_route_drc(
+            output_path=skipped,
+            manufacturer="jlcpcb",
+            layers=2,
+            quiet=True,
+            current_path_specs=[_trunk_spec(), _sense_spec()],
+            time_left=0.0,
+        )
+
+        assert verdict == route_cmd.DRC_SKIPPED_FOR_TIME
+        assert "SKIPPED" in capsys.readouterr().out
+        record = route_cmd._path_ampacity_errors
+        assert record[str(narrow.resolve())]
+        assert record[str(undeclared.resolve())] == frozenset()
+        assert str(skipped.resolve()) not in record
+
 
 class TestAmbiguityAndUncoveredCopperAtTheRouteGate:
     """Issue #4980's remaining audit-visibility acceptance tests, at the gate.
