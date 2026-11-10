@@ -6354,10 +6354,25 @@ def run_post_route_drc(
         )
         results = checker.check_all()
         # Recorded even with no declared paths (an empty set): the entry is
-        # what tells the chained pass this board's audit ran at all.
-        _path_ampacity_errors[str(Path(output_path).resolve())] = frozenset(
-            f"{v.message} @ {v.location}" for v in results.errors if v.rule_id == "path_ampacity"
-        )
+        # what tells the chained pass this board's audit ran at all.  Building
+        # it must never take the rest of this DRC down (the geometric
+        # reconciliation below): on any failure NO entry is written, which
+        # the chained pass reads as "not audited" and refuses (fail-closed).
+        _record_key = str(Path(output_path).resolve())
+        _path_ampacity_errors.pop(_record_key, None)
+        try:
+            _path_ampacity_errors[_record_key] = frozenset(
+                f"{v.message} @ {v.location}"
+                for v in results.errors
+                if v.rule_id == "path_ampacity"
+            )
+        except Exception as record_exc:
+            if not quiet:
+                print(
+                    "  Warning: could not record the path_ampacity audit "
+                    f"({record_exc}); a chained completion pass will treat this "
+                    "board as not audited"
+                )
 
         error_count = results.error_count
         warning_count = results.warning_count
