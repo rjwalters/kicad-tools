@@ -610,6 +610,18 @@ class NetlistValidator:
         self._check_global_net_names(result)
         self._check_pad_net_assignments(result, self._pcb_pad_nets())
 
+    def pad_net_mismatches(self) -> list[SyncIssue]:
+        """Return per-pad net mismatches (connectivity-based, issue #8703).
+
+        Runs the same comparison as :meth:`validate` (by connectivity, not
+        net-name equality) and returns only the pad-level findings, i.e. the
+        issues that name a reference and pad.  Whole-net findings such as
+        swapped net names are excluded.
+        """
+        result = SyncResult()
+        self._check_pad_net_assignments(result, self._pcb_pad_nets())
+        return [i for i in result.issues if i.category == "net_mismatch" and i.reference and i.pin]
+
     def _pcb_pad_nets(self) -> dict[tuple[str, str], str | None]:
         """Build ``{(ref, pad) -> net | None}`` from the PCB.
 
