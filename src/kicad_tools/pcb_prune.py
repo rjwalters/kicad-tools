@@ -1559,15 +1559,29 @@ def _joins_container(model: _NetModel, k: int, c: int) -> bool:
 
 
 def _try_remove_covered(
-    model: _NetModel, plan: NetPlan, removed: set[int], baseline, group: set[int], c: int
+    model: _NetModel,
+    plan: NetPlan,
+    removed: set[int],
+    baseline,
+    group: set[int],
+    c: int,
+    far: tuple[set[int], int] | None = None,
 ) -> bool:
-    """Remove ``group`` (segments all covered by ``c``) if every guard holds."""
+    """Remove ``group`` (segments all covered by ``c``) if every guard holds.
+
+    ``far`` = ``(nodes, u)`` lets nodes held at the group's far end join the
+    kept track ``u`` instead of ``c`` (a thin loop whose far end stays joined
+    to ``u`` at their shared endpoint; issue #8734).
+    """
     held = set().union(*(model.anch[s][0] | model.anch[s][1] | model.adj[s] for s in group))
     for k in held - removed - group - {c}:
         if model.nodes[k].kind == "zone":
             continue  # zone joins are never relied on
-        if not _joins_container(model, k, c):
-            return False
+        if _joins_container(model, k, c):
+            continue
+        if far is not None and k in far[0] and _joins_container(model, k, far[1]):
+            continue
+        return False
     touched = set().union(*(model.adj[s] | model.badj[s] | model.overlap[s] for s in group)) - group
     strict = set().union(*(model.adj[s] for s in group)) - group
     after = removed | group
@@ -1726,7 +1740,10 @@ def _try_remove_parallel_path(
                     for q in (tn.a, tn.b, mid, far)
                 ):
                     continue
-                if _try_remove_covered(model, plan, removed, baseline, {s, t}, c):
+                far_held = model.anch[t][1 - f] - removed
+                if _try_remove_covered(
+                    model, plan, removed, baseline, {s, t}, c, far=(far_held, u)
+                ):
                     plan.reasons[tn.index] = "thin parallel path inside a longer track's copper"
                     return True
     return False
