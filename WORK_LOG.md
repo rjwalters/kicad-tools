@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8718**: fix(route): key chained-pass connectivity errors by net, not message
+- **Issue #8702** (closed): Chained --complete DRC comparison: measure finding key and cover native kicad-cli findings
 - **PR #8715**: feat(sync): report and remove copper left on pads removed by a footprint swap
 - **Issue #8705** (closed): sync: report (and optionally remove) copper stranded by a pad-net change
 - **PR #8713**: feat: report and optionally remove copper stranded by pad-net changes in kct sync
