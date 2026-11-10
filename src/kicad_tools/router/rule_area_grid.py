@@ -485,3 +485,48 @@ def escape_copper_rule_area_hit(
         ):
             return "track"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Post-route audit (Issue #8760)
+# ---------------------------------------------------------------------------
+
+
+def committed_rule_area_hits(
+    grid: RoutingGrid, routes: Iterable[Any]
+) -> list[tuple[int, str, str]]:
+    """Committed copper that sits inside a track/via-blocking rule area.
+
+    Returns ``(net, area_name, "track" | "via")`` tuples, one per net/area/kind.
+    Measured on the copper itself (half-width / via radius, no clearance
+    halo), the way KiCad's ``items_not_allowed`` check sees it, so a clean
+    route is never flagged for merely passing near an area.  Empty on a grid
+    without areas.
+    """
+    if not _has_rule_areas(grid):
+        return []
+    found: dict[tuple[int, str, str], None] = {}
+    for route in routes:
+        net = int(getattr(route, "net", 0) or 0)
+        for seg in route.segments:
+            try:
+                layer_index = grid.layer_to_index(seg.layer.value)
+            except Exception:  # noqa: BLE001 -- a layer off the stack carries no area
+                continue
+            radius = _kernel_radius_cells(grid, float(seg.width) / 2.0) - 1
+            for gx, gy in _segment_cells(grid, seg.x1, seg.y1, seg.x2, seg.y2):
+                for area in grid._rule_area_keepouts or ():
+                    if (
+                        area.blocks_tracks
+                        and layer_index in area.layers
+                        and area.applies_to(net)
+                        and area.hits_disc(gx, gy, radius)
+                    ):
+                        found[(net, area.name, "track")] = None
+        for via in route.vias:
+            gx, gy = grid.world_to_grid(via.x, via.y)
+            radius = _kernel_radius_cells(grid, float(via.diameter) / 2.0) - 1
+            for area in grid._rule_area_keepouts or ():
+                if area.blocks_vias and area.applies_to(net) and area.hits_disc(gx, gy, radius):
+                    found[(net, area.name, "via")] = None
+    return list(found)

@@ -933,15 +933,71 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     return 0
 
 
+def _print_reinforce_runs(outcome, all_runs: bool) -> None:
+    """Text per-run accounting of a ``spaced`` reinforce pass (#4319)."""
+    print()
+    print(
+        f"  Runs: {len(outcome.runs)} total -- "
+        f"{outcome.runs_fully_reinforced} fully reinforced, "
+        f"{outcome.runs_partial} partial, "
+        f"{outcome.runs_unanchored} unanchored"
+    )
+    if not all_runs and len(outcome.runs) > 1:
+        print(
+            "        (default anchors only the longest run; pass --all-runs to anchor every branch)"
+        )
+    for rs in outcome.runs:
+        if rs.fully_reinforced:
+            state = "full"
+        elif rs.partial:
+            state = "partial"
+        else:
+            state = "none"
+        print(
+            f"    run {rs.run_index}: {rs.length_mm:.1f} mm, "
+            f"{rs.segment_count} seg -- {rs.anchors_placed}/{rs.anchors_needed} "
+            f"anchored"
+            + (f", {rs.anchors_refused} refused" if rs.anchors_refused else "")
+            + f" [{state}]"
+        )
+        if rs.path_excluded_reason:
+            print(f"      excluded: {rs.path_excluded_reason}")
+
+
+def _print_reinforce_legs(outcome, origin_x: float, origin_y: float) -> None:
+    """Text per-leg (one wire each) accounting of an ``ends`` pass (#8742)."""
+    legs = outcome.legs
+    counts: dict[str, int] = {}
+    for leg in legs:
+        counts[leg.status] = counts.get(leg.status, 0) + 1
+    summary = ", ".join(f"{n} {status}" for status, n in sorted(counts.items()))
+    print()
+    print(f"  Legs (one wire each): {len(legs)} total" + (f" -- {summary}" if summary else ""))
+    for i, leg in enumerate(legs):
+        anchors = ", ".join(f"({a.x + origin_x:.2f}, {a.y + origin_y:.2f})" for a in leg.anchors)
+        print(
+            f"    leg {i} [{leg.kind}] {leg.layer} {leg.length_mm:.1f} mm -- "
+            f"{len(leg.anchors)}/2 anchored [{leg.status}]" + (f" at {anchors}" if anchors else "")
+        )
+        if leg.paths:
+            print(f"      paths: {', '.join(leg.paths)}")
+        if leg.reason:
+            print(f"      {leg.reason}")
+    excluded = [rs for rs in outcome.runs if rs.path_excluded_reason]
+    for rs in excluded:
+        print(f"    excluded copper: {rs.length_mm:.1f} mm -- {rs.path_excluded_reason}")
+
+
 def _run_reinforce_command(args, pcb_path: Path) -> int:
-    """Handle the 'pcb reinforce' command (Unit A of #4218; issue #4220).
+    """Handle the 'pcb reinforce' command (Unit A of #4218; issues #4220, #8742).
 
     Post-route pass that walks a routed net's segments into ordered
-    polylines and emits a spaced row of same-net plated-PTH anchor vias
-    along the longest run, sized to a wire gauge. Anchors that would
-    collide with a different net are refused and reported, never placed.
-    In-place by default; ``-o`` writes elsewhere; ``--dry-run`` reports
-    without writing.
+    polylines and emits same-net plated-PTH anchor vias sized to a wire
+    gauge: by default (``--anchor-mode ends``) exactly two per single-layer
+    wire leg, at its ends; with ``--anchor-mode spaced`` the historical row
+    every ``--spacing`` mm. Anchors that would collide with a different net
+    are refused and reported, never placed. In-place by default; ``-o``
+    writes elsewhere; ``--dry-run`` reports without writing.
     """
     from kicad_tools.pcb.reinforce import ReinforceError, reinforce_net
     from kicad_tools.schema.pcb import PCB
@@ -952,7 +1008,17 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         return 1
 
     wire_gauge = getattr(args, "wire_gauge", 16)
-    spacing = getattr(args, "spacing", 15.0)
+    anchor_mode = getattr(args, "anchor_mode", None) or "ends"
+    end_offset = getattr(args, "end_offset", None)
+    end_offset = 1.0 if end_offset is None else end_offset
+    spacing_arg = getattr(args, "spacing", None)
+    spacing = 15.0 if spacing_arg is None else spacing_arg
+    if anchor_mode == "ends" and spacing_arg is not None:
+        print(
+            "Warning: --spacing only applies to --anchor-mode spaced; ignored in ends mode "
+            "(two anchors per leg, at its ends)",
+            file=sys.stderr,
+        )
     layer = getattr(args, "layer", None)
     all_runs = getattr(args, "all_runs", False)
     min_run_length = getattr(args, "min_run_length", None)
@@ -1055,6 +1121,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             net_class_clearances=net_class_clearances,
             pairwise_clearance=pairwise,
             board_rules=board_rules,
+            anchor_mode=anchor_mode,
+            end_offset_mm=end_offset,
         )
     except ReinforceError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1114,7 +1182,41 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         ],
         # Issue #4980: current-path gating.
         "current_paths": current_paths_arg,
+        # Issue #8742: placement mode and per-leg wire accounting (additive).
+        "anchor_mode": outcome.anchor_mode,
+        "end_offset_mm": outcome.end_offset_mm,
+        "legs": [
+            {
+                "net": leg.net,
+                "layer": leg.layer,
+                "kind": leg.kind,
+                "length_mm": round(leg.length_mm, 4),
+                "width_mm": round(leg.width_mm, 4),
+                "anchors": [
+                    {"x": round(a.x + origin_x, 4), "y": round(a.y + origin_y, 4)}
+                    for a in leg.anchors
+                ],
+                "status": leg.status,
+                "reason": leg.reason,
+                "paths": leg.paths,
+                "polyline": [
+                    [round(x + origin_x, 4), round(y + origin_y, 4)] for x, y in leg.polyline
+                ],
+            }
+            for leg in outcome.legs
+        ],
+        "unresolved_paths": [
+            {"path": u.path, "status": u.status, "reason": u.reason}
+            for u in outcome.unresolved_paths
+        ],
     }
+
+    for u in outcome.unresolved_paths:
+        print(
+            f"Warning: declared current path {u.path!r} on net {outcome.net_name!r} is "
+            f"{u.status}: {u.reason} -- it gets no anchors",
+            file=sys.stderr,
+        )
 
     if output_format == "json":
         print(json.dumps(result, indent=2))
@@ -1130,44 +1232,33 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         print(f"  Wire gauge:     {outcome.wire_gauge_awg} AWG")
         print(f"  Anchor drill:   {outcome.anchor_drill_mm:.3f} mm")
         print(f"  Anchor pad:     {outcome.anchor_pad_mm:.3f} mm")
-        print(f"  Spacing:        {outcome.spacing_mm:.1f} mm")
-        print(
-            f"  Anchored run:   {outcome.run_segment_count} segment(s), "
-            f"{outcome.run_length_mm:.1f} mm"
-        )
+        if outcome.anchor_mode == "ends":
+            print(f"  Anchor mode:    ends (end offset {outcome.end_offset_mm:g} mm)")
+        else:
+            print("  Anchor mode:    spaced")
+            print(f"  Spacing:        {outcome.spacing_mm:.1f} mm")
+        if outcome.anchor_mode == "ends" and outcome.placed_count == 0:
+            # Every attempted leg was refused or too short: nothing is anchored.
+            print("  Anchored run:   none (no leg received an anchor; see legs below)")
+        else:
+            print(
+                f"  Anchored run:   {outcome.run_segment_count} segment(s), "
+                f"{outcome.run_length_mm:.1f} mm"
+            )
         if outcome.unhandled_runs:
             print(
                 f"  Unhandled runs: {outcome.unhandled_runs} "
                 "(branch/disconnected run(s) on this net NOT anchored)"
             )
-        print()
-        print(
-            f"  Runs: {len(outcome.runs)} total -- "
-            f"{outcome.runs_fully_reinforced} fully reinforced, "
-            f"{outcome.runs_partial} partial, "
-            f"{outcome.runs_unanchored} unanchored"
-        )
-        if not all_runs and len(outcome.runs) > 1:
-            print(
-                "        (default anchors only the longest run; pass "
-                "--all-runs to anchor every branch)"
-            )
-        for rs in outcome.runs:
-            if rs.fully_reinforced:
-                state = "full"
-            elif rs.partial:
-                state = "partial"
-            else:
-                state = "none"
-            print(
-                f"    run {rs.run_index}: {rs.length_mm:.1f} mm, "
-                f"{rs.segment_count} seg -- {rs.anchors_placed}/{rs.anchors_needed} "
-                f"anchored"
-                + (f", {rs.anchors_refused} refused" if rs.anchors_refused else "")
-                + f" [{state}]"
-            )
-            if rs.path_excluded_reason:
-                print(f"      excluded: {rs.path_excluded_reason}")
+        if outcome.unresolved_paths:
+            print()
+            print("  Unresolved current paths (no anchors):")
+            for u in outcome.unresolved_paths:
+                print(f"    {u.path}: {u.status} -- {u.reason}")
+        if outcome.anchor_mode == "ends":
+            _print_reinforce_legs(outcome, origin_x, origin_y)
+        else:
+            _print_reinforce_runs(outcome, all_runs)
         print()
         print(f"  Anchors placed:  {outcome.placed_count}")
         print(f"  Anchors refused: {outcome.refused_count}")
@@ -1187,6 +1278,10 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             print(
                 "  NOTE: anchors are same-net vias -- refill zone pours "
                 "afterward (e.g. `kicad-cli pcb drc --refill-zones`)."
+            )
+            print(
+                "  NOTE: until #8743 the anchors inherit the board's via tenting and "
+                "no solder-mask opening is emitted along the run."
             )
 
     # Save unless dry-run and at least one anchor was placed.

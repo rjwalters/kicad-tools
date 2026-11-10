@@ -239,6 +239,7 @@ __all__ = [
     "CurrentPathSpec",
     "PathEndpoint",
     "PathResolution",
+    "ReinforcementPathResolutions",
     "ResolvedEndpoint",
     "ThermalDesignCurrent",
     "UnmodeledCopper",
@@ -250,6 +251,7 @@ __all__ = [
     "load_current_path_specs",
     "parse_current_path_specs",
     "reinforcement_eligible_segment_ids",
+    "reinforcement_path_resolutions",
     "resolve_current_path",
     "unmodeled_copper",
 ]
@@ -2041,11 +2043,53 @@ def reinforcement_eligible_segment_ids(pcb: PCB, specs: Sequence[CurrentPathSpec
         The set of ``id(segment)`` values that may be anchored.
     """
     eligible: set[int] = set()
-    for spec in specs:
-        if not spec.reinforcement_eligible:
-            continue
-        resolution = resolve_current_path(pcb, spec)
-        if not resolution.ok:
-            continue
+    for resolution in reinforcement_path_resolutions(pcb, specs).eligible:
         eligible.update(id(seg) for seg in resolution.segments)
     return eligible
+
+
+@dataclass(frozen=True)
+class ReinforcementPathResolutions:
+    """Per-spec resolutions partitioned for buttress-wire reinforcement.
+
+    Sibling of :func:`reinforcement_eligible_segment_ids` that keeps the
+    per-path grouping the flat id set loses (Issue #8742): the end-anchor
+    mode of ``kct pcb reinforce`` derives one wire leg per layer of each
+    eligible path, and must *report* every declaration it could not use.
+
+    Attributes:
+        eligible: Resolved, ``reinforcement_eligible`` paths, in spec order.
+            Their ``segments`` are the only copper that may be anchored.
+        ineligible: Resolved paths declared ``reinforcement_eligible=False``
+            (sense / Kelvin / feedback branches). Never anchored.
+        unresolved: Paths whose status is not ``"resolved"`` (``unresolved``
+            or ``ambiguous``), whatever their declared eligibility.
+    """
+
+    eligible: tuple[PathResolution, ...] = ()
+    ineligible: tuple[PathResolution, ...] = ()
+    unresolved: tuple[PathResolution, ...] = ()
+
+
+def reinforcement_path_resolutions(
+    pcb: PCB, specs: Sequence[CurrentPathSpec]
+) -> ReinforcementPathResolutions:
+    """Resolve each spec once and partition it for reinforcement (#8742).
+
+    Same allow-list semantics as :func:`reinforcement_eligible_segment_ids`
+    (which is defined in terms of this function), with the grouping kept.
+    """
+    eligible: list[PathResolution] = []
+    ineligible: list[PathResolution] = []
+    unresolved: list[PathResolution] = []
+    for spec in specs:
+        resolution = resolve_current_path(pcb, spec)
+        if not resolution.ok:
+            unresolved.append(resolution)
+        elif spec.reinforcement_eligible:
+            eligible.append(resolution)
+        else:
+            ineligible.append(resolution)
+    return ReinforcementPathResolutions(
+        eligible=tuple(eligible), ineligible=tuple(ineligible), unresolved=tuple(unresolved)
+    )
