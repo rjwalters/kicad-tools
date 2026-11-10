@@ -213,8 +213,16 @@ class FakeEngines:
             return EngineRun(ok=False, detail="kicad-cli not found; geometric DRC skipped")
         return EngineRun(ok=True)
 
-    def export(self, pcb: Path, mfr: str, output_dir: Path, assembly: bool) -> EngineRun:
+    def export(
+        self,
+        pcb: Path,
+        mfr: str,
+        output_dir: Path,
+        assembly: bool,
+        merge_lcsc_from: Path | None = None,
+    ) -> EngineRun:
         self.calls.append("export")
+        self.merge_lcsc_from = merge_lcsc_from
         self.pcb_bytes_at_export = pcb.read_bytes()
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "report.md").write_text("# report\n")
@@ -229,8 +237,14 @@ class FakeEngines:
             with (output_dir / f"bom_{mfr}.csv").open("w", newline="") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(["Comment", "Designator", "Footprint", "LCSC Part #"])
+                seed: dict[str, str] = {}
+                if merge_lcsc_from is not None:
+                    with merge_lcsc_from.open(newline="") as seed_handle:
+                        seed = {
+                            r["Designator"]: r["LCSC Part #"] for r in csv.DictReader(seed_handle)
+                        }
                 for ref, part in self.part_numbers.items():
-                    writer.writerow([ref, ref, "Package", part])
+                    writer.writerow([ref, ref, "Package", part or seed.get(ref, "")])
             with (output_dir / f"cpl_{mfr}.csv").open("w", newline="") as handle:
                 writer = csv.writer(handle)
                 writer.writerow(
@@ -888,6 +902,72 @@ def test_placeholder_bom_ids_are_rejected_in_assembly_mode(tmp_path):
     blocker = " ".join(report["blockers"])
     assert "require human part selection" in blocker
     assert "U1" in blocker and "D1" in blocker
+
+
+def _seed_bom(tmp_path, rows):
+    seed = tmp_path / "seed_bom.csv"
+    seed.write_text(
+        "Designator,LCSC Part #\n" + "".join(f"{ref},{part}\n" for ref, part in rows.items())
+    )
+    return seed
+
+
+def test_generate_without_merge_source_hints_at_missing_flag(tmp_path):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert "No --merge-lcsc-from source was supplied" in " ".join(report["blockers"])
+    assert report["metrics"]["lcsc_merge_source"] == "none"
+
+
+def test_generate_with_merge_source_resolves_bom_and_records_source(tmp_path):
+    board = make_board(tmp_path)
+    seed = _seed_bom(tmp_path, {"U1": "C12345", "D1": "C67890"})
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "", "D1": ""})
+
+    code, report = run(board, fake, "--merge-lcsc-from", str(seed))
+
+    assert check_status(report, "bom") == "passed"
+    assert fake.merge_lcsc_from == seed.resolve()
+    assert report["metrics"]["lcsc_merge_source"] == str(seed.resolve())
+
+
+def test_merge_lcsc_from_missing_file_is_an_error(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+
+    code = readiness_cmd.main(
+        [
+            str(board),
+            "--mfr",
+            "jlcpcb",
+            "--generate",
+            "--merge-lcsc-from",
+            str(tmp_path / "no.csv"),
+        ],
+        engines=fake.bundle(),
+    )
+
+    assert code != 0
+    assert "not found" in capsys.readouterr().err
+    assert "export" not in fake.calls
+
+
+def test_merge_lcsc_from_with_verify_is_rejected(tmp_path, capsys):
+    board = make_board(tmp_path)
+    seed = _seed_bom(tmp_path, {"U1": "C1"})
+    fake = FakeEngines(board)
+
+    code = readiness_cmd.main(
+        [str(board), "--mfr", "jlcpcb", "--verify", "--merge-lcsc-from", str(seed)],
+        engines=fake.bundle(),
+    )
+
+    assert code != 0
+    assert "only applies to --generate" in capsys.readouterr().err
 
 
 def test_entirely_empty_part_column_is_matcher_broken_not_exotic_parts(tmp_path):
