@@ -75,7 +75,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from kicad_tools.physics.ampacity import adiabatic_fusing_current, width_for_current
+from kicad_tools.physics.ampacity import (
+    VIA_PLATING_THICKNESS_MM,
+    adiabatic_fusing_current,
+    width_for_current,
+)
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
@@ -96,6 +100,7 @@ if TYPE_CHECKING:
     from kicad_tools.manufacturers import DesignRules
     from kicad_tools.router.current_paths import (
         CurrentPathSpec,
+        LayerChange,
         ParallelGroup,
         PathResolution,
         ThermalDesignCurrent,
@@ -195,6 +200,11 @@ class PathAmpacityRule(DRCRule):
                 results.add(self._assumption_notice(spec, thermal))
             if spec.pulsed_a is not None and spec.pulse_duration_s is None:
                 results.add(self._unchecked_fusing_violation(spec))
+
+            for change in resolution.layer_changes:
+                capacity_a = change.current_capacity_a()
+                if capacity_a < thermal.current_a:
+                    results.add(self._layer_change_violation(spec, thermal, change, capacity_a))
 
             required_cache: dict[bool, float] = {}
             grouped_ids = {
@@ -302,6 +312,38 @@ class PathAmpacityRule(DRCRule):
             layer=first.layer,
             actual_value=capacity,
             required_value=1.0,
+            items=(spec.name, spec.net_name),
+        )
+
+    def _layer_change_violation(
+        self,
+        spec: CurrentPathSpec,
+        thermal: ThermalDesignCurrent,
+        change: LayerChange,
+        capacity_a: float,
+    ) -> DRCViolation:
+        """A layer change whose via(s) cannot carry the path's current (#8745).
+
+        Error when the path is ``reinforcement_eligible`` (a force path),
+        warning otherwise. Waivable via ``.kct_waivers.json`` like any other
+        ``path_ampacity`` finding.
+        """
+        return DRCViolation(
+            rule_id=self.rule_id,
+            severity="error" if spec.reinforcement_eligible else "warning",
+            message=(
+                f"Current path {spec.name!r} ({spec.source.label()} -> "
+                f"{spec.sink.label()}) changes layer {change.from_layer} -> "
+                f"{change.to_layer} through {change.count} via(s) "
+                f"(drill {change.drill:.3f}mm, pad {change.pad_diameter:.3f}mm) with "
+                f"combined capacity {capacity_a:.2f}A, below {thermal.description} "
+                f"(barrel model: {VIA_PLATING_THICKNESS_MM * 1000:.0f}um plating, "
+                "IPC-2221 external, 10C rise)"
+            ),
+            location=change.position,
+            layer=change.from_layer,
+            actual_value=capacity_a,
+            required_value=thermal.current_a,
             items=(spec.name, spec.net_name),
         )
 

@@ -243,6 +243,7 @@ __all__ = [
     "ResolvedEndpoint",
     "ThermalDesignCurrent",
     "UnmodeledCopper",
+    "LayerChange",
     "audit_current_paths",
     "current_paths_sidecar_candidates",
     "discover_current_paths_sidecar",
@@ -803,6 +804,94 @@ class ParallelGroup:
 
 
 @dataclass(frozen=True)
+class LayerChange:
+    """One layer change on a resolved path, with the vias that carry it.
+
+    Attributes:
+        position: Centroid of the vias (mm).
+        from_layer: Layer of the first path segment touching the vias.
+        to_layer: The other layer the path continues on.
+        vias: ``(position, drill, pad_diameter)`` per parallel via.
+    """
+
+    position: tuple[float, float]
+    from_layer: str
+    to_layer: str
+    vias: tuple[tuple[tuple[float, float], float, float], ...]
+
+    @property
+    def count(self) -> int:
+        return len(self.vias)
+
+    @property
+    def drill(self) -> float:
+        return min(v[1] for v in self.vias)
+
+    @property
+    def pad_diameter(self) -> float:
+        return min(v[2] for v in self.vias)
+
+    def current_capacity_a(self) -> float:
+        """Summed barrel capacity (A) of the parallel vias (issue #8745)."""
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+        return sum(via_barrel_current_capacity(v[1]) for v in self.vias)
+
+
+def _layer_changes(
+    pcb: PCB,
+    net_name: str,
+    segments: Sequence[Segment],
+    arrays: Sequence[_ViaArray] = (),
+) -> tuple[LayerChange, ...]:
+    """Layer changes on a resolved path, ordered along ``segments``.
+
+    A same-net via is a layer-change via when path segments on two different
+    layers both touch it. Only vias that are *proved parallel* share a
+    change: the members of one ``_ViaArray`` (already established by
+    ``resolve_current_path``) are one change whose capacity is summed. Every
+    other layer-change via is its own change, in path order -- vias in series
+    each carry the full path current, however close together they sit.
+    """
+    net = pcb.get_net_by_name(net_name)
+    array_of: dict[tuple[float, float], int] = {
+        node[:2]: i for i, array in enumerate(arrays) for node in array.nodes
+    }
+    found: list[tuple[int, Via, str, str]] = []
+    for via in pcb.vias:
+        if not _matches_net(via, net, net_name):
+            continue
+        touching = [
+            (i, seg.layer)
+            for i, seg in enumerate(segments)
+            if point_to_segment_distance(*via.position, *seg.start, *seg.end) <= 0.01
+            and via_spans_layer(via.layers, seg.layer)
+        ]
+        layers = list(dict.fromkeys(layer for _, layer in touching))
+        if len(layers) >= 2:
+            found.append((min(i for i, _ in touching), via, layers[0], layers[1]))
+    groups: dict[object, list[tuple[int, Via, str, str]]] = {}
+    for n, item in enumerate(found):
+        idx = array_of.get(_node_key(item[1].position))
+        groups.setdefault(("array", idx) if idx is not None else ("via", n), []).append(item)
+    changes = []
+    for c in sorted(groups.values(), key=lambda c: min(m[0] for m in c)):
+        c.sort(key=lambda m: m[0])
+        changes.append(
+            LayerChange(
+                position=(
+                    round(sum(m[1].position[0] for m in c) / len(c), 4),
+                    round(sum(m[1].position[1] for m in c) / len(c), 4),
+                ),
+                from_layer=c[0][2],
+                to_layer=c[0][3],
+                vias=tuple((m[1].position, m[1].drill, m[1].size) for m in c),
+            )
+        )
+    return tuple(changes)
+
+
+@dataclass(frozen=True)
 class PathResolution:
     """Outcome of resolving one :class:`CurrentPathSpec` against a board.
 
@@ -834,6 +923,8 @@ class PathResolution:
     segments: tuple[Segment, ...] = ()
     length_mm: float = 0.0
     sense_taps: tuple[Segment, ...] = ()
+    #: Ordered layer changes (via / via array) on a resolved path (#8745).
+    layer_changes: tuple[LayerChange, ...] = ()
     #: For a loop/parallel ambiguity (issue #8368): the closing edge that
     #: proves the cycle, as ``{"kind": "segment"|"via", "layer", "start",
     #: "end"}`` / ``{"kind": "via", "position"}``. Empty otherwise.
@@ -1987,6 +2078,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
         sink=sink,
         segments=tuple(path_segments),
         length_mm=sum(_seg_length(s) for s in path_segments),
+        layer_changes=_layer_changes(pcb, spec.net_name, path_segments, arrays),
         sense_taps=tuple({id(seg): seg for seg in sense_taps}.values()),
         parallel_groups=tuple(parallel_groups),
     )
