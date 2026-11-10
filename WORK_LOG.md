@@ -16,6 +16,36 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-10
 
+- **PR #8711**: chore(board-07): prune reviewed copper and re-derive authored escapes
+- **PR #8710**: fix: forward --length-match-groups to the chained completion pass
+- **PR #8709**: test: remove stale strict xfail on lattice hole-clearance test
+- **PR #8708**: feat: add circuit-review skill for schematic-vs-datasheet review
+- **PR #8707**: feat(sync): detect and fix pad-net mismatches on shared components
+- **PR #8701**: fix: write route edge clearance to .kicad_dru as a track/via-scoped rule
+- **PR #8700**: fix: forward copper-rule flags to the chained completion pass
+- **PR #8699**: fix: refuse chained completion copper that adds any blocking DRC error
+- **PR #8698**: fix: read KiCad 10 zone nets in detect_layer_stack
+- **PR #8697**: fix: drop stale path_ampacity audit record before post-route DRC early exits
+- **PR #8691**: chore(loom): resync installed Loom to v0.19.1283
+- **PR #8690**: fix: gate prune plans on the current-path audit
+- **PR #8689**: fix: widen pin-1 marker search radius to the package body edge
+- **PR #8686**: fix(router): grow lattice NPTH pad keep-out to hole clearance
+- **PR #8685**: test(router): kicad-cli hole_clearance check for an NPTH between pads
+- **Issue #8712** (closed): Follow-on from PR #8707: kct sync stranded copper and footprint-swap placement (#8703 items 3, 4)
+- **Issue #8706** (closed): main CI red: stale strict xfail on test_lattice_engine_has_no_hole_clearance_violation (XPASS after #8686)
+- **Issue #8704** (closed): Feature: a circuit-review skill/check — schematic against datasheet, before layout
+- **Issue #8703** (closed): sync: no pad-net reconciliation — rewired pins on unchanged parts are not reported or applied
+- **Issue #8695** (closed): route: chained completion pass accepts inner exit 8 without consulting its DRC beyond path_ampacity
+- **Issue #8694** (closed): route: review copper-affecting options the chained completion pass does not forward (NOT_FORWARDED_UNREVIEWED)
+- **Issue #8693** (closed): route: chained completion pass re-detects the stack under --layers auto; detect_layer_stack misses KiCad 10 zone nets
+- **Issue #8692** (closed): route: path_ampacity audit record for a board can go stale when a later post-route DRC is skipped or fails
+- **Issue #8688** (closed): pin1_marker_missing: false positive when the library marker sits at the body edge more than 2.5 mm from pad 1 (HLK-PMxx)
+- **Issue #8687** (closed): pcb prune: snap stubs close loops on current-path nets; current-paths-audit drops from resolved to ambiguous
+- **Issue #8684** (closed): bug(router): lattice engine routes tracks inside NPTH hole clearance (2 hole_clearance in kicad-cli DRC)
+- **Issue #8681** (closed): Live kicad-cli verification of NPTH hole clearance after #8677
+- **Issue #8674** (closed): route: chained --complete pass ignores --layers, --voltage-map, --edge-clearance and --current-paths
+- **Issue #8602** (closed): Board 07: DRC-verified prune and re-derive authored escapes so validate.py passes (part of #8399)
+
 - **PR #8679**: fix: forward layer, HV, edge and current-path constraints to the chained completion pass
 - **PR #8682**: fix: take readiness baseline warning counts from the baseline report
 - **Issue #8673** (closed): readiness --baseline: previous_counts misreports old->new when findings were also resolved
