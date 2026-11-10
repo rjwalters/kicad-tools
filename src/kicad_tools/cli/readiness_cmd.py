@@ -991,6 +991,8 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         return None, f"schematic not found: {schematic}"
 
     output_dir = Path(args.output).resolve() if args.output else pcb.parent / "manufacturing"
+    if args.output and not output_dir.is_relative_to(board_dir.resolve()):
+        return None, f"--output must be inside the board directory {board_dir}; got {output_dir}"
     evidence_dir = board_dir / "output" / _EVIDENCE_DIRNAME
     if not (board_dir / "output").is_dir():
         evidence_dir = board_dir / _EVIDENCE_DIRNAME

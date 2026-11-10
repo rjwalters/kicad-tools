@@ -2139,3 +2139,56 @@ def test_baseline_counts_use_baseline_report_when_findings_resolved(tmp_path, ca
     readme = (board / "output" / "manufacturing" / "README.txt").read_text()
     assert "silk_over_copper: +2 (14 -> 16)" in readme
     assert "silk_over_copper: +2 (14 -> 16)" in capsys.readouterr().out
+
+
+def test_output_outside_board_dir_is_refused_early(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+    elsewhere = tmp_path / "elsewhere"
+
+    code = readiness_cmd.main(
+        [str(board), "--mfr", "jlcpcb", "--generate", "--output", str(elsewhere)],
+        engines=fake.bundle(),
+    )
+
+    assert code == 2
+    assert "--output must be inside the board directory" in capsys.readouterr().err
+    assert not elsewhere.exists()
+    assert fake.calls == []
+
+
+def test_output_outside_board_dir_json_envelope(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+
+    code = readiness_cmd.main(
+        [
+            str(board),
+            "--mfr",
+            "jlcpcb",
+            "--generate",
+            "--format",
+            "json",
+            "--output",
+            str(tmp_path / "elsewhere"),
+        ],
+        engines=fake.bundle(),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["success"] is False
+    assert "--output must be inside the board directory" in payload["error"]
+
+
+def test_output_inside_board_dir_still_runs(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+
+    readiness_cmd.main(
+        [str(board), "--mfr", "jlcpcb", "--generate", "--output", str(board / "out2")],
+        engines=fake.bundle(),
+    )
+
+    assert "--output must be inside" not in capsys.readouterr().err
+    assert fake.calls  # gates ran
