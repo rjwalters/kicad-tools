@@ -21754,7 +21754,10 @@ def _chain_complete_argv(
       passed by name, so the inner pass builds the same explicit stack instead
       of re-detecting one from the routed board.  Under ``auto`` the operator
       named no stack; the inner pass detects it from the board the outer run
-      wrote.
+      wrote.  That equals the outer run's stack (Issue #8693): routing never
+      edits the layer table or zones, and ``detect_layer_stack`` reads both
+      zone-net spellings, so no resolved-stack handoff is needed (a layer
+      count cannot name an 8+-layer stack anyway).
     * ``--voltage-map`` (Issue #8674) -- the HV pairwise-clearance table the
       lattice search rejects against and the completion creepage rollback
       measures against.
