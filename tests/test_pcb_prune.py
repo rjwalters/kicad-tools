@@ -2109,6 +2109,39 @@ def test_existing_reversed_half_quantum_stub_is_not_re_added(tmp_path):
         pcb.save(p)
 
 
+@pytest.mark.parametrize("shape", ["tail", "split_trunk", "perp", "diag", "loop"])
+@pytest.mark.parametrize("length", [0.01, 0.028, 0.04, 0.07])
+def test_prune_converges_on_sub_tenth_mm_in_pad_segments(tmp_path, shape, length):
+    """Issue #8719: prune on its own output is a no-op (no add/remove cycle)."""
+    pads = [("A", 100, 100), ("B", 110, 100)]
+    near = 110 - length
+    segs = {
+        "tail": [((100, 100), (110, 100)), ((near, 100), (110, 100))],
+        "split_trunk": [((100, 100), (near, 100)), ((near, 100), (110, 100))],
+        "perp": [((100, 100), (110, 100)), ((110, 100 + length), (110, 100))],
+        "diag": [((100, 100), (near, 100 + length)), ((near, 100 + length), (110, 100))],
+        "loop": [
+            ((100, 100), (110, 100)),
+            ((109, 100), (109, 101)),
+            ((109, 101), (near, 101)),
+            ((near, 101), (110, 100)),
+        ],
+    }[shape]
+    p = _board(tmp_path, pads, segs)
+    pcb, _res = _run(p)  # first pass may change the board
+    pcb.save(p)
+    settled = _keys(pcb)
+    for _ in range(3):
+        pcb, res = _run(p)
+        assert res.accepted == []
+        assert not res.stats.get("segments_removed")
+        assert not res.stats.get("ends_snapped")
+        assert not res.stats.get("stubs_added")
+        assert not res.stats.get("segments_split")
+        assert _keys(pcb) == settled
+        pcb.save(p)
+
+
 def test_only_the_missing_stub_piece_is_queued(tmp_path):
     from kicad_tools.pcb_prune import plan_prune
 
