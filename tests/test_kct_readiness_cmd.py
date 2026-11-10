@@ -2139,3 +2139,56 @@ def test_baseline_counts_use_baseline_report_when_findings_resolved(tmp_path, ca
     readme = (board / "output" / "manufacturing" / "README.txt").read_text()
     assert "silk_over_copper: +2 (14 -> 16)" in readme
     assert "silk_over_copper: +2 (14 -> 16)" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Issue #8727: declared BOM exemptions; sibling revisions are not dependencies
+# ---------------------------------------------------------------------------
+
+_EXEMPT_SPEC = (
+    "kct_version: '1.0'\nproject:\n  name: t\n"
+    "requirements:\n  manufacturing:\n    target_fab: jlcpcb\n"
+    "bom_entries:\n- ref: D1\n  part: X\n  exempt: consigned\n  exempt_reason: owner supplies\n"
+)
+
+
+def test_declared_bom_exemption_is_honoured_and_listed(tmp_path):
+    board = make_board(tmp_path)
+    (board / "project.kct").write_text(_EXEMPT_SPEC)
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert check_status(report, "bom") == "passed"
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "1 declared exempt" in detail and "D1 (consigned: owner supplies)" in detail
+    assert code == 0
+
+
+def test_exemption_does_not_cover_other_blank_rows(tmp_path):
+    board = make_board(tmp_path)
+    (board / "project.kct").write_text(_EXEMPT_SPEC)
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "TBD", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert check_status(report, "bom") == "failed"
+    blocker = " ".join(report["blockers"])
+    assert "U1" in blocker and "D1" not in blocker
+
+
+def test_sibling_revisions_and_backups_are_not_required_in_project_zip(tmp_path):
+    board = make_board(tmp_path)
+    (board / "project.kct").write_text(_EXEMPT_SPEC)
+    output = board / "output"
+    for name in ("demo_v25", "demo_v26"):
+        (output / f"{name}.kicad_pro").write_text('{"board": {}}\n')
+        (output / f"{name}.kicad_dru").write_text("(version 1)\n")
+    (output / "demo_backup_2026-01-01.kicad_sch").write_text("(kicad_sch old)\n")
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert code == 0, report.get("blockers")
+    assert check_status(report, "artifacts") == "passed"

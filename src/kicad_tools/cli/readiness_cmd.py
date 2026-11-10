@@ -2301,12 +2301,15 @@ def _project_dependencies(
     root = pcb.parent
     boundary = (limit or root).resolve()
     real_root = root.resolve()
+    # Only this board's own project files (stem of the PCB); sibling revisions
+    # and KiCad ``*_backup_*`` schematics are not its dependencies (#8727).
+    # Schematics arrive through ``_schematic_hierarchy``.
     files = {
         p
         for p in root.iterdir()
         if p.is_file()
         and (
-            p.suffix in {".kicad_pro", ".kicad_dru", ".kicad_sch"}
+            (p.suffix in {".kicad_pro", ".kicad_dru"} and p.stem == pcb.stem)
             or p.name in {"fp-lib-table", "sym-lib-table"}
         )
     }
@@ -2877,6 +2880,25 @@ def _read_csv_rows(path: Path) -> tuple[list[str], list[list[str]]]:
     return rows[0], rows[1:]
 
 
+def _declared_bom_exemptions(options: ReadinessOptions) -> dict[str, tuple[str, str]]:
+    """Refs the ``.kct`` spec declares deliberately non-LCSC (#8261, #8727).
+
+    Same source as ``bom_lcsc_values``; best-effort: no/invalid spec means none.
+    """
+    try:
+        from kicad_tools.export.bom_spec_overlay import declared_exemptions, find_spec_file
+        from kicad_tools.spec.parser import load_spec
+
+        spec_file = find_spec_file(options.pcb.parent)
+        if spec_file is None:
+            return {}
+        entries = load_spec(spec_file).bom_entries
+        return declared_exemptions(entries) if entries else {}
+    except Exception as exc:
+        logger.debug("Spec exemption lookup failed (ignoring): %s", exc)
+        return {}
+
+
 def _gate_bom(
     options: ReadinessOptions,
     engines: Engines,
@@ -2920,6 +2942,9 @@ def _gate_bom(
         None,
     )
 
+    declared = _declared_bom_exemptions(options)
+    exempt_seen: dict[str, tuple[str, str]] = {}
+    exempt_lines = 0
     unresolved: list[str] = []
     for index, row in enumerate(rows):
         value = row[part_index].strip() if part_index < len(row) else ""
@@ -2929,9 +2954,15 @@ def _gate_bom(
                 if designator_index is not None and designator_index < len(row)
                 else f"row {index + 2}"
             )
+            refs = [r for r in re.split(r"[,\s]+", label) if r]
+            if declared and refs and all(r in declared for r in refs):
+                # Every ref on this line is a declared, deliberate non-LCSC part (#8727).
+                exempt_seen.update({r: declared[r] for r in refs})
+                exempt_lines += 1
+                continue
             unresolved.append(label or f"row {index + 2}")
 
-    if rows and len(unresolved) == len(rows):
+    if rows and len(unresolved) + exempt_lines == len(rows) and len(rows) > 1 + exempt_lines:
         return CheckOutcome(
             name="bom",
             status=FAILED,
@@ -3141,6 +3172,15 @@ def _gate_bom(
         detail=(
             f"{len(rows)} BOM line(s) carry procurement identifiers; part check "
             f"{part_status}: {part_message}{warn_details}; {tht_note}"
+            + (
+                f" {len(exempt_seen)} declared exempt: "
+                + "; ".join(
+                    f"{ref} ({cat}: {why})" for ref, (cat, why) in sorted(exempt_seen.items())
+                )
+                + "."
+                if exempt_seen
+                else ""
+            )
         ),
     )
 
