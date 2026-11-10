@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-09
+
+### Upgrade notes / behaviour changes
+
+- **Exported `.kicad_dru` ampacity floors change** (Issue #8612). Waived/reinforced nets and oversize minimums are no longer emitted, and designer DRUs with `Reviewed clearance` rules get none; re-run `kicad-cli pcb drc` against the shipped DRU. Use `--no-ampacity-rules` to emit none (previously generated ampacity rules in the managed floors block are then removed on rewrite).
+
+- **`kct optimize-traces` may now roll back more nets** (Issue #8632): nets whose rewrite opens a connection or adds an un-waived creepage pair are reverted, and `--layers`/`--copper` default to the board's values instead of 2 / 1.0 oz.
+
+- **A tapeout can newly refuse** (Issue #8633): nonzero `redundant_copper_*` / `via_dangling` warnings remaining after cleanup now fail the warning review unless acknowledged with `kct readiness --ack-trace-quality RULE=REASON`.
+
+### Fixed
+
+- **The pure-Python fallback search now charges its HV mask setup to its per-net
+  budget, and builds those masks in O(N)** (Issue #8414). On HV boards the
+  pairwise-widening masks used to be built before `Router._route_impl` started
+  its clock, so a 10 s fallback call could take ~128 s. The clock now starts at
+  the top of the call, and an expired budget returns a deadline stop
+  (`last_route_deadline_hit`) without caching a partial mask. The zero-padded
+  disc dilation behind those masks is now an exact separable distance
+  transform: byte-identical output, ~0.13 s per mask on a 15.9 M-cell grid at
+  any radius, down from 1.2-15 s.
+
+- **Pure-Python router no longer runs on MLX/CuPy grid arrays** (Issue #8609). `Router` now moves a GPU-backed grid to NumPy up front (speedup not measured here), and `RoutingGrid._select_backend` reports the real backend type for `ArrayBackend` (it previously logged `cpu` for an MLX grid). The default `kct route` path builds grids without a `PerformanceConfig`, so this is a defensive guard there; the cause of the reported slowdown is not established by this change. `cupy-cuda12x` carries a `sys_platform != 'darwin'` marker so `uv sync --all-extras` resolves on macOS.
+
+- **`kct export` no longer writes unmeetable or waived ampacity floors into the designer `.kicad_dru`** (Issue #8612). Nets with a waived `ampacity`/`path_ampacity` finding or a current-path record get no `Ampacity Min Width` rule, minimums wider than the board are skipped with a warning, and a designer DRU carrying its own clearance rules is left without ampacity floors. Export now reports whenever it modifies the `.kicad_dru`. New `--no-ampacity-rules` flag.
+
+- **`--waive` no longer fails wholesale on one unmatched key; same-digest re-binds keep the original approval** (Issue #8614). `kct check --waive` and `kct detect-mistakes --waive` record the keys that match and warn about the rest (exit 1 only when no key matches). Re-waiving a key whose evidence digest is unchanged under a new `evN:` prefix keeps the original `reviewer`, `date`, `reason` and `issue` and adds `rebound_at`. `kct check` summaries gain `orphan_waivers` beside `stale_waivers`.
+
+- **`kct place-silk-refs` now agrees better with `kicad-cli pcb drc` and keeps labels with their own part** (Issue #8628). NPTH mounting holes are obstacles, the planner adds a measured 0.225 mm slack for KiCad's larger stroke-font text extents (planner-only; `kct check` is unchanged), and candidates are chosen to be at least 0.4 mm nearer their own courtyard than any other part's. When no clear position reaches that margin the best one is used and the placement is reported as `low_association`.
+
+- **`kct optimize-traces` no longer reports a clean result over a newly opened net or creepage violation** (Issue #8632). With `--drc-aware` the written board is re-checked with kicad-cli (zone/via-aware unconnected items per net) and, with `--voltage-map`, with the `kct creepage` audit; nets that regress are rolled back and listed under `output_verify_rolled_back`. `creepage_gate` is `active` only when the whole-board audit ran. `--layers`/`--copper` now default to the board's own layer count and outer copper weight (`stack_source` in the JSON report).
+
+### Changed
+
+- **Tapeout/readiness cleanup now runs dedupe, prune and `optimize-traces --drc-aware`, and gates on trace quality** (Issue #8633). `kct readiness --generate` records per-step counts in README.txt and the manifest, and `optimize-traces` reads layer count and copper weight from the board/project when `--layers`/`--copper` are not given.
+
+### Performance
+
+- **Negotiated routing stops re-probing known-failing signal nets** (Issue #8486). The no-sealed-pad
+  fallback key is now the set of foreign `(net, layer)` pairs near the failed net instead of exact
+  geometry, so the rescue memo survives a re-route pass (re-probed every 3 iterations), and the
+  per-net search back-off also applies to nets that fail before reaching 90 % of their cap.
+
 ## [0.28.1] - 2026-11-08
 
 ### Fixed
@@ -15412,6 +15455,7 @@ All blocks feature:
 - Python 3.10+
 - numpy >= 1.20
 
+[0.29.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.29.0
 [0.28.1]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.28.1
 [0.28.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.28.0
 [0.27.0]: https://github.com/rjwalters/kicad-tools/releases/tag/v0.27.0
