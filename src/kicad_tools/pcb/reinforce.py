@@ -1840,6 +1840,20 @@ def _reinforce_ends(
                 # anchor's straight-line copper gap to BOTH ends' copper at
                 # least ``end_offset``, moving inward only.
                 end_copper = c0 + c1
+                # Any other same-net SMD pad on this layer is end copper too
+                # for the clearance test: a pad mid-leg, or the end pad of an
+                # adjacent leg of a Y, is not what THIS leg ends on, yet an
+                # anchor must not land in it (Issue #8772). THT pads and vias
+                # stay with the hole-to-hole check in ``_position_violation``.
+                seen = {id(f) for f in end_copper}
+                end_copper = end_copper + [
+                    f
+                    for f in features
+                    if f.pad is not None
+                    and f.layers
+                    and id(f) not in seen
+                    and f.on_layer(cand.layer)
+                ]
 
                 def clear(p, _copper=end_copper):
                     return all(f.distance(p) - half >= end_offset - 1e-6 for f in _copper)
