@@ -2970,3 +2970,56 @@ class TestReinforceClearCLI:
 
         path = self._board(tmp_path)
         assert run_pcb_command(_reinforce_args(path, clear=True, replace=True)) == 1
+
+
+class TestEndAnchorSameNetPadNotAtLegEnd:
+    """Issue #8772: a same-net SMD pad that is not the copper the leg ends on
+    (mid-leg, or the end pad of an adjacent leg of a Y) is still end copper
+    for the clearance test."""
+
+    def _assert_clear(self, result, pads, min_gap=1.0):
+        for a in result.placed:
+            for pad in pads:
+                pad_gap, _ = _anchor_gaps(a, pad)
+                assert pad_gap >= min_gap - 1e-3
+
+    def test_mid_leg_smd_pad_within_reach_of_end(self):
+        pcb = PCB.create(width=200, height=200, center=False)
+        for x in (40.0, 43.0):
+            _add_shaped_pad_footprint(
+                pcb, ref=f"U{int(x)}", x=x, y=100.0, net="N", shape="circle", size=(1.5, 1.5)
+            )
+        _add_shaped_pad_footprint(
+            pcb, ref="U9", x=140.0, y=100.0, net="N", shape="rect", size=(2.0, 6.0)
+        )
+        pcb.add_trace((40.0, 100.0), (140.0, 100.0), width=1.0, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", dry_run=True)
+        pads = [
+            _pad_poly("circle", (1.5, 1.5), 0.0, (40.0, 100.0)),
+            _pad_poly("circle", (1.5, 1.5), 0.0, (43.0, 100.0)),
+            _pad_poly("rect", (2.0, 6.0), 0.0, (140.0, 100.0)),
+        ]
+        self._assert_clear(result, pads)
+
+    def test_y_trunk_anchor_clears_adjacent_leg_end_pad(self):
+        pcb = PCB.create(width=200, height=200, center=False)
+        for ref, x in (("A", 40.0), ("B", 46.0)):
+            _add_shaped_pad_footprint(
+                pcb,
+                ref=ref,
+                x=x,
+                y=100.0,
+                net="PWR",
+                shape="rect",
+                size=(2.0, 6.0),
+                rotation=45.0,
+            )
+        pcb.add_trace((40, 100), (43, 100), width=1.0, layer="F.Cu", net="PWR")
+        pcb.add_trace((43, 100), (46, 100), width=1.0, layer="F.Cu", net="PWR")
+        pcb.add_trace((43, 100), (43, 94), width=1.0, layer="F.Cu", net="PWR")
+        result = reinforce_net(pcb, "PWR", all_runs=True, dry_run=True)
+        pads = [
+            _pad_poly("rect", (2.0, 6.0), 45.0, (40.0, 100.0)),
+            _pad_poly("rect", (2.0, 6.0), 45.0, (46.0, 100.0)),
+        ]
+        self._assert_clear(result, pads)

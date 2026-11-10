@@ -1476,6 +1476,22 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 "witness": r.witness,
                 "segment_count": len(r.segments),
                 "length_mm": round(r.length_mm, 4),
+                "layer_changes": [
+                    {
+                        "position": list(c.position),
+                        "from_layer": c.from_layer,
+                        "to_layer": c.to_layer,
+                        "via_count": c.count,
+                        "drill_mm": c.drill,
+                        "pad_diameter_mm": c.pad_diameter,
+                        "capacity_a": round(c.current_capacity_a(), 4),
+                        "vias": [
+                            {"position": list(v[0]), "drill_mm": v[1], "pad_diameter_mm": v[2]}
+                            for v in c.vias
+                        ],
+                    }
+                    for c in r.layer_changes
+                ],
             }
             for r in audit.resolutions
         ],
@@ -1528,6 +1544,12 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 )
                 if thermal.assumption:
                     print(f"      assumption: {thermal.assumption}")
+                for c in r.layer_changes:
+                    print(
+                        f"      layer change {c.from_layer}->{c.to_layer} at "
+                        f"({c.position[0]:.3f}, {c.position[1]:.3f}): {c.count} via(s), "
+                        f"drill {c.drill:.3f} mm, capacity {c.current_capacity_a():.2f} A"
+                    )
                 if r.spec.pulsed_a is not None and r.spec.pulse_duration_s is None:
                     print("      fusing survivability NOT checked (no 'pulse_duration_s' declared)")
         if audit.uncovered:
