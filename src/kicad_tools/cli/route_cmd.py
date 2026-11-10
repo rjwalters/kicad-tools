@@ -6151,6 +6151,19 @@ def _drc_error_finding_key(v) -> str:
     return f"{v.rule_id}|{v.message} @ {v.location}"
 
 
+def _native_drc_finding_key(v) -> str:
+    """Record key of one native (kicad-cli) DRC error for the chained comparison.
+
+    Issue #8717: ``native:<type>|<message> @ <location>``.  The ``native:``
+    prefix keeps native classes distinguishable from internal ones in the
+    refusal message.  Measured on kicad-cli 10.0.6 (stm32 devboard fixture
+    with injected shorting_items / tracks_crossing / solder_mask_bridge
+    errors): repeated runs and a run after appending a non-conflicting segment
+    produced identical type + message + location keys, so position is safe.
+    """
+    return f"native:{v.type_str}|{v.message} @ {v.location_str}"
+
+
 def run_post_route_drc(
     output_path: Path,
     manufacturer: str,
@@ -6442,6 +6455,23 @@ def run_post_route_drc(
             geo = run_geometric_drc(output_path, refill_zones=False)
         else:
             geo = run_geometric_drc(output_path)
+
+        # Issue #8717: fold native-only error classes into the chained-pass
+        # record.  Only when native DRC ran AND an internal entry exists; with
+        # no entry the board stays "not audited" and nothing is invented.
+        if geo.ran and _record_key in _drc_error_findings:
+            try:
+                _drc_error_findings[_record_key] = _drc_error_findings[_record_key] | frozenset(
+                    _native_drc_finding_key(v) for v in geo.error_violations
+                )
+            except Exception as record_exc:
+                _drc_error_findings.pop(_record_key, None)
+                if not quiet:
+                    print(
+                        "  Warning: could not record the native DRC errors "
+                        f"({record_exc}); a chained completion pass will treat this "
+                        "board as not audited"
+                    )
 
         duplicates = 0
         if geo.ran and geo.error_count > 0:

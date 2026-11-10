@@ -136,3 +136,37 @@ def test_unmatched_violations_of_either_engine_still_count(stubbed_drc):
     internal = [_internal("dimension_via_drill"), _internal("clearance_trace_trace", (1.0, 1.0))]
     native = [_native("drill_out_of_range"), _native("clearance", (2.0, 2.0))]
     assert stubbed_drc(internal, native) == 3
+
+
+# Issue #8717: native-only error classes are recorded for the chained comparison.
+def _recorded(tmp_path):
+    return route_cmd._drc_error_findings.get(str((tmp_path / "b.kicad_pcb").resolve()))
+
+
+def test_native_errors_are_recorded_with_native_prefix(stubbed_drc, tmp_path):
+    stubbed_drc(
+        [_internal("clearance_trace_trace", (1.0, 1.0))], [_native("shorting_items", (3.0, 4.0))]
+    )
+    rec = _recorded(tmp_path)
+    assert any(k.startswith("native:shorting_items|") for k in rec)
+    assert any(k.startswith("clearance_trace_trace|") for k in rec)
+
+
+def test_native_record_is_stable_across_runs_and_additive(stubbed_drc, tmp_path):
+    base = [_native("tracks_crossing", (3.0, 4.0))]
+    stubbed_drc([], base)
+    first = _recorded(tmp_path)
+    stubbed_drc([], base + [_native("shorting_items", (5.0, 6.0))])
+    second = _recorded(tmp_path)
+    assert first < second
+    assert {k.split("|", 1)[0] for k in second - first} == {"native:shorting_items"}
+
+
+def test_native_not_run_records_internal_only(monkeypatch, stubbed_drc, tmp_path):
+    monkeypatch.setattr(
+        "kicad_tools.drc.run_geometric_drc",
+        lambda *_a, **_k: GeometricDRCResult(ran=False, note="no kicad-cli"),
+    )
+    stubbed_drc([_internal("clearance_trace_trace", (1.0, 1.0))], [])
+    rec = _recorded(tmp_path)
+    assert rec and not any(k.startswith("native:") for k in rec)
