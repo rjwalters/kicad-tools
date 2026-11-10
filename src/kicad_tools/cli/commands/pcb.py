@@ -1330,11 +1330,11 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                         f" -> ({o.end[0] + origin_x:.2f}, {o.end[1] + origin_y:.2f})"
                         f" width {o.width_mm:.3f} mm" + (" [already present]" if o.existing else "")
                     )
-                for r in outcome.refused_openings:
+                for ro in outcome.refused_openings:
                     print(
-                        f"    opening refused on {r.copper_layer} [{r.rule}: need "
-                        f"{r.required_mm:.3f} mm, have {r.actual_mm:.3f} mm"
-                        + (f", vs {r.obstacle_net}" if r.obstacle_net else "")
+                        f"    opening refused on {ro.copper_layer} [{ro.rule}: need "
+                        f"{ro.required_mm:.3f} mm, have {ro.actual_mm:.3f} mm"
+                        + (f", vs {ro.obstacle_net}" if ro.obstacle_net else "")
                         + "]"
                     )
             else:
