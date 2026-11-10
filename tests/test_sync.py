@@ -3119,13 +3119,20 @@ class TestStrandedCopper:
 
         from kicad_tools.schema.pcb import Segment, Via
 
-        positions = {("R1", "2"): (0.0, 0.0), ("R2", "1"): (10.0, 0.0)}
+        positions = {
+            ("R1", "2"): (0.0, 0.0),
+            ("R2", "1"): (10.0, 0.0),
+            ("R3", "1"): (10.0, 10.0),
+            ("R4", "1"): (0.0, 10.0),
+        }
         pcb = MagicMock()
         pcb._nets = {}
         pcb.get_pad_position.side_effect = lambda r, p: positions.get((r, p))
         pcb.footprints = [
             NS(reference="R1", pads=[NS(number="2", net_name="GND")]),
             NS(reference="R2", pads=[NS(number="1", net_name="GND")]),
+            NS(reference="R3", pads=[NS(number="1", net_name="GND")]),
+            NS(reference="R4", pads=[NS(number="1", net_name="GND")]),
         ]
         pcb.segments = [
             Segment(
@@ -3163,6 +3170,87 @@ class TestStrandedCopper:
         )
         uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
         assert "s3" not in uuids and {"s1", "s2"} <= uuids
+
+    def test_t_junction_keeps_branches_to_legit_pads(self):
+        # R1.2 -A- J; J -B- R2.1; J -C- K -D- R3.1 (Issue #8705 review)
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "A", False),
+                ((5, 0), (10, 0), "GND", "B", False),
+                ((5, 0), (5, 10), "GND", "C", False),
+                ((5, 10), (10, 10), "GND", "D", False),
+            ]
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        assert uuids == {"A"}
+
+    def test_via_junction_keeps_continuation_to_legit_pad(self):
+        # Net continues on B.Cu from the via to R2.1: only the pad-side stub goes.
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "A", False),
+                ((5, 0), (10, 0), "GND", "B", False),  # second branch at the via
+                ((5, 0), (5, 10), "GND", "C", False),
+                ((5, 10), (10, 10), "GND", "D", False),
+            ],
+            vias=[((5, 0), "GND", "V")],
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        assert uuids == {"A"}
+
+    def test_via_bridged_chain_to_legit_pad_is_stranded_only_up_to_pad(self):
+        pcb = self._pcb(
+            [
+                ((0, 0), (5, 0), "GND", "A", False),
+                ((5, 0), (10, 0), "GND", "B", False),
+                ((10, 0), (10, 5), "GND", "legit", False),  # R2.1's own routing
+            ],
+            vias=[((5, 0), "GND", "V")],
+        )
+        uuids = {i["uuid"] for _o, i in Reconciler._collect_stranded(pcb, [self.MM])}
+        # The via is a pass-through between A and B, so the chain to R2.1 is the
+        # old R1.2 connection; R2.1's own copper beyond the pad stays.
+        assert uuids == {"A", "V", "B"}
+
+    def test_segment_between_two_mismatched_pads_reported_once(self):
+        mm2 = {"reference": "R2", "pad": "1", "pcb_net": "GND", "schematic_net": "VCC"}
+        pcb = self._pcb([((0, 0), (10, 0), "GND", "s1", False)])
+        found = Reconciler._collect_stranded(pcb, [self.MM, mm2])
+        assert [i["uuid"] for _o, i in found] == ["s1"]
+
+    def test_real_pcb_object(self, tmp_path):
+        from kicad_tools.schema.pcb import PCB, Segment, Via
+        from tests.conftest import MINIMAL_PCB
+
+        f = tmp_path / "a.kicad_pcb"
+        f.write_text(MINIMAL_PCB)
+        pcb = PCB.load(str(f))
+        x, y = pcb.get_pad_position("R1", "1")
+        pcb._segments = [
+            Segment(
+                start=(x, y),
+                end=(x + 2, y),
+                width=0.2,
+                layer="F.Cu",
+                net_number=0,
+                net_name="GND",
+                uuid="rs1",
+            )
+        ]
+        pcb._vias = [
+            Via(
+                position=(x + 2, y),
+                size=0.6,
+                drill=0.3,
+                layers=["F.Cu", "B.Cu"],
+                net_number=0,
+                net_name="GND",
+                uuid="rv1",
+            )
+        ]
+        mm = {"reference": "R1", "pad": "1", "pcb_net": "GND", "schematic_net": "VCC"}
+        found = Reconciler._collect_stranded(pcb, [mm])
+        assert {i["uuid"] for _o, i in found} == {"rs1", "rv1"}
 
     def test_other_net_and_clean_board(self):
         pcb = self._pcb([((0, 0), (1, 0), "VCC", "s1", False)])

@@ -675,9 +675,9 @@ class Reconciler:
         Seeds are segment endpoints / vias within 0.01 mm of the pad centre
         (the tolerance ``PCB.footprint_has_traces`` uses) on the old net.  The
         walk continues through copper touching already-stranded copper on the
-        same net, but stops at any point where another pad that still
-        legitimately carries that net sits (and never crosses a mismatched
-        pad's own position, which is its own seed).  Evaluated against the PCB
+        same net only along pass-through chains: it stops at junctions, at any
+        pad that still legitimately carries that net, and at other mismatched
+        pads (their own seeds), so routing that serves other pads is kept.  Evaluated against the PCB
         before nets are reassigned.
 
         Returns:
@@ -719,27 +719,60 @@ class Reconciler:
 
             segs = [s for s in pcb.segments if net_of(s) == old_net]
             vias = [v for v in pcb.vias if net_of(v) == old_net]
-            frontier = [pad_pos]
-            visited_pts = [pad_pos]
+            segs_vias = segs + vias
+
+            def pts_of(obj):
+                return [obj.start, obj.end] if hasattr(obj, "start") else [obj.position]
+
+            def touching(pt, exclude):
+                return [
+                    o
+                    for o in segs_vias
+                    if id(o) not in exclude and any(near(pt, q) for q in pts_of(o))
+                ]
+
+            # Other mismatched pads are their own seeds: never walk through them.
+            other_mismatch_pts = [
+                p
+                for (r, n) in mismatch_pads
+                if (r, n) != (mm["reference"], mm["pad"])
+                for p in [pcb.get_pad_position(r, n)]
+                if p
+            ]
+
             found: list[Any] = []
             found_ids: set[int] = set()
+
+            def claim(obj) -> None:
+                found.append(obj)
+                found_ids.add(id(obj))
+
+            # Everything touching the mismatched pad itself is stranded.  Beyond
+            # that, only follow a pass-through chain (exactly one other copper
+            # object at a non-pad point).  A junction (T, or a via where the net
+            # continues) may feed pads that still belong on the net, so the
+            # walk stops there and leaves every branch alone (Issue #8705).
+            frontier: list[tuple[float, float]] = []
+            for obj in touching(pad_pos, found_ids):
+                claim(obj)
+                frontier.extend(q for q in pts_of(obj) if not near(q, pad_pos))
             while frontier:
                 pt = frontier.pop()
-                for obj in segs + vias:
-                    if id(obj) in found_ids:
-                        continue
-                    pts = [obj.start, obj.end] if hasattr(obj, "start") else [obj.position]
-                    if not any(near(pt, q) for q in pts):
-                        continue
-                    found.append(obj)
-                    found_ids.add(id(obj))
-                    for q in pts:
-                        if any(near(q, k) for k in keep_points):
-                            continue
-                        if any(near(q, v) for v in visited_pts):
-                            continue
-                        visited_pts.append(q)
-                        frontier.append(q)
+                if any(near(pt, k) for k in keep_points):
+                    continue
+                if any(near(pt, k) for k in other_mismatch_pts):
+                    continue
+                nxt = touching(pt, found_ids)
+                # A via is a layer change, not a branch: count only segments.
+                nxt_segs = [o for o in nxt if hasattr(o, "start")]
+                if len(nxt_segs) > 1:
+                    continue  # junction: other branches may feed legit pads
+                for o in nxt:
+                    if not hasattr(o, "start"):
+                        claim(o)
+                if nxt_segs:
+                    claim(nxt_segs[0])
+                    frontier.extend(q for q in pts_of(nxt_segs[0]) if not near(q, pt))
 
             for obj in found:
                 if id(obj) in seen:
