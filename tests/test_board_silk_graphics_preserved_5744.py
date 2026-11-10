@@ -116,7 +116,13 @@ def test_committed_routed_artifact_keeps_footprint_silk_graphics(
     unrouted: Path, routed: Path
 ) -> None:
     """Routing changes copper, never footprint silkscreen geometry."""
-    assert silk_graphics_per_footprint(routed) == silk_graphics_per_footprint(unrouted)
+    unrouted_silk = silk_graphics_per_footprint(unrouted)
+    routed_silk = silk_graphics_per_footprint(routed)
+    # Issue #8532: fiducials (FID*) are added after routing; they carry no silk
+    # and have no unrouted counterpart.
+    for ref in [r for r in routed_silk if r.startswith("FID") and r not in unrouted_silk]:
+        del routed_silk[ref]
+    assert routed_silk == unrouted_silk
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ from kicad_tools.drc.repair_drill_clearance import (
     DrillRepairResult,
 )
 from kicad_tools.drc.violation import DRCViolation, Location, Severity, ViolationType
+from tests.conftest import make_assembly_ready
 
 
 @pytest.fixture(autouse=True)
@@ -3614,7 +3615,7 @@ _PWR_BOARD = """(kicad_pcb (version 20240108) (generator "pcbnew") (generator_ve
   (net 0 "")
   (net 1 "GND")
   (net 2 "SIG")
-  (gr_rect (start 95 95) (end 110 106) (stroke (width 0.1) (type default)) (fill none)
+  (gr_rect (start 85 85) (end 120 116) (stroke (width 0.1) (type default)) (fill none)
     (layer "Edge.Cuts"))
   (footprint "test:R1" (layer "F.Cu") (at 102 101)
     (property "Reference" "R1" (at 0 -1.5 0) (layer "F.SilkS")
@@ -3681,6 +3682,7 @@ def pwr_board(tmp_path: Path) -> Path:
     """The 0.175 mm track-to-pad gap under a 0.2 mm class, with its project."""
     pcb = tmp_path / "pwr.kicad_pcb"
     pcb.write_text(_PWR_BOARD)
+    make_assembly_ready(pcb)
     pcb.with_suffix(".kicad_pro").write_text(json.dumps(_PWR_PROJECT))
     return pcb
 
@@ -3734,11 +3736,15 @@ class TestFixDrcRecheck6431:
             seen.append(layers)
             return real(path, manufacturer, layers, project_pcb_path)
 
-        four_layer = pwr_board.read_text().replace(
+        # Start from the raw template: the fixture's add-fiducials pass
+        # re-serialises the file, so its layer line no longer matches.
+        four_layer = _PWR_BOARD.replace(
             '(0 "F.Cu" signal) (31 "B.Cu" signal)',
             '(0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal) (31 "B.Cu" signal)',
         )
+        assert four_layer != _PWR_BOARD
         pwr_board.write_text(four_layer)
+        make_assembly_ready(pwr_board)
         monkeypatch.setattr(fix_drc_cmd, "_run_python_drc", spy)
         main([str(pwr_board), "--no-connectivity-check", "--quiet"])
         assert seen and all(layers == 4 for layers in seen)

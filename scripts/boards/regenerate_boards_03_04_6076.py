@@ -151,9 +151,16 @@ def remap_routed(old_unrouted: Path, new_unrouted: Path, routed: Path) -> dict:
     positional = uuid_tools.positional_map([(old_unrouted, new_unrouted)])
     new_doc, doc = parse_file(new_unrouted), load_pcb(routed)
     new_fps, fps = _fps(new_doc), _fps(doc)
-    assert set(new_fps) == set(fps), "footprint references differ"
+    # Issue #8532: fiducials are added to the routed board after routing, so the
+    # routed board may carry FID* footprints the unrouted build never had.
+    extra = set(fps) - set(new_fps)
+    assert set(new_fps) <= set(fps) and all(r.startswith("FID") for r in extra), (
+        "footprint references differ"
+    )
     rename: dict[str, str] = {}
     for ref, fp in fps.items():
+        if ref in extra:
+            continue
         rename[_uid(fp)] = _uid(new_fps[ref])
         # Generator silk the routed board inherited from an unrouted build.
         for tag, nodes in _children_by_tag(fp).items():

@@ -31,6 +31,7 @@ from kicad_tools.analysis.routing_quality import (
     compute_routing_quality,
 )
 from kicad_tools.schema.pcb import Segment
+from tests.conftest import make_assembly_ready
 
 # ---------------------------------------------------------------------------
 # Unit-test scaffolding: real Segment dataclasses on a minimal PCB stub
@@ -325,6 +326,7 @@ _CLEAN_45_SEGMENTS = """  (segment (start 110 110) (end 112 112) (width 0.25) (l
 def staircase_pcb(tmp_path: Path) -> Path:
     p = tmp_path / "staircase_4623.kicad_pcb"
     p.write_text(_PCB_TEMPLATE.format(segments=_STAIRCASE_SEGMENTS))
+    make_assembly_ready(p)
     return p
 
 
@@ -332,6 +334,7 @@ def staircase_pcb(tmp_path: Path) -> Path:
 def clean_45_pcb(tmp_path: Path) -> Path:
     p = tmp_path / "clean45_4623.kicad_pcb"
     p.write_text(_PCB_TEMPLATE.format(segments=_CLEAN_45_SEGMENTS))
+    make_assembly_ready(p)
     return p
 
 

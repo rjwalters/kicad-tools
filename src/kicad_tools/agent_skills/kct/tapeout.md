@@ -39,7 +39,7 @@ Model resolves through the harness's normal precedence chain (explicit dispatch 
 
 **Arguments**: `$ARGUMENTS`
 
-`$ARGUMENTS` is `<board-path> [--mfr <tier>] [--assembly | --pcb-only] [--output <dir>] [--ack-warnings <rule,...>] [--skip-cleanup]`.
+`$ARGUMENTS` is `<board-path> [--mfr <tier>] [--assembly | --pcb-only] [--output <dir>] [--ack-warnings <rule,...>] [--skip-cleanup] [--skip-fiducials] [--skip-board-info]`.
 
 | Token | Meaning |
 |-------|---------|
@@ -49,6 +49,7 @@ Model resolves through the harness's normal precedence chain (explicit dispatch 
 | `--pcb-only` | Produce a **bare-board package**: gerbers + drill only. **Skips BOM and CPL entirely** (Gate 4 and the CPL half of Gate 3 are not run). Use when you are ordering the PCB alone and sourcing/assembling parts yourself. |
 | `--output <dir>` | Where the bundle is written. Optional; defaults to `<pcb-dir>/manufacturing/` (the `kct export` default). |
 | `--skip-cleanup` | **Optional.** Skip Gate 0 (copper cleanup). The skip is **recorded**: Gate 7 writes `copper_cleanup: skipped` to `README.txt` and Gate 8 to the manifest. Without this flag Gate 0 always runs. |
+| `--skip-fiducials` / `--skip-board-info` | **Optional.** Skip Gate 0b (adding global fiducials / the board-ID silkscreen text). Each skip is **recorded**: Gate 7 writes `fiducials: skipped (--skip-fiducials)` / `board_info: skipped (--skip-board-info)` to `README.txt` and Gate 8 to the manifest. Without them Gate 0b always runs. |
 | `--ack-warnings <rule,...>` | **Optional.** Explicitly acknowledge nonzero **assembly-affecting** warning counts for the named rules (comma-separated `rule_id`s, e.g. `--ack-warnings silk_over_copper,silk_edge_clearance`). Each acknowledged rule becomes a per-rule accepted-risk line in `README.txt` (Gate 7). Without an acknowledgement covering **every** assembly-affecting rule that has a nonzero warning count, Gate 4b **refuses** the tapeout. This is a *skill* argument (an acknowledgement ritual), not a `kct check` CLI flag. |
 
 **`--assembly` and `--pcb-only` are mutually exclusive.** If both are passed, refuse. **If neither is passed, default to `--assembly`** — the safe default is the *complete* package; a caller who wants the reduced bare-board package must ask for it explicitly.
@@ -80,6 +81,11 @@ If the resolved tier is not in that set, stop and ask — do not silently fall b
 Before Gate 1, run, in order and in place: `kct pcb dedupe <pcb>` (#8218), `kct pcb prune <pcb>` (DRC-verified; #8216 landed), then `kct optimize-traces <pcb> --drc-aware --mfr <tier>` (add `--voltage-map <file>` when the board has one). Layers and copper weight come from the board stackup / `.kicad_pro` `meta.copper_oz` unless `--layers` / `--copper` are passed (#8633). It must precede Gate 1 so the `--refill-zones` cross-gate (Gate 2) judges the **cleaned** board, and nothing is hashed or exported from the uncleaned one. `--drc-aware` is **not self-verifying** (#8632 is open): Gate 2's refill DRC (unconnected items) and the `kct creepage` census are what catch a regression, so keep this ordering. Record each step's counts for Gate 7/8 (`0` is valid; README.txt and the manifest `copper_cleanup.steps`). `kct readiness --generate` performs the same three steps (`--skip-cleanup` skips all three and is recorded).
 
 **Trace-quality gate (part of Gate 4b):** after cleanup, any nonzero `redundant_copper_*` or `via_dangling` count in Gate 1's per-rule table **refuses** tapeout unless each rule is acknowledged with a reason (`kct readiness --ack-trace-quality RULE=REASON`, repeatable). The acknowledgement and reason are listed in README.txt and recorded in the manifest. These rules stay advisory for the generic strict gate (`NON_GATING_RULE_PREFIXES` is unchanged).
+
+
+### Gate 0b — fiducials and board ID (always runs unless skipped)
+
+After Gate 0 and before Gate 1, run `kct pcb add-fiducials <pcb> --sides populated` and `kct pcb add-board-info <pcb> --auto` (issue #8532) so the checks judge the finished board. Both are idempotent. `kct check` reports what remains missing as `fiducials_missing` (fewer than 3 global fiducials on a populated side) and `board_id_missing` (no silkscreen text naming the revision); both are **assembly-affecting** warnings, so Gate 4b refuses `--assembly` unless they are zero or acknowledged via `--ack-warnings`. `kct readiness --generate` performs the same step (`--skip-fiducials` / `--skip-board-info` to opt out); `--verify` never regenerates or mutates the board.
 
 ### Pre-gates (Gates 1–3): delegate to `{{skill:manufacturing-readiness}}`, do not re-describe
 
@@ -193,6 +199,7 @@ Write `<dir>/README.txt` enumerating **every** deliverable in the bundle so a hu
 - **Hand-solder / THT items** (carried from the CPL's THT-exclusion note) — parts the assembler will *not* place and someone must hand-solder.
 - The **per-rule warning table** from Gate 4b (rule → warning count; not an aggregate total), and **one acknowledgement line per assembly-affecting rule with a nonzero count** — naming the rule, the count, and why the risk is accepted (from `--ack-warnings` or the recorded accepted-risk decision). If every assembly-affecting count is zero, state that explicitly.
 - A **Copper cleanup** line from Gate 0: segments/vias removed, or `copper_cleanup: skipped` when `--skip-cleanup` was passed.
+- An **Assembly prep** line per step from Gate 0b: `applied`, or `fiducials: skipped (--skip-fiducials)` / `board_info: skipped (--skip-board-info)` when opted out.
 - Any **accepted-risk notes** carried forward from sign-off docs (e.g. a documented DRC waiver). Waived findings in Gate 1's report (`"status": "waived"`) are listed one per line with their `key`, `waiver_reason` and reviewer from the board's `<board>.kct-waivers.json`. If none, say "no accepted-risk waivers."
 
 **Gate condition:** `README.txt` exists, names the board file, the tier, and the mode, **and** contains the per-rule warning table plus one acknowledgement line per assembly-affecting rule with a nonzero count (or the explicit statement that all assembly-affecting counts are zero).

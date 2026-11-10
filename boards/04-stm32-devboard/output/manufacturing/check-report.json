@@ -1,19 +1,25 @@
 {
   "file": "output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "763108b376b67d25dfba0651208a06619559cb1d3dd56cc26247764d95ca0db0",
+  "pcb_sha256": "aee6f48710a681f5df3ba6380d2b100fd18d0227bb9f5d679bd7dd3270ff90b0",
   "layers": 0,
   "summary": {
     "errors": 0,
-    "warnings": 0,
+    "warnings": 6,
     "infos": 0,
     "waived": 0,
-    "rules_checked": 66,
+    "rules_checked": 71,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
       "track_dangling": 1,
       "via_dangling": 1,
+      "pour_slot": 1,
+      "redundant_copper_duplicate": 1,
+      "redundant_copper_fragments": 1,
+      "redundant_copper_detour": 1,
+      "redundant_copper_via_offcentre": 1,
+      "redundant_copper_covered": 1,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
@@ -26,6 +32,7 @@
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
       "sch_field_overlap": 1,
+      "sch_wire_through_symbol": 1,
       "spec_conformance_dimensions": 1,
       "spec_conformance_layers": 1,
       "spec_conformance_min_trace": 1,
@@ -34,14 +41,264 @@
       "spec_conformance_target_fab": 1
     },
     "passed": true,
-    "stale_waivers": 0
+    "stale_waivers": 0,
+    "orphan_waivers": 0,
+    "attach_zone_exemption": "not_applicable"
   },
-  "violations": [],
+  "violations": [
+    {
+      "rule_id": "pour_slot",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Pour slot: [USER_LED] and [NRST] run parallel on F.Cu for 0.59 mm with 0.310 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "location": [
+        154.106,
+        92.8
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3100000000000051,
+      "required_value": 0.85,
+      "items": [],
+      "nets": [
+        "USER_LED",
+        "NRST"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "pour_slot||NRST,USER_LED|F.Cu",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "pour_slot",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Pour slot: [GND] and [SWDIO] run parallel on F.Cu for 1.39 mm with 0.325 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "location": [
+        154.357,
+        87.25
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.325,
+      "required_value": 0.85,
+      "items": [],
+      "nets": [
+        "GND",
+        "SWDIO"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "pour_slot||GND,SWDIO|F.Cu",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "pour_slot",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Pour slot: [OSC_OUT] and [NRST] run parallel on F.Cu for 0.50 mm with 0.361 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "location": [
+        145.588,
+        89.25
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.3615,
+      "required_value": 0.85,
+      "items": [],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "pour_slot||NRST,OSC_OUT|F.Cu",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "pour_slot",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Pour slot: [OSC_OUT] and [NRST] run parallel on F.Cu for 0.61 mm with 0.350 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "location": [
+        146.144,
+        89.25
+      ],
+      "layer": "F.Cu",
+      "actual_value": 0.35,
+      "required_value": 0.85,
+      "items": [],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "pour_slot||NRST,OSC_OUT|F.Cu",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "pour_slot",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Pour slot: [OSC_OUT] and [NRST] run parallel on B.Cu for 0.61 mm with 0.350 mm gap; the pour between them (< 0.650 mm = 2 x 0.200 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "location": [
+        146.144,
+        89.25
+      ],
+      "layer": "B.Cu",
+      "actual_value": 0.35,
+      "required_value": 0.65,
+      "items": [],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "pour_slot||NRST,OSC_OUT|B.Cu",
+      "evidence_hash": null
+    },
+    {
+      "rule_id": "redundant_copper_detour",
+      "type": "unknown",
+      "severity": "warning",
+      "message": "Track detour: [SWCLK] on F.Cu routes 2.11 mm between points 0.76 mm apart (ratio 2.8)",
+      "location": [
+        152.25,
+        85.338
+      ],
+      "layer": "F.Cu",
+      "actual_value": 2.787715921290706,
+      "required_value": 2.0,
+      "items": [],
+      "nets": [
+        "SWCLK"
+      ],
+      "status": "warning",
+      "waived": false,
+      "key": "redundant_copper_detour||SWCLK|F.Cu",
+      "evidence_hash": null
+    }
+  ],
   "mask_copper_assessments": [],
+  "schema_version": 1,
+  "findings": [
+    {
+      "schema_version": 1,
+      "rule_id": "pour_slot",
+      "severity": "warning",
+      "message": "Pour slot: [USER_LED] and [NRST] run parallel on F.Cu for 0.59 mm with 0.310 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "USER_LED",
+        "NRST"
+      ],
+      "point": [
+        154.106,
+        92.8
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "pour_slot",
+      "severity": "warning",
+      "message": "Pour slot: [GND] and [SWDIO] run parallel on F.Cu for 1.39 mm with 0.325 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "GND",
+        "SWDIO"
+      ],
+      "point": [
+        154.357,
+        87.25
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "pour_slot",
+      "severity": "warning",
+      "message": "Pour slot: [OSC_OUT] and [NRST] run parallel on F.Cu for 0.50 mm with 0.361 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "point": [
+        145.588,
+        89.25
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "pour_slot",
+      "severity": "warning",
+      "message": "Pour slot: [OSC_OUT] and [NRST] run parallel on F.Cu for 0.61 mm with 0.350 mm gap; the pour between them (< 0.850 mm = 2 x 0.300 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "point": [
+        146.144,
+        89.25
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "pour_slot",
+      "severity": "warning",
+      "message": "Pour slot: [OSC_OUT] and [NRST] run parallel on B.Cu for 0.61 mm with 0.350 mm gap; the pour between them (< 0.650 mm = 2 x 0.200 clearance + 0.250 min_thickness) cannot fill, leaving a slot",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "OSC_OUT",
+        "NRST"
+      ],
+      "point": [
+        146.144,
+        89.25
+      ],
+      "bbox": null,
+      "layer": "B.Cu",
+      "waived": false
+    },
+    {
+      "schema_version": 1,
+      "rule_id": "redundant_copper_detour",
+      "severity": "warning",
+      "message": "Track detour: [SWCLK] on F.Cu routes 2.11 mm between points 0.76 mm apart (ratio 2.8)",
+      "refs": [],
+      "pads": [],
+      "nets": [
+        "SWCLK"
+      ],
+      "point": [
+        152.25,
+        85.338
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    }
+  ],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "0 errors, 0 warnings"
+      "detail": "0 errors, 6 warnings"
     },
     "erc": {
       "status": "PASSED",

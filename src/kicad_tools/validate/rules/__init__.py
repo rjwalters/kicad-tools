@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .base import DRC_TOLERANCE, DRCRule
+    from .board_id import BoardIdRule
     from .clearance import ClearanceRule, SegmentZoneClearanceRule, ViaZoneClearanceRule
     from .connector_access import ConnectorEdgeAccessRule
     from .dangling_copper import DanglingCopperRule
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from .diffpair_uncoupled_length import DiffPairUncoupledLengthRule
     from .dimensions import DimensionRules
     from .edge import EdgeClearanceRule
+    from .fiducials import FiducialsRule
     from .impedance import ImpedanceRule, NetImpedanceSpec
     from .match_group_length_skew import MatchGroupLengthSkewRule
     from .pin1_marker import Pin1MarkerRule
@@ -57,6 +59,8 @@ _EXPORT_MODULES: dict[str, str] = {
     "DiffPairLengthSkewRule": ".diffpair_length_skew",
     "DiffPairRoutingContinuityRule": ".diffpair_routing_continuity",
     "DiffPairUncoupledLengthRule": ".diffpair_uncoupled_length",
+    "BoardIdRule": ".board_id",
+    "FiducialsRule": ".fiducials",
     "DimensionRules": ".dimensions",
     "EdgeClearanceRule": ".edge",
     "ImpedanceRule": ".impedance",
@@ -97,6 +101,8 @@ __all__ = [
     "DiffPairUncoupledLengthRule",
     "DimensionRules",
     "EdgeClearanceRule",
+    "BoardIdRule",
+    "FiducialsRule",
     "ImpedanceRule",
     "IsolatedCopperRule",
     "MatchGroupLengthSkewRule",
