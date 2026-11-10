@@ -5851,6 +5851,25 @@ class Autorouter:
                 by_net.setdefault(route.net, []).append(route)
         return by_net
 
+    def _lattice_kept_copper_for_net(self, net: int, net_name: str | None) -> list[Route]:
+        """Kept routes of listed net ``net`` (Issue #8676); ``[]`` unless ``--complete``.
+
+        Matched by net *name* when the route has one and this router knows the
+        name (``board_net_ids``, Issue #8658), so name-only boards whose
+        numeric ids drift still resolve; otherwise by numeric id.
+        """
+        if not self._preserve_listed_copper:
+            return []
+        kept: list[Route] = []
+        for route in self.existing_routes:
+            if route.net_name and net_name and self.board_net_ids.get(route.net_name):
+                match = route.net_name == net_name
+            else:
+                match = route.net == net
+            if match and (route.segments or route.vias):
+                kept.append(route)
+        return kept
+
     def _lattice_netset_connections(
         self, tap_chain_pairs: frozenset[str] = frozenset()
     ) -> tuple[list[Any], list[tuple[object, Pad, Pad, object]]]:
@@ -5917,6 +5936,23 @@ class Autorouter:
             # (#4473/#4499) guarantee the negotiated grid pass already has.
             # Only the non-coupled branch: the diff-pair ``reserved`` branch
             # above keeps its nearest-endpoint anchor selection untouched.
+            kept = self._lattice_kept_copper_for_net(net, net_name)
+            if kept:
+                # Issue #8676: kept copper already joins some pads -- request
+                # only the missing joins between its islands, so the link
+                # count, the time budget and the "unroutable" report do not
+                # count connections that exist.
+                from .connectivity import pad_copper_components
+                from .route_auto_diagnosis import island_bridges
+
+                labels = pad_copper_components(
+                    [(p.x, p.y) for p in pads],
+                    [seg for r in kept for seg in r.segments],
+                    [via for r in kept for via in r.vias],
+                )
+                for seq, (a, b) in enumerate(island_bridges(pads, labels)):
+                    connections.append(((net, seq), a, b, net_class))
+                continue
             anchor, terminals = _star_topology_pads(pads)
             for seq, other in enumerate(terminals):
                 connections.append(((net, seq), anchor, other, net_class))
@@ -21658,6 +21694,8 @@ class Autorouter:
             layer_stats=self.get_layer_usage_statistics(),
             nets_to_route_ids=nets_to_route_ids,
             net_pads=net_pads,
+            # Issue #8676: kept copper joins pads ``--complete`` never re-routed.
+            kept_routes=self.existing_routes if self._preserve_listed_copper else None,
         )
 
         # Issue #2838 (closes #2761 gap): Surface via conflict resolver
