@@ -12,7 +12,6 @@ Prioritized roadmap generated from current GitHub label state. Maintained by the
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
 - **#8623**: chore(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
-- **#8626**: chore(deps): bump astral-sh/setup-uv from 10.3.0 to 10.3.2 in the github-actions group across 1 directory
 
 ## Very Important
 
@@ -24,7 +23,8 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-_None._
+- **#8657**: route: _dilate_blocked uses scipy when importable — 8-17x slower and different results at the grid edge
+- **#8658**: route --complete: kept copper on name-only (KiCad 10) boards is keyed to net 0, so the short check reports phantom shorts
 
 ## Ready
 
@@ -38,23 +38,30 @@ Issues currently being built (`loom:building`).
 
 - **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs
-- **#8644**: route: HV mask setup may consume the #8486 5 s back-off floor, so backed-off HV nets never reach the A* search
-- **#8645**: route: HV mask setup runs on a 1x deadline before the 3x escape hint, and compute_expanded_blocked ignores the deadline
-- **#8650**: route-link ignores project netclass clearances (only --clearance / --net-clearance / voltage-map floors); per-link DRC gate doesn't catch it
+- **#8657**: route: _dilate_blocked uses scipy when importable — 8-17x slower and different results at the grid edge
+- **#8658**: route --complete: kept copper on name-only (KiCad 10) boards is keyed to net 0, so the short check reports phantom shorts
+- **#8659**: thermal_asymmetry: forced solid pad overrides are never revisited, have no fixer, and are not gated at tapeout
+- **#8663**: detect-mistakes: 208 of 209 warnings on a clean board are noise (bypass cross-product, duplicates, 90° reported as acute, supply net as crystal trace)
+- **#8664**: Sign-off never compares warnings against the previous revision: wire kct check --diff into readiness and tapeout
+- **#8665**: check: report segment wholly covered by collinear same-net segment as redundant copper
+- **#8669**: audit sync: a header footprint with 'MountingHoles' in its name is dropped as a mounting hole and reported schematic-only; no-connect pins reported as net mismatches
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8647**: fix: share setup/search deadline budget and bound blocked-mask dilation
-- **#8651**: fix: route-link honours project netclass clearances
+- **#8660**: fix(router): make _dilate_blocked independent of scipy
+- **#8661**: feat(zones): add 'zones relieve' fixer and gate thermal_asymmetry at tapeout
+- **#8666**: fix: cut false-positive noise in detect-mistakes checks
+- **#8667**: feat(readiness): diff warnings against a previous revision with --baseline
+- **#8668**: feat(check): report segments covered by a longer collinear segment
+- **#8670**: fix(audit): keep netted MountingHoles footprints and treat NC nets as equivalent
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#8623**: chore(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
-- **#8626**: chore(deps): bump astral-sh/setup-uv from 10.3.0 to 10.3.2 in the github-actions group across 1 directory
 
 ## Proposed
 
@@ -64,7 +71,6 @@ Issues carrying `loom:curated`.
 - **#5539**: Champion: Merge-Risk Hold Digest *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback *(curated)*
-- **#8414**: Post-negotiation sweep overruns its announced 60 s bound until the global timeout *(curated)*
 - **#8425**: Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B *(curated)*
 - **#8434**: Changelog Fragment Check re-runs on every label change; Loom role label churn keeps it queued *(curated)*
 - **#8486**: route perf: nets proven sealed are re-searched at full budget and re-rescued every iteration (43% of search time, rescue 0/15 for ~1,475 s each pass) *(curated)*
@@ -74,10 +80,13 @@ Issues carrying `loom:curated`.
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
-- **#8644**: route: HV mask setup may consume the #8486 5 s back-off floor, so backed-off HV nets never reach the A* search *(curated)*
-- **#8645**: route: HV mask setup runs on a 1x deadline before the 3x escape hint, and compute_expanded_blocked ignores the deadline *(curated)*
-- **#8650**: route-link ignores project netclass clearances (only --clearance / --net-clearance / voltage-map floors); per-link DRC gate doesn't catch it *(curated)*
-- **#8652**: test: cover kct check stderr warning and readiness 'warnings' wiring for project_rules (follow-up to #8648) *(curated)*
+- **#8657**: route: _dilate_blocked uses scipy when importable — 8-17x slower and different results at the grid edge *(curated)*
+- **#8658**: route --complete: kept copper on name-only (KiCad 10) boards is keyed to net 0, so the short check reports phantom shorts *(curated)*
+- **#8659**: thermal_asymmetry: forced solid pad overrides are never revisited, have no fixer, and are not gated at tapeout *(curated)*
+- **#8663**: detect-mistakes: 208 of 209 warnings on a clean board are noise (bypass cross-product, duplicates, 90° reported as acute, supply net as crystal trace) *(curated)*
+- **#8664**: Sign-off never compares warnings against the previous revision: wire kct check --diff into readiness and tapeout *(curated)*
+- **#8665**: check: report segment wholly covered by collinear same-net segment as redundant copper *(curated)*
+- **#8669**: audit sync: a header footprint with 'MountingHoles' in its name is dropped as a mounting hole and reported schematic-only; no-connect pins reported as net mismatches *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -93,14 +102,14 @@ _None._
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 2 |
+| Operator merge-risk holds | 1 |
 | Very important | 0 |
-| Important | 0 |
+| Important | 2 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 5 |
-| PRs awaiting review | 2 |
-| Approved PRs awaiting merge | 2 |
-| Curated | 18 |
+| In Progress (`loom:building`) | 9 |
+| PRs awaiting review | 6 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 20 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
