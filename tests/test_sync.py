@@ -75,6 +75,40 @@ class TestIsMountingHole:
         for ref in ("R1", "C30", "D_TVS1", "U5", "J3", "MH"):
             assert not _is_mounting_hole(ref, "Capacitor_SMD:C_0805_2012Metric"), ref
 
+    def test_name_heuristic_skipped_for_netted_pads(self):
+        # A header whose library name embeds "MountingHoles" has netted pads
+        # and a schematic symbol: it must not be filtered (#8669).
+        name = "PinSocket_2x20_P2.54mm_Vertical_MountingHoles"
+        assert not _is_mounting_hole("J1", name, has_netted_pads=True)
+        assert _is_mounting_hole("J1", name, has_netted_pads=False)
+
+    def test_reference_heuristic_kept_for_netted_pads(self):
+        assert _is_mounting_hole("MH1", "", has_netted_pads=True)
+
+    def test_get_pcb_components_keeps_netted_mountingholes_footprint(self):
+        header = MagicMock()
+        header.reference = "J1"
+        header.value = "GPIO"
+        header.name = "PinSocket_2x20_MountingHoles"
+        header.attr_flags = []
+        pad = MagicMock()
+        pad.net_name = "GND"
+        header.pads = [pad]
+
+        hole = MagicMock()
+        hole.reference = "X9"
+        hole.value = ""
+        hole.name = "MountingHole:MountingHole_3.2mm_M3"
+        hole.attr_flags = []
+        hole.pads = []
+
+        checker = MagicMock()
+        checker.pcb.footprints = [header, hole]
+        reconciler = Reconciler.__new__(Reconciler)
+        comps = reconciler._get_pcb_components(checker)
+        assert "J1" in comps
+        assert "X9" not in comps
+
 
 class TestSyncMatch:
     """Tests for SyncMatch dataclass."""

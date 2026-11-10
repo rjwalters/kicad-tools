@@ -96,16 +96,24 @@ def _values_equivalent(sch_value: str, pcb_value: str, reference: str) -> bool:
 _MOUNTING_HOLE_REF_RE = re.compile(r"^(?:MH|MK|MP|MTG|H)\d+$", re.IGNORECASE)
 
 
-def _is_mounting_hole(reference: str, footprint_name: str = "") -> bool:
+def _is_mounting_hole(
+    reference: str, footprint_name: str = "", has_netted_pads: bool = False
+) -> bool:
     """Return True when a PCB footprint is a mechanical mounting hole.
 
     Matches by reference designator (``MH1``, ``H1``, ...) or by footprint
     name (anything containing ``mounting`` / ``mountinghole``).  Used to
     exclude mechanical holes from schematic/PCB drift analysis, since they
     legitimately have no schematic symbol.
+
+    The name heuristic is skipped for footprints with netted pads: a real
+    mounting hole carries no nets, whereas e.g. a header whose library name
+    contains ``MountingHoles`` is a schematic-backed component (#8669).
     """
     if reference and _MOUNTING_HOLE_REF_RE.match(reference):
         return True
+    if has_netted_pads:
+        return False
     fp_lower = footprint_name.lower()
     return "mountinghole" in fp_lower or "mounting_hole" in fp_lower
 
@@ -641,7 +649,11 @@ class Reconciler:
                 # Mechanical mounting holes have no schematic symbol by
                 # convention; excluding them keeps them from registering as
                 # benign-but-noisy PCB-only drift (issue #3496).
-                if _is_mounting_hole(fp.reference, fp.name or ""):
+                if _is_mounting_hole(
+                    fp.reference,
+                    fp.name or "",
+                    has_netted_pads=any(p.net_name for p in fp.pads),
+                ):
                     continue
                 # board_only footprints (fiducials, logos, ...) have no
                 # schematic symbol by design (issue #8551).
