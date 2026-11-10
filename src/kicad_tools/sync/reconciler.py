@@ -21,6 +21,7 @@ Example:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import shutil
@@ -37,6 +38,8 @@ from kicad_tools.schema.bom import extract_bom
 # ``kicad_tools.export.lcsc_value_check.VALUE_REL_TOLERANCE`` so both consumers
 # interpret numeric component values identically.
 _VALUE_REL_TOLERANCE = 0.05
+
+logger = logging.getLogger(__name__)
 
 
 def _footprints_equivalent(sch_fp: str, pcb_fp: str) -> bool:
@@ -175,7 +178,9 @@ class SyncChange:
 
     reference: str
     change_type: (
-        str  # "rename", "update_value", "update_footprint", "add_footprint", "remove_orphan"
+        # "rename", "update_value", "update_footprint", "add_footprint",
+        # "remove_orphan", "assign_pad_net"
+        str
     )
     old_value: str
     new_value: str
@@ -210,6 +215,10 @@ class SyncAnalysis:
         footprint_mismatches: Components matched by reference but with different footprints.
         add_footprint_actions: Proposed add_footprint actions for schematic orphans
             that have a footprint assigned and could be placed on the PCB.
+        pad_net_mismatches: Pads of components present on both sides whose PCB
+            net is not the net the schematic connects the pin to (compared by
+            connectivity, not net-name equality; Issue #8703).  Each entry has
+            ``reference``, ``pad``, ``pcb_net`` and ``schematic_net``.
     """
 
     matches: list[SyncMatch] = field(default_factory=list)
@@ -219,6 +228,7 @@ class SyncAnalysis:
     value_suffix_notes: list[dict[str, str]] = field(default_factory=list)
     footprint_mismatches: list[dict[str, str]] = field(default_factory=list)
     add_footprint_actions: list[dict[str, str]] = field(default_factory=list)
+    pad_net_mismatches: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def high_confidence_matches(self) -> list[SyncMatch]:
@@ -239,7 +249,10 @@ class SyncAnalysis:
     def has_actionable_items(self) -> bool:
         """True if there are any matches with actions to apply."""
         return any(m.actions for m in self.matches) or bool(
-            self.value_mismatches or self.footprint_mismatches or self.add_footprint_actions
+            self.value_mismatches
+            or self.footprint_mismatches
+            or self.add_footprint_actions
+            or self.pad_net_mismatches
         )
 
     @property
@@ -250,6 +263,7 @@ class SyncAnalysis:
             and not self.pcb_orphans
             and not self.value_mismatches
             and not self.footprint_mismatches
+            and not self.pad_net_mismatches
             and not any(m.actions for m in self.matches)
         )
 
@@ -270,6 +284,13 @@ class SyncAnalysis:
             lines.append(f"  Value mismatches:     {len(self.value_mismatches)}")
         if self.footprint_mismatches:
             lines.append(f"  Footprint mismatches: {len(self.footprint_mismatches)}")
+        if self.pad_net_mismatches:
+            lines.append(f"  Pad-net mismatches:   {len(self.pad_net_mismatches)}")
+            for mm in self.pad_net_mismatches:
+                lines.append(
+                    f"    {mm['reference']}.{mm['pad']}: "
+                    f"{mm['pcb_net'] or '(unconnected)'} -> {mm['schematic_net']}"
+                )
         if self.schematic_orphans:
             lines.append(f"  Schematic-only:       {len(self.schematic_orphans)}")
         if self.pcb_orphans:
@@ -290,12 +311,14 @@ class SyncAnalysis:
             "value_suffix_notes": self.value_suffix_notes,
             "footprint_mismatches": self.footprint_mismatches,
             "add_footprint_actions": self.add_footprint_actions,
+            "pad_net_mismatches": self.pad_net_mismatches,
             "summary": {
                 "total_matches": len(self.matches),
                 "high_confidence": len(self.high_confidence_matches),
                 "medium_confidence": len(self.medium_confidence_matches),
                 "low_confidence": len(self.low_confidence_matches),
                 "add_footprint": len(self.add_footprint_actions),
+                "pad_net_mismatches": len(self.pad_net_mismatches),
             },
         }
 
@@ -610,7 +633,40 @@ class Reconciler:
                 }
                 analysis.add_footprint_actions.append(action)
 
+        analysis.pad_net_mismatches = self._find_pad_net_mismatches()
+
         return analysis
+
+    def _find_pad_net_mismatches(self) -> list[dict[str, str]]:
+        """Find pads on shared components whose PCB net differs from the schematic.
+
+        Reuses :meth:`NetlistValidator.pad_net_mismatches` (connectivity-based,
+        issue #5937) rather than a second comparator.  Pads whose pin the
+        schematic leaves unconnected are not reported: the netlist-based
+        assignment used by :meth:`apply` cannot clear a pad's net.
+        """
+        from kicad_tools.validate.netlist import NetlistValidator
+
+        if self._schematic_path is None or self._pcb_path is None:
+            return []
+
+        try:
+            validator = NetlistValidator(self._schematic_path, self._pcb_path)
+            issues = validator.pad_net_mismatches()
+        except Exception as exc:
+            logger.warning("Pad-net comparison skipped: %s", exc)
+            return []
+
+        return [
+            {
+                "reference": i.reference,
+                "pad": i.pin,
+                "pcb_net": i.net_pcb,
+                "schematic_net": i.net_schematic,
+            }
+            for i in issues
+            if i.net_schematic
+        ]
 
     def _get_schematic_components(self, checker) -> dict[str, dict[str, str]]:
         """Extract component info from schematic using hierarchical BOM extraction.
@@ -708,7 +764,9 @@ class Reconciler:
 
         has_orphans_to_remove = remove_orphans and bool(analysis.pcb_orphans)
 
-        if not actions_to_apply and not has_orphans_to_remove:
+        pad_net_mismatches = analysis.pad_net_mismatches
+
+        if not actions_to_apply and not has_orphans_to_remove and not pad_net_mismatches:
             return changes
 
         # Load PCB as a PCB object for full API access (add_footprint, add_net, etc.)
@@ -780,8 +838,20 @@ class Reconciler:
             has_update_footprint
             and any(c.applied and c.change_type == "update_footprint" for c in changes)
         )
-        if not dry_run and needs_net_assignment:
-            self._assign_nets(pcb)
+        if not dry_run and (needs_net_assignment or pad_net_mismatches):
+            # Failures must surface when a pad-net fix was requested (#8703).
+            self._assign_nets(pcb, strict=bool(pad_net_mismatches))
+
+        for mm in pad_net_mismatches:
+            changes.append(
+                SyncChange(
+                    reference=f"{mm['reference']}.{mm['pad']}",
+                    change_type="assign_pad_net",
+                    old_value=mm["pcb_net"],
+                    new_value=mm["schematic_net"],
+                    applied=not dry_run,
+                )
+            )
 
         # Save if not dry-run and there were changes
         if not dry_run and any(c.applied for c in changes):
@@ -1198,11 +1268,16 @@ class Reconciler:
             applied=True,
         )
 
-    def _assign_nets(self, pcb) -> None:
+    def _assign_nets(self, pcb, strict: bool = False) -> None:
         """Export netlist from schematic and assign nets to PCB pads.
 
         This wires up pad-to-net mappings for both existing and newly added
         footprints based on schematic connectivity.
+
+        Args:
+            pcb: The PCB object to modify.
+            strict: If True, re-raise failures as ``RuntimeError`` instead of
+                swallowing them (used when fixing reported pad-net mismatches).
         """
         try:
             from kicad_tools.operations.netlist import export_netlist
@@ -1228,10 +1303,12 @@ class Reconciler:
 
             # Assign nets to pads
             pcb.assign_nets_from_netlist(netlist)
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"Net assignment failed: {exc}") from exc
             # Net assignment is best-effort; failures are not fatal.
             # The user can run assign_nets_from_netlist() separately.
-            pass
+            logger.warning("Net assignment failed: %s", exc)
 
     def _apply_update_value(
         self,
