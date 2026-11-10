@@ -30,8 +30,9 @@ error), each with a location:
 
 ``redundant_copper_covered``
     A segment whose both ends lie on the centreline of a strictly longer,
-    no-narrower, same-net, same-layer collinear segment (~1 micron), i.e.
-    it is wholly hidden under the longer one.  Exact duplicates are only
+    no-narrower, same-net, same-layer segment's centreline (within
+    ``COVERED_TOL_MM``, shared with ``kct pcb prune``), i.e. it is wholly
+    hidden under the longer one.  Exact duplicates are only
     reported as ``redundant_copper_duplicate``.  Repair with
     ``kct pcb prune`` (connectivity-guarded), not ``dedupe``.
 
@@ -46,6 +47,7 @@ from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools.core.layers import via_spans_layer
+from kicad_tools.pcb_prune import COVERED_TOL_MM  # shared with prune (#8734)
 
 from ..violations import DRCResults, DRCViolation
 from .base import DRCRule
@@ -66,8 +68,6 @@ DETOUR_MIN_LENGTH_MM = 2.0
 OFFCENTRE_MIN_MM = 0.1
 OFFCENTRE_MAX_MM = 0.4
 
-#: Tolerance (mm) for "lies on the centreline" in the covered check.
-COVERED_TOL_MM = 0.001
 
 _QUANT = 3
 
@@ -178,9 +178,9 @@ class RedundantCopperRule(DRCRule):
                             rule_id="redundant_copper_covered",
                             severity="warning",
                             message=(
-                                f"Track segment lies wholly on a longer collinear "
+                                f"Track segment lies within the copper of a longer "
                                 f"segment: [{label}] on {seg.layer} "
-                                f"(removable with `kct pcb prune`)"
+                                f"(`kct pcb prune` removes it when connectivity allows)"
                             ),
                             location=seg.start,
                             layer=seg.layer,
