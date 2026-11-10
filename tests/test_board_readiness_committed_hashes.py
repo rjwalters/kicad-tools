@@ -19,7 +19,13 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # Boards whose committed readiness evidence is known to be stale, keyed by board
 # directory name.  Each entry cites the issue that owns the refresh; remove the
 # entry when that lands (strict xfail turns an unexpected pass into a failure).
-EXPECTED_STALE: dict[str, str] = {}
+EXPECTED_STALE: dict[str, str] = {
+    "07-matchgroup-test": (
+        "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "
+        "sources; `refresh_readiness.py` refuses to re-pin while redundant_copper_* "
+        "warnings remain (kct check allowance is 0). The last child of #8399 owns the re-pin."
+    ),
+}
 
 BOARDS = sorted(p.parent.parent for p in BOARDS_DIR.glob("*/output/readiness.json"))
 

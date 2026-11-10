@@ -5,7 +5,7 @@
   "bound_pads": 216,
   "sha256": {
     "net_class_map.json": "585f0a4f1611d7582fdbe257465fde740d31ad7badec1dd6982bcca9cb4b3c28",
-    "sdram_demo.kicad_pcb": "23d3421fbaed1da17be593ee67f54058a1ae9cfbf827d12594051bf185511641",
+    "sdram_demo.kicad_pcb": "180a55b19e5c7117fc97e9599debb81d119e61fa14d3f7513928f4657f1577f5",
     "sdram_demo.kicad_pro": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198"
   }
 }
