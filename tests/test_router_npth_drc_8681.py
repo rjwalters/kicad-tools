@@ -49,7 +49,6 @@ def test_grid_engine_has_no_hole_clearance_violation(tmp_path):
     assert _hole_clearance_count(tmp_path, ["--route-engine", "grid"]) == 0
 
 
-@pytest.mark.xfail(strict=True, reason="lattice leaves 2 hole_clearance violations (#8684)")
 def test_lattice_engine_has_no_hole_clearance_violation(tmp_path):
     n = _hole_clearance_count(tmp_path, ["--route-engine", "lattice", "--strategy", "basic"])
     assert n == 0

@@ -368,6 +368,7 @@ def generate_dru(
     manufacturer_name: str = "",
     net_classes: Sequence[NetClassRouting] | None = None,
     max_ampacity_width_mm: float | None = None,
+    route_edge_clearance_mm: float | None = None,
 ) -> str:
     """
     Generate KiCad .kicad_dru file content from a DesignRules instance.
@@ -538,6 +539,22 @@ def generate_dru(
         f'(rule "Copper to Edge{label_suffix}"\n'
         f"  (constraint edge_clearance (min {rules.min_copper_to_edge_mm}mm)))"
     )
+
+    # --- Route edge clearance (Issue #8674) ---
+    # The clearance the router kept tracks and vias from the board edge.  Scoped
+    # to tracks and vias: the board-wide rule above also covers pads and pours,
+    # so raising it would fail a board whose edge connector sits inside the
+    # route's value.  Emitted after the board-wide rule because KiCad lets the
+    # last matching rule win.  Never loosens the tier floor.
+    if (
+        route_edge_clearance_mm is not None
+        and route_edge_clearance_mm > rules.min_copper_to_edge_mm
+    ):
+        lines.append(
+            f'(rule "Route Edge Clearance{label_suffix}"\n'
+            f"  (condition \"A.Type == 'track' || A.Type == 'via'\")\n"
+            f"  (constraint edge_clearance (min {route_edge_clearance_mm:.4f}mm)))"
+        )
 
     # --- Hole to Edge ---
     lines.append(
