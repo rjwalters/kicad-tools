@@ -373,7 +373,12 @@ def _create_project_zip(
     working copies, etc.) and backup files are excluded to keep the
     manufacturing package clean.
     """
-    project_dir = pcb_path.parent
+    # Resolve once: table-derived members are built from the resolved root, so
+    # every member (and its archive name) must share that spelling.  An
+    # unresolved/relative/symlinked project_dir (e.g. macOS /var -> /private/var
+    # TMPDIR) otherwise breaks ``relative_to`` below.
+    project_dir = pcb_path.parent.resolve()
+    pcb_path = project_dir / pcb_path.name
     zip_path = output_dir / zip_name
 
     # Always include the specific PCB being exported

@@ -2276,3 +2276,32 @@ def test_real_project_zip_carries_local_footprint_library_and_skips_siblings_872
     required = {p.name for p in readiness_cmd._required_sources(options)}
     assert not required & {"demo_v25.kicad_pro", "demo_v26.kicad_dru"}
     assert "demo_backup_2026-01-01.kicad_sch" not in required
+
+
+def test_project_zip_with_unresolved_project_path_8727(tmp_path, monkeypatch):
+    """A relative or symlinked PCB path must not break table-derived members."""
+    from kicad_tools.export.manufacturing import _create_project_zip
+
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "mylib.pretty").mkdir()
+    (real / "mylib.pretty" / "FP1.kicad_mod").write_text("(footprint FP1)\n")
+    (real / "fp-lib-table").write_text(
+        '(fp_lib_table (lib (name "mylib")(type "KiCad")'
+        '(uri "${KIPRJMOD}/mylib.pretty")(options "")(descr "")))\n'
+    )
+    (real / "demo.kicad_pcb").write_text("(kicad_pcb)\n")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    for pcb in (link / "demo.kicad_pcb", None):
+        if pcb is None:
+            monkeypatch.chdir(tmp_path)
+            pcb = Path("real") / "demo.kicad_pcb"
+        archive = _create_project_zip(pcb, out)
+        with zipfile.ZipFile(archive) as zf:
+            names = zf.namelist()
+        assert len(names) == len(set(names))
+        assert {"fp-lib-table", "mylib.pretty/FP1.kicad_mod", "demo.kicad_pcb"} <= set(names)
