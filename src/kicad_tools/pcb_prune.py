@@ -1195,6 +1195,17 @@ def _tilts(n: _Node, a: tuple[float, float], b: tuple[float, float]) -> bool:
 #: Max perpendicular deviation (mm) for a run to count as one straight line.
 _COLLINEAR_TOL = 1e-6
 
+#: Max distance (mm) from a segment end to a longer segment's centreline for
+#: the segment to count as "covered" by it.  The single definition shared with
+#: the ``redundant_copper_covered`` check (issue #8734): the check is the
+#: contract, so prune must act on everything the check flags.
+COVERED_TOL_MM = 1e-3
+
+#: Max deviation (mm) of a loop's second path from the first for the two to
+#: count as one path's copper hiding the other's (issue #8734: a ~0.02 mm wide
+#: loop at 0.15 mm track width).
+PARALLEL_PATH_TOL_MM = 0.02
+
 
 def _joint_partner(model: _NetModel, i: int, e: int, removed: set[int]) -> tuple[int, int] | None:
     """Return ``(j, f)`` when end ``e`` of segment ``i`` is a pure two-segment
@@ -1514,12 +1525,12 @@ def _covers(model: _NetModel, s: int, k: int) -> bool:
         return False
     if n.radius > o.radius + 1e-9:
         return False
-    if any(_pt_seg_dist(p, o.a, o.b) > _COLLINEAR_TOL for p in (n.a, n.b)):
+    if any(_pt_seg_dist(p, o.a, o.b) > COVERED_TOL_MM for p in (n.a, n.b)):
         return False
     # mutual containment: drop only the later of the two
     return not (
         abs(n.radius - o.radius) <= 1e-9
-        and all(_pt_seg_dist(p, n.a, n.b) <= _COLLINEAR_TOL for p in (o.a, o.b))
+        and all(_pt_seg_dist(p, n.a, n.b) <= COVERED_TOL_MM for p in (o.a, o.b))
         and k > s
     )
 
@@ -1548,15 +1559,29 @@ def _joins_container(model: _NetModel, k: int, c: int) -> bool:
 
 
 def _try_remove_covered(
-    model: _NetModel, plan: NetPlan, removed: set[int], baseline, group: set[int], c: int
+    model: _NetModel,
+    plan: NetPlan,
+    removed: set[int],
+    baseline,
+    group: set[int],
+    c: int,
+    far: tuple[set[int], int] | None = None,
 ) -> bool:
-    """Remove ``group`` (segments all covered by ``c``) if every guard holds."""
+    """Remove ``group`` (segments all covered by ``c``) if every guard holds.
+
+    ``far`` = ``(nodes, u)`` lets nodes held at the group's far end join the
+    kept track ``u`` instead of ``c`` (a thin loop whose far end stays joined
+    to ``u`` at their shared endpoint; issue #8734).
+    """
     held = set().union(*(model.anch[s][0] | model.anch[s][1] | model.adj[s] for s in group))
     for k in held - removed - group - {c}:
         if model.nodes[k].kind == "zone":
             continue  # zone joins are never relied on
-        if not _joins_container(model, k, c):
-            return False
+        if _joins_container(model, k, c):
+            continue
+        if far is not None and k in far[0] and _joins_container(model, k, far[1]):
+            continue
+        return False
     touched = set().union(*(model.adj[s] | model.badj[s] | model.overlap[s] for s in group)) - group
     strict = set().union(*(model.adj[s] for s in group)) - group
     after = removed | group
@@ -1674,6 +1699,56 @@ def _try_split_covered(
     return True
 
 
+def _try_remove_parallel_path(
+    model: _NetModel, plan: NetPlan, removed: set[int], baseline, s: int, c: int
+) -> bool:
+    """Remove a thin same-layer loop path whose tail ``s`` is covered by ``c``
+    (issue #8734).
+
+    The loop is two paths between the same two points, a hair apart: path 1
+    ``u -> c`` and path 2 ``t -> s`` where ``s`` lies on ``c`` and ``t`` shares
+    its far end with ``u`` (``u`` and ``c`` meet at a shared endpoint).  Taking
+    ``s`` alone leaves ``t`` ending mid-span on ``c`` (``track_dangling``), so
+    ``s`` and ``t`` go together.  ``t`` must be no wider than ``u`` and stay
+    within ``PARALLEL_PATH_TOL_MM`` of ``u`` + ``c`` along its length, i.e. its
+    copper is (to within the sliver) already under path 1's.
+    """
+    n, cont = model.nodes[s], model.nodes[c]
+    if c in model.frozen or cont.index < 0:
+        return False
+    for e in (0, 1):
+        for t in sorted(model.anch[s][e] - removed - {s, c}):
+            tn = model.nodes[t]
+            if tn.kind != "seg" or t in model.frozen or _merge_unsafe_member(model, t):
+                continue
+            if tn.layers != n.layers or tn.radius > cont.radius + 1e-9:
+                continue
+            p = _end_pt(n, e)
+            f = next((x for x in (0, 1) if _same_pt(_end_pt(tn, x), p)), None)
+            if f is None:
+                continue
+            far = _end_pt(tn, 1 - f)
+            for u in sorted(model.anch[t][1 - f] - removed - {s, t, c}):
+                un = model.nodes[u]
+                if un.kind != "seg" or un.layers != n.layers or u not in model.adj[c]:
+                    continue
+                if tn.radius > un.radius + 1e-9:
+                    continue
+                mid = ((tn.a[0] + tn.b[0]) / 2, (tn.a[1] + tn.b[1]) / 2)
+                if any(
+                    min(_pt_seg_dist(q, x.a, x.b) for x in (un, cont)) > PARALLEL_PATH_TOL_MM
+                    for q in (tn.a, tn.b, mid, far)
+                ):
+                    continue
+                far_held = model.anch[t][1 - f] - removed
+                if _try_remove_covered(
+                    model, plan, removed, baseline, {s, t}, c, far=(far_held, u)
+                ):
+                    plan.reasons[tn.index] = "thin parallel path inside a longer track's copper"
+                    return True
+    return False
+
+
 def _plan_contained_segments(
     model: _NetModel, plan: NetPlan, removed: set[int], baseline, wide: float
 ) -> None:
@@ -1728,7 +1803,8 @@ def _plan_contained_segments(
                 if s not in removed and not _try_remove_covered(
                     model, plan, removed, baseline, {s}, c
                 ):
-                    _try_split_covered(model, plan, removed, baseline, s, c)
+                    if not _try_split_covered(model, plan, removed, baseline, s, c):
+                        _try_remove_parallel_path(model, plan, removed, baseline, s, c)
 
 
 #: Default width (mm) at/above which a declared-net segment is never cut.

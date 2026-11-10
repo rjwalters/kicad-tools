@@ -4210,6 +4210,19 @@ def _finalize_routes(
     # Step 3: Compute statistics from the cleaned routes
     stats = router.get_statistics(nets_to_route_ids=multi_pad_net_ids)
 
+    # Issue #8760: a future leak of copper into a track/via-blocking rule area
+    # must not be silent -- name the net and area at route time.
+    with contextlib.suppress(AttributeError):  # exotic router stand-ins
+        from kicad_tools.router.rule_area_grid import committed_rule_area_hits
+
+        for _net, _area, _kind in committed_rule_area_hits(router.grid, router.routes):
+            _net_name = router.net_names.get(_net, f"Net_{_net}")
+            print(
+                f"Warning: routed {_kind} of net {_net_name} lies inside keepout rule "
+                f"area {_area or '(unnamed)'}; kicad-cli DRC will report items_not_allowed.",
+                file=sys.stderr,
+            )
+
     if not quiet:
         # Issue #3942 (Bug C): these statistics are scoped to the
         # newly-routed multi-pad nets (``get_statistics`` is filtered by
