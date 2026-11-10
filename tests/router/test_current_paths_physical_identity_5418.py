@@ -66,3 +66,26 @@ def test_graph_retains_each_same_number_shape_without_inventing_copper_between_t
     result = resolve_current_path(pcb, spec)
     assert result.status == "unresolved"
     assert "multiple physical occurrences" in result.reason
+
+
+@pytest.mark.parametrize("rot", [45, -45, 315, 30, 0, 90, 180, 270])
+def test_physical_pad_covers_uses_inverse_rotation(rot):
+    from kicad_tools.core.geometry import rotate_pad_offset
+    from kicad_tools.router.current_paths import _physical_pad_covers
+
+    pcb = PCB.create(width=100, height=100, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=50, y=50, net="N")
+    fp = pcb.footprints[0]
+    pad = fp.pads[0]
+    fp.rotation = 0
+    fp.position = (50, 50)
+    pad.position = (0, 0)
+    pad.shape = "rect"
+    pad.size = (6.0, 1.0)
+    pad.rotation = rot
+    # Along the pad's long axis (board frame): covered.
+    ax, ay = rotate_pad_offset(2.5, 0, rot)
+    assert _physical_pad_covers(fp, pad, (50 + ax, 50 + ay))
+    # Along the pad's short axis, 2.5 mm out: not covered.
+    bx, by = rotate_pad_offset(0, 2.5, rot)
+    assert not _physical_pad_covers(fp, pad, (50 + bx, 50 + by))
