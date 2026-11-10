@@ -1197,10 +1197,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         else:
             print("  Anchor mode:    spaced")
             print(f"  Spacing:        {outcome.spacing_mm:.1f} mm")
-        print(
-            f"  Anchored run:   {outcome.run_segment_count} segment(s), "
-            f"{outcome.run_length_mm:.1f} mm"
-        )
+        if outcome.anchor_mode == "ends" and outcome.placed_count == 0:
+            # Every attempted leg was refused or too short: nothing is anchored.
+            print("  Anchored run:   none (no leg received an anchor; see legs below)")
+        else:
+            print(
+                f"  Anchored run:   {outcome.run_segment_count} segment(s), "
+                f"{outcome.run_length_mm:.1f} mm"
+            )
         if outcome.unhandled_runs:
             print(
                 f"  Unhandled runs: {outcome.unhandled_runs} "

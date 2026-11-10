@@ -1603,18 +1603,22 @@ def _add_shaped_pad_footprint(
     rotation: float = 0.0,
     fp_rotation: float = 0.0,
     local: tuple[float, float] = (0.0, 0.0),
+    layers: tuple[str, ...] = ("F.Cu", "F.Paste", "F.Mask"),
+    pad_type: str = "smd",
+    drill: float = 0.0,
 ) -> None:
-    """One SMD pad of any shape; ``rotation`` is the pad's ABSOLUTE angle."""
+    """One pad of any shape; ``rotation`` is the pad's ABSOLUTE angle."""
     from kicad_tools.schema.pcb import Footprint, Pad
 
     net_obj = pcb.add_net(net)
     pad = Pad(
         number="1",
-        type="smd",
+        type=pad_type,
         shape=shape,
         position=local,
         size=size,
-        layers=["F.Cu", "F.Paste", "F.Mask"],
+        layers=list(layers),
+        drill=drill,
         net_number=net_obj.number,
         net_name=net,
         rotation=rotation,
@@ -2090,3 +2094,254 @@ class TestEndAnchorCLI:
         )
         assert args.anchor_mode == "spaced"
         assert args.end_offset == pytest.approx(2.5)
+
+
+# --------------------------------------------------------------------------
+# ends mode: straight-line end clearance and invariant coverage (PR #8751
+# review). Each test below names the defect or mutation it guards against.
+# --------------------------------------------------------------------------
+
+
+def _rect_gap(anchor, center: tuple[float, float], half: tuple[float, float]) -> float:
+    """Anchor pad edge to an axis-aligned rect pad's copper edge (mm)."""
+    dx = max(abs(anchor.x - center[0]) - half[0], 0.0)
+    dy = max(abs(anchor.y - center[1]) - half[1], 0.0)
+    return math.hypot(dx, dy) - _ANCHOR_PAD / 2
+
+
+def _bent_exit_pcb(exit_mm: float, angle_deg: float) -> PCB:
+    """Two 2x6 mm rect pads; the track leaves each pad by ``exit_mm``, then
+    turns by ``angle_deg`` (90 = runs parallel to the pad edge)."""
+    pcb = PCB.create(width=200, height=120, center=False)
+    for ref, x in (("U1", 20.0), ("U2", 120.0)):
+        _add_shaped_pad_footprint(pcb, ref=ref, x=x, y=50.0, net="N", shape="rect", size=(2.0, 6.0))
+    c, s = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
+    p1 = (21.0 + exit_mm, 50.0)
+    p2 = (p1[0] + 20.0 * c, 50.0 + 20.0 * s)
+    p4 = (119.0 - exit_mm, 50.0)
+    p3 = (p4[0] - 20.0 * c, 50.0 + 20.0 * s)
+    pts = [(20.0, 50.0), p1, p2, p3, p4, (120.0, 50.0)]
+    for a, b in zip(pts[:-1], pts[1:], strict=True):
+        pcb.add_trace(a, b, width=1.0, layer="F.Cu", net="N")
+    return pcb
+
+
+class TestEndAnchorStraightLineClearance:
+    @pytest.mark.parametrize(
+        ("exit_mm", "angle_deg"), [(0.3, 90.0), (1.0, 90.0), (0.3, 45.0), (1.0, 45.0)]
+    )
+    def test_end_anchor_bent_exit_keeps_euclidean_gap_at_both_ends(self, exit_mm, angle_deg):
+        """Judge fixture: a bend soon after the pad used to put the anchor back
+        on the pad (0.3 mm / 90 deg overlapped it by 0.658 mm, drill included)."""
+        result = reinforce_net(_bent_exit_pcb(exit_mm, angle_deg), "N", dry_run=True)
+        (leg,) = result.legs
+        assert leg.status == "full" and len(leg.anchors) == 2
+        for a in leg.anchors:
+            pad_x = 20.0 if a.x < 70.0 else 120.0
+            gap = _rect_gap(a, (pad_x, 50.0), (1.0, 3.0))
+            # The clearance binds here, so the anchor sits exactly on it.
+            assert gap == pytest.approx(1.0, abs=1e-3)
+        # One anchor per end, not both at one.
+        assert min(a.x for a in leg.anchors) < 70.0 < max(a.x for a in leg.anchors)
+
+    def test_end_anchor_long_exit_unchanged_by_bend(self):
+        """Past the offset the along-leg target already clears the pad."""
+        result = reinforce_net(_bent_exit_pcb(3.0, 90.0), "N", dry_run=True)
+        first = min(result.placed, key=lambda a: a.x)
+        assert (first.x, first.y) == pytest.approx((21.0 + 1.0 + _ANCHOR_PAD / 2, 50.0))
+
+    def test_end_anchor_unreachable_clearance_is_too_short(self):
+        """A leg that hugs its pad everywhere has no clear spot: too_short."""
+        pcb = PCB.create(width=200, height=120, center=False)
+        _add_shaped_pad_footprint(
+            pcb, ref="U1", x=20.0, y=50.0, net="N", shape="rect", size=(2.0, 40.0)
+        )
+        pts = [(20.0, 50.0), (21.3, 50.0), (21.3, 65.0), (20.0, 65.0)]
+        for a, b in zip(pts[:-1], pts[1:], strict=True):
+            pcb.add_trace(a, b, width=0.5, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", dry_run=True)
+        (leg,) = result.legs
+        assert leg.status == "too_short"
+        assert leg.anchors == [] and result.placed_count == 0
+        assert result.refused_count == 0
+
+    @pytest.mark.parametrize("angle_deg", [30.0, 60.0])
+    def test_end_anchor_oblique_branch_clears_trunk(self, angle_deg):
+        """Judge fixture: a 30 deg branch off a 2 mm trunk put its junction
+        anchor's pad 0.479 mm inside the trunk copper."""
+        pcb = PCB.create(width=200, height=120, center=False)
+        pcb.add_trace((20, 50), (100, 50), width=2.0, layer="F.Cu", net="N")
+        pcb.add_trace((100, 50), (180, 50), width=2.0, layer="F.Cu", net="N")
+        c, s = math.cos(math.radians(angle_deg)), math.sin(math.radians(angle_deg))
+        pcb.add_trace((100, 50), (100 + 30 * c, 50 + 30 * s), width=2.0, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", all_runs=True, dry_run=True)
+        branch = next(leg for leg in result.legs if leg.kind == "branch")
+        assert branch.status == "full"
+        junction = min(branch.anchors, key=lambda a: math.dist((a.x, a.y), (100.0, 50.0)))
+        trunk_gap = abs(junction.y - 50.0) - 1.0 - _ANCHOR_PAD / 2
+        assert trunk_gap == pytest.approx(1.0, abs=1e-3)
+        # Still on the branch centreline.
+        assert math.atan2(junction.y - 50.0, junction.x - 100.0) == pytest.approx(
+            math.radians(angle_deg), abs=1e-6
+        )
+
+
+class TestEndAnchorInvariants:
+    def test_far_anchor_nudge_is_inward_only(self):
+        """An obstacle at the FAR end only: the far anchor moves toward the
+        start, never outward (mutation: ``t1 + d``)."""
+        pcb = _straight_run_pcb(length=100.0)
+        base = 120.0 - (1.0 + _ANCHOR_PAD / 2)
+        dy = 0.3 + _ANCHOR_PAD / 2 + 0.1
+        pcb.add_trace((base - 0.4, 50 + dy), (130, 50 + dy), width=0.2, layer="F.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", net_class_clearances={"OTHER": 0.4}, dry_run=True)
+        (leg,) = result.legs
+        assert leg.status == "full"
+        far = max(a.x for a in leg.anchors)
+        assert base - 2.0 - 1e-9 <= far < base
+        assert min(a.x for a in leg.anchors) == pytest.approx(20.0 + 1.0 + _ANCHOR_PAD / 2)
+
+    def test_far_anchor_never_passes_start_anchor(self, monkeypatch):
+        """With a nudge window wider than the leg, the far anchor must still
+        stop at the start anchor rather than jump past it (mutation: drop the
+        ``t1 - d >= start_t + dedup_floor`` bound). The default 2 mm window
+        cannot reach past, so the window is widened for the test."""
+        from kicad_tools.pcb import reinforce as reinforce_mod
+
+        monkeypatch.setattr(reinforce_mod, "END_NUDGE_MAX_MM", 6.0)
+        monkeypatch.setattr(reinforce_mod, "END_NUDGE_STEPS", 24)
+        inset = 1.0 + _ANCHOR_PAD / 2
+        length = 2 * inset + _ANCHOR_PAD + 0.5  # room for two, plus 0.5 mm
+        pcb = _straight_run_pcb(length=length)
+        dy = 0.3 + _ANCHOR_PAD / 2 + 0.1
+        # Blocks every far-anchor candidate up to the start anchor's floor.
+        pcb.add_trace((23.5, 50 + dy), (40, 50 + dy), width=0.2, layer="F.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", net_class_clearances={"OTHER": 0.4}, dry_run=True)
+        (leg,) = result.legs
+        assert leg.status == "partial"
+        assert len(leg.anchors) == 1
+        assert leg.anchors[0].x == pytest.approx(20.0 + inset)
+        assert result.refused_count == 1
+
+    def test_two_parallel_chains_are_a_loop(self):
+        """Two chains between the same two junctions form a loop even though
+        no single chain is closed (mutation: ``>=`` -> ``>``)."""
+        pcb = PCB.create(width=200, height=200, center=False)
+        for a, b in [
+            ((20, 50), (40, 50)),
+            ((40, 50), (80, 50)),
+            ((40, 50), (60, 70)),
+            ((60, 70), (80, 50)),
+            ((80, 50), (100, 50)),
+        ]:
+            pcb.add_trace(a, b, width=1.0, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", all_runs=True, dry_run=True)
+        assert len(result.legs) == 4
+        assert all(leg.status == "unhandled" for leg in result.legs)
+        assert all("loop" in leg.reason for leg in result.legs)
+        assert result.placed_count == 0
+
+    def test_back_side_smd_pad_ignored_by_front_leg(self):
+        """An SMD pad on B.Cu is not the copper an F.Cu leg ends on
+        (mutation: ``on_layer`` always True)."""
+        pcb = _straight_run_pcb()
+        _add_shaped_pad_footprint(
+            pcb,
+            ref="U1",
+            x=20.0,
+            y=50.0,
+            net="FUSED_LINE",
+            shape="rect",
+            size=(6.0, 1.0),
+            layers=("B.Cu", "B.Paste", "B.Mask"),
+        )
+        result = reinforce_net(pcb, "FUSED_LINE", dry_run=True)
+        first = min(a.x for a in result.placed)
+        assert first - 20.0 == pytest.approx(1.0 + _ANCHOR_PAD / 2, abs=1e-3)
+
+    def test_back_side_smd_pad_measured_by_back_leg(self):
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20, 50), (120, 50), width=2.0, layer="B.Cu", net="N")
+        _add_shaped_pad_footprint(
+            pcb,
+            ref="U1",
+            x=20.0,
+            y=50.0,
+            net="N",
+            shape="rect",
+            size=(6.0, 1.0),
+            layers=("B.Cu", "B.Paste", "B.Mask"),
+        )
+        result = reinforce_net(pcb, "N", dry_run=True)
+        first = min(a.x for a in result.placed)
+        assert first - 20.0 == pytest.approx(3.0 + 1.0 + _ANCHOR_PAD / 2, abs=1e-3)
+
+    def test_through_hole_pad_counts_on_every_layer(self):
+        """A plated through-hole pad is copper on B.Cu even when its layer
+        list names only the front (mutation: THT ``layers=()`` -> ``pad.layers``)."""
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20, 50), (120, 50), width=2.0, layer="B.Cu", net="N")
+        _add_shaped_pad_footprint(
+            pcb,
+            ref="J1",
+            x=20.0,
+            y=50.0,
+            net="N",
+            shape="circle",
+            size=(3.0, 3.0),
+            layers=("F.Cu", "F.Mask"),
+            pad_type="thru_hole",
+            drill=1.0,
+        )
+        result = reinforce_net(pcb, "N", dry_run=True)
+        first = min(a.x for a in result.placed)
+        assert first - 20.0 == pytest.approx(1.5 + 1.0 + _ANCHOR_PAD / 2, abs=1e-3)
+
+    def test_oval_exit_through_rounded_end(self):
+        """Leaving an oval through its rounded end: radius is the SHORT half
+        side (mutation: ``min`` -> ``max``)."""
+        pcb = _straight_run_pcb()
+        _add_shaped_pad_footprint(
+            pcb, ref="U1", x=20.0, y=50.0, net="FUSED_LINE", shape="oval", size=(4.0, 2.0)
+        )
+        result = reinforce_net(pcb, "FUSED_LINE", dry_run=True)
+        first = min(a.x for a in result.placed)
+        assert first - 20.0 == pytest.approx(2.0 + 1.0 + _ANCHOR_PAD / 2, abs=1e-3)
+
+    def test_roundrect_exit_through_rounded_corner(self):
+        """Leaving a 2x2 roundrect (rratio 0.25, r = 0.5) through its corner:
+        exit at 0.5*sqrt(2) + 0.5, not the sharp corner's sqrt(2) (mutation:
+        corner radius 0)."""
+        pcb = PCB.create(width=200, height=200, center=False)
+        c = math.sqrt(0.5)
+        pcb.add_trace((20, 100), (20 + 60 * c, 100 - 60 * c), width=1.0, layer="F.Cu", net="N")
+        _add_shaped_pad_footprint(
+            pcb, ref="U1", x=20.0, y=100.0, net="N", shape="roundrect", size=(2.0, 2.0)
+        )
+        result = reinforce_net(pcb, "N", dry_run=True)
+        first = min(result.placed, key=lambda a: math.dist((a.x, a.y), (20.0, 100.0)))
+        exit_mm = 0.5 * math.sqrt(2.0) + 0.5
+        assert math.dist((first.x, first.y), (20.0, 100.0)) == pytest.approx(
+            exit_mm + 1.0 + _ANCHOR_PAD / 2, abs=1e-3
+        )
+
+
+class TestEndAnchorCLINoAnchors:
+    def test_cli_text_does_not_claim_anchored_run_when_all_refused(self, tmp_path, capsys):
+        """Both end anchors refused: the text output must not report an
+        anchored run (it used to print ``Anchored run: 4 segment(s), 100.0 mm``)."""
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb = _straight_run_pcb(length=100.0)
+        # 0.1 mm from every anchor position: below the 0.2 mm fab floor.
+        dy = 0.1 + _ANCHOR_PAD / 2 + 0.1
+        pcb.add_trace((10, 50 + dy), (130, 50 + dy), width=0.2, layer="F.Cu", net="OTHER")
+        pcb_path = tmp_path / "walled.kicad_pcb"
+        pcb.save(pcb_path)
+        rc = run_pcb_command(_reinforce_args(pcb_path, spacing=None, dry_run=True))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Anchors placed:  0" in out
+        assert "Anchors refused: 2" in out
+        assert "Anchored run:   none" in out
+        assert "segment(s)" not in out.split("Anchored run:", 1)[1].splitlines()[0]

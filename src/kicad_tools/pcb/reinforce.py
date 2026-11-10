@@ -17,9 +17,10 @@ Two placement modes (``anchor_mode``, Issue #8742):
 * ``"ends"`` (the default): the net's copper is split into **legs** -- a
   maximal run on ONE copper layer with no junction inside it -- and each leg
   gets exactly two anchors, one near each end, none in between. Each end
-  anchor's pad edge sits ``end_offset_mm`` clear (measured along the leg) of
-  the same-net copper the leg end lands on: the component pad, a via, or the
-  trunk a branch tees off. A leg too short for two anchors is reported
+  anchor's pad edge sits at least ``end_offset_mm`` clear, in straight-line
+  distance, of the same-net copper the leg end lands on: the component pad, a
+  via, or the trunk a branch tees off (a leg that bends near its end moves the
+  anchor further inward until that holds). A leg too short for two anchors is reported
   ``too_short`` and gets none. A Y junction is a trunk (the longest
   through-path) plus a branch; loops and higher-degree junctions are
   reported ``unhandled``, never guessed. The per-leg result
@@ -111,9 +112,9 @@ ANCHOR_MODE_SPACED = "spaced"
 ANCHOR_MODES = (ANCHOR_MODE_ENDS, ANCHOR_MODE_SPACED)
 DEFAULT_ANCHOR_MODE = ANCHOR_MODE_ENDS
 
-# ``ends`` mode: clearance (mm), measured along the leg, between an end
-# anchor's pad edge and the same-net copper the leg end lands on (component
-# pad, via, or the trunk a branch tees off). Proposed default pending the
+# ``ends`` mode: minimum straight-line clearance (mm) between an end anchor's
+# pad edge and the same-net copper the leg end lands on (component pad, via,
+# or the trunk a branch tees off). Proposed default pending the
 # operator's answer on #8741; a one-line change to override.
 DEFAULT_END_OFFSET_MM = 1.0
 
@@ -892,9 +893,12 @@ def reinforce_net(
             when given, the requirement for (target, obstacle) is raised to
             the table's value. ``None`` keeps the scalar-floor behavior.
         anchor_mode: ``"ends"`` (default) or ``"spaced"`` (Issue #8742).
-        end_offset_mm: ``ends`` mode: clearance in mm, measured along the leg,
+        end_offset_mm: ``ends`` mode: minimum straight-line clearance in mm
             from an end anchor's pad edge to the same-net pad / via / trunk
-            copper the leg end lands on (default 1.0).
+            copper the leg end lands on (default 1.0). The anchor starts that
+            far along the leg past the copper edge and moves further inward
+            while a bend brings it closer than that; a leg where no such
+            position remains is ``too_short``.
 
     Returns:
         A :class:`ReinforceResult` summarising placed/refused anchors, the
@@ -1155,9 +1159,11 @@ class _LegCandidate:
     layer: str
     kind: str
     run: list[Segment]
-    #: Extra copper extent (mm) at the leg START that is not a pad or via --
-    #: the trunk half-width for a branch, which starts at the junction.
-    start_extra_mm: float = 0.0
+    #: Same-net copper at the leg START that is not a pad or via -- the
+    #: trunk's segments for a branch, which starts at the junction. Its end
+    #: anchor keeps the same straight-line ``end_offset_mm`` clearance from
+    #: it as from a pad (Issue #8742).
+    start_features: list[_EndFeature] = field(default_factory=list)
     #: ``LEG_UNHANDLED`` when topology (or the layer selection) rules the leg
     #: out before placement; ``None`` when it may be anchored.
     status: str | None = None
@@ -1274,54 +1280,93 @@ def _derive_legs(
         ]
         arms.sort(key=_run_length, reverse=True)
         trunk = _reverse_run(arms[0], original_ids) + arms[1]
-        trunk_half_width = max(arms[0][0].width, arms[1][0].width) / 2.0
+        trunk_copper = [
+            _EndFeature(
+                s.start[0],
+                s.start[1],
+                0.0,
+                (),
+                via_radius=s.width / 2.0,
+                seg_end=s.end,
+            )
+            for s in trunk
+        ]
         legs.append(_LegCandidate(layer, LEG_KIND_TRUNK, trunk))
-        legs.append(_LegCandidate(layer, LEG_KIND_BRANCH, arms[2], start_extra_mm=trunk_half_width))
+        legs.append(_LegCandidate(layer, LEG_KIND_BRANCH, arms[2], start_features=trunk_copper))
     return legs
 
 
-def _pad_copper_contains(pad: Pad, center: tuple[float, float], point: tuple[float, float]) -> bool:
-    """True when ``point`` lies on ``pad``'s copper (board frame).
+def _pad_copper_distance(
+    pad: Pad, center: tuple[float, float], point: tuple[float, float]
+) -> float | None:
+    """Signed straight-line distance (mm) from ``point`` to ``pad``'s copper.
+
+    Positive outside the copper, ``<= 0`` on or inside it (board frame).
+    ``None`` for a pad with no usable size.
 
     ``pad.rotation`` is absolute. Board offsets come from pad-local ones by
     :func:`~kicad_tools.core.geometry.rotate_pad_offset` (KiCad's negated-angle
     convention), so the inverse -- board to pad-local -- is the same function
     at the negated angle. Circle / oval (capsule) / rect / roundrect are exact;
     trapezoid and chamfered rect use their bounding rectangle, and custom pads
-    the disc circumscribing the anchor rectangle -- both over-estimate, which
-    only moves the anchor further inward.
+    the disc circumscribing the anchor rectangle -- both over-estimate the
+    copper, which only moves the anchor further inward.
     """
     try:
         half_w = float(pad.size[0]) / 2.0
         half_h = float(pad.size[1]) / 2.0
     except (TypeError, ValueError, IndexError):
-        return False
+        return None
     if half_w <= 0.0 or half_h <= 0.0:
-        return False
-    eps = 1e-6
+        return None
     lx, ly = rotate_pad_offset(
         point[0] - center[0], point[1] - center[1], -float(pad.rotation or 0.0)
     )
     shape = pad.shape
     if shape == "circle":
-        return math.hypot(lx, ly) <= max(half_w, half_h) + eps
-    if shape in ("oval", "roundrect"):
-        if shape == "oval":
-            radius = min(half_w, half_h)
-        else:
-            ratio = min(max(float(pad.roundrect_rratio), 0.0), 0.5)
-            radius = 2.0 * min(half_w, half_h) * ratio
-        dx = max(abs(lx) - (half_w - radius), 0.0)
-        dy = max(abs(ly) - (half_h - radius), 0.0)
-        return math.hypot(dx, dy) <= radius + eps
-    if shape in ("rect", "trapezoid", "chamfered_rect"):
-        return abs(lx) <= half_w + eps and abs(ly) <= half_h + eps
-    return math.hypot(lx, ly) <= math.hypot(half_w, half_h) + eps
+        return math.hypot(lx, ly) - max(half_w, half_h)
+    radius = 0.0
+    if shape == "oval":
+        radius = min(half_w, half_h)
+    elif shape == "roundrect":
+        ratio = min(max(float(pad.roundrect_rratio), 0.0), 0.5)
+        radius = 2.0 * min(half_w, half_h) * ratio
+    elif shape not in ("rect", "trapezoid", "chamfered_rect"):
+        return math.hypot(lx, ly) - math.hypot(half_w, half_h)
+    # Rounded-box signed distance (radius 0 is the plain rectangle).
+    qx = abs(lx) - (half_w - radius)
+    qy = abs(ly) - (half_h - radius)
+    outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
+    inside = min(max(qx, qy), 0.0)
+    return outside + inside - radius
+
+
+def _pad_copper_contains(pad: Pad, center: tuple[float, float], point: tuple[float, float]) -> bool:
+    """True when ``point`` lies on ``pad``'s copper (board frame)."""
+    d = _pad_copper_distance(pad, center, point)
+    return d is not None and d <= 1e-6
+
+
+def _segment_distance(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> float:
+    """Distance from ``p`` to the segment ``a``-``b``."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    seg2 = dx * dx + dy * dy
+    if seg2 <= 0.0:
+        return math.hypot(p[0] - a[0], p[1] - a[1])
+    u = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / seg2))
+    return math.hypot(p[0] - (a[0] + u * dx), p[1] - (a[1] + u * dy))
 
 
 @dataclass
 class _EndFeature:
-    """Same-net copper a leg end can land on: a pad or a non-anchor via."""
+    """Same-net copper a leg end can land on.
+
+    A pad, a non-anchor via, or (for a branch's junction end) one trunk
+    segment, modelled as a capsule from ``(x, y)`` to ``seg_end`` of
+    half-width ``via_radius``.
+    """
 
     x: float
     y: float
@@ -1330,16 +1375,24 @@ class _EndFeature:
     layers: tuple[str, ...]
     pad: Pad | None = None
     via_radius: float = 0.0
+    seg_end: tuple[float, float] | None = None
 
     def on_layer(self, layer: str) -> bool:
         return not self.layers or layer in self.layers or "*.Cu" in self.layers
 
-    def contains(self, p: tuple[float, float]) -> bool:
-        if math.hypot(p[0] - self.x, p[1] - self.y) > self.bound + 1e-6:
-            return False
+    def distance(self, p: tuple[float, float]) -> float:
+        """Straight-line distance (mm) from ``p`` to this copper; <= 0 inside."""
+        if self.seg_end is not None:
+            return _segment_distance(p, (self.x, self.y), self.seg_end) - self.via_radius
         if self.pad is not None:
-            return _pad_copper_contains(self.pad, (self.x, self.y), p)
-        return math.hypot(p[0] - self.x, p[1] - self.y) <= self.via_radius + 1e-6
+            d = _pad_copper_distance(self.pad, (self.x, self.y), p)
+            return math.inf if d is None else d
+        return math.hypot(p[0] - self.x, p[1] - self.y) - self.via_radius
+
+    def contains(self, p: tuple[float, float]) -> bool:
+        if self.seg_end is None and math.hypot(p[0] - self.x, p[1] - self.y) > self.bound + 1e-6:
+            return False
+        return self.distance(p) <= 1e-6
 
 
 def _same_net_end_features(
@@ -1395,29 +1448,74 @@ def _exit_arc(points: list[tuple[float, float]], contains) -> float | None:
     return None
 
 
-def _end_extent(
+def _end_copper(
     points: list[tuple[float, float]],
     layer: str,
     features: list[_EndFeature],
-    extra_mm: float,
-) -> float | None:
-    """Arc length from ``points[0]`` to the edge of the copper it starts on.
+) -> list[_EndFeature] | None:
+    """The same-net copper on ``layer`` that ``points[0]`` (a leg end) lands on.
 
-    The largest of: the exit from every same-net pad / via on ``layer`` that
-    contains the start point (measured along the leg), and ``extra_mm`` (the
-    trunk half-width at a branch's junction end). ``0.0`` for a free track
-    end. ``None`` when that copper covers the whole leg.
+    ``None`` when one of those features covers the whole leg.
     """
-    extent = extra_mm
     start = points[0]
+    found: list[_EndFeature] = []
     for feat in features:
         if not feat.on_layer(layer) or not feat.contains(start):
             continue
-        t = _exit_arc(points, feat.contains)
-        if t is None:
+        if _exit_arc(points, feat.contains) is None:
             return None
-        extent = max(extent, t)
+        found.append(feat)
+    return found
+
+
+def _end_extent(points: list[tuple[float, float]], copper: list[_EndFeature]) -> float:
+    """Arc length from ``points[0]`` to the edge of the end ``copper``.
+
+    The largest exit, measured along the leg, from every feature in
+    ``copper`` (all of which contain the start point). ``0.0`` for a free
+    track end.
+    """
+    extent = 0.0
+    for feat in copper:
+        t = _exit_arc(points, feat.contains)
+        if t is not None:
+            extent = max(extent, t)
     return extent
+
+
+def _clear_arc(
+    points: list[tuple[float, float]],
+    cum: list[float],
+    t_from: float,
+    t_limit: float,
+    clear,
+) -> float | None:
+    """First arc from ``t_from`` towards ``t_limit`` where ``clear`` holds.
+
+    Walks in ``_EXIT_MARCH_STEP_MM`` steps (either direction, so it serves
+    both ends: ``t_limit < t_from`` walks backwards), then bisects onto the
+    boundary. ``None`` when ``clear`` never holds in that range.
+    """
+    if clear(_point_at_arc(points, cum, t_from)):
+        return t_from
+    sign = 1.0 if t_limit >= t_from else -1.0
+    span = abs(t_limit - t_from)
+    prev = t_from
+    walked = 0.0
+    while walked < span - 1e-12:
+        walked = min(span, walked + _EXIT_MARCH_STEP_MM)
+        t = t_from + sign * walked
+        if clear(_point_at_arc(points, cum, t)):
+            bad, good = prev, t
+            for _ in range(40):
+                mid = (bad + good) / 2.0
+                if clear(_point_at_arc(points, cum, mid)):
+                    good = mid
+                else:
+                    bad = mid
+            return good
+        prev = t
+    return None
 
 
 def _reinforce_ends(
@@ -1522,12 +1620,16 @@ def _reinforce_ends(
     step = END_NUDGE_MAX_MM / END_NUDGE_STEPS if END_NUDGE_STEPS > 0 else 0.0
     nudges = [k * step for k in range(END_NUDGE_STEPS + 1)] if step > 0 else [0.0]
 
-    def try_place(points, cum, arcs):
-        """First clear arc among ``arcs``; else the first violation seen."""
+    def try_place(points, cum, arcs, clear):
+        """First clear arc among ``arcs``; else the first violation seen.
+
+        ``clear`` is the end-offset test: a candidate inside the end-offset
+        clearance of the leg's end copper is skipped, never placed.
+        """
         first: _Violation | None = None
         for t in arcs:
             cx, cy = _point_at_arc(points, cum, t)
-            if _too_close((cx, cy), placed_positions, dedup_floor):
+            if not clear((cx, cy)) or _too_close((cx, cy), placed_positions, dedup_floor):
                 continue
             violation = _position_violation(cx, cy, anchor_pad, anchor_drill, rules, other, policy)
             if violation is None:
@@ -1545,7 +1647,10 @@ def _reinforce_ends(
                 reason=(
                     "other-net clearance/hole-to-hole violation"
                     if violation
-                    else "no clear inward position: within one anchor pad of another anchor"
+                    else (
+                        "no clear inward position: within one anchor pad of another "
+                        "anchor or inside the end-offset clearance"
+                    )
                 ),
                 rule=violation.rule if violation else "",
                 required_mm=violation.required_mm if violation else 0.0,
@@ -1583,25 +1688,47 @@ def _reinforce_ends(
             points = g.points
             cum = _cumulative_arc(points)
             total = cum[-1]
-            e0 = _end_extent(points, cand.layer, features, cand.start_extra_mm)
-            e1 = _end_extent(points[::-1], cand.layer, features, 0.0)
+            c0 = _end_copper(points, cand.layer, features + cand.start_features)
+            c1 = _end_copper(points[::-1], cand.layer, features)
             half = anchor_pad / 2.0
-            if e0 is None or e1 is None:
+            if c0 is None or c1 is None:
                 leg.status = LEG_TOO_SHORT
                 leg.reason = "same-net pad/via copper covers the whole leg"
             else:
-                t0 = e0 + end_offset + half
-                t1 = total - (e1 + end_offset + half)
-                if t1 - t0 < dedup_floor - 1e-9:
+                e0 = _end_extent(points, c0)
+                e1 = _end_extent(points[::-1], c1)
+                # The along-leg target alone is not enough: a leg that bends
+                # soon after leaving the pad (or an oblique branch leaving the
+                # trunk) brings that point back near the end copper. Keep every
+                # anchor's straight-line copper gap to BOTH ends' copper at
+                # least ``end_offset``, moving inward only.
+                end_copper = c0 + c1
+
+                def clear(p, _copper=end_copper):
+                    return all(f.distance(p) - half >= end_offset - 1e-6 for f in _copper)
+
+                t0_arc = e0 + end_offset + half
+                t1_arc = total - (e1 + end_offset + half)
+                t0 = _clear_arc(points, cum, t0_arc, total, clear) if t0_arc <= total else None
+                t1 = _clear_arc(points, cum, t1_arc, 0.0, clear) if t1_arc >= 0.0 else None
+                if t0 is None or t1 is None or t1 - t0 < dedup_floor - 1e-9:
                     leg.status = LEG_TOO_SHORT
-                    leg.reason = (
-                        f"{total:.3f} mm leg needs {total - (t1 - t0) + dedup_floor:.3f} mm "
-                        f"for two {anchor_pad:.3f} mm anchors at a {end_offset:g} mm end offset"
-                    )
+                    if t0 is None or t1 is None:
+                        leg.reason = (
+                            f"{total:.3f} mm leg has no point whose {anchor_pad:.3f} mm anchor "
+                            f"is {end_offset:g} mm clear of the end copper"
+                        )
+                    else:
+                        leg.reason = (
+                            f"{total:.3f} mm leg needs "
+                            f"{total - (t1 - t0) + dedup_floor:.3f} mm for two "
+                            f"{anchor_pad:.3f} mm anchors {end_offset:g} mm clear of the "
+                            "end copper"
+                        )
                 else:
                     # Start anchor: inward only, never past the far anchor.
                     start_arcs = [t0 + d for d in nudges if t0 + d <= t1 - dedup_floor + 1e-9]
-                    chosen_t, start_pos, v0 = try_place(points, cum, start_arcs)
+                    chosen_t, start_pos, v0 = try_place(points, cum, start_arcs, clear)
                     start_t = t0 if chosen_t is None else chosen_t
                     if start_pos is not None:
                         leg.anchors.append(PlacedAnchor(x=start_pos[0], y=start_pos[1]))
@@ -1611,7 +1738,7 @@ def _reinforce_ends(
                         refused_here += 1
                     # Far anchor: inward only, never past the start anchor.
                     end_arcs = [t1 - d for d in nudges if t1 - d >= start_t + dedup_floor - 1e-9]
-                    _, end_pos, v1 = try_place(points, cum, end_arcs)
+                    _, end_pos, v1 = try_place(points, cum, end_arcs, clear)
                     if end_pos is not None:
                         leg.anchors.append(PlacedAnchor(x=end_pos[0], y=end_pos[1]))
                         placed_positions.append(end_pos)

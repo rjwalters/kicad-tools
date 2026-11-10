@@ -316,10 +316,12 @@ Two placement modes:
 - **`--anchor-mode ends`** (default, #8742) splits the net's copper into
   *legs*: a run on one copper layer with no junction inside it, one wire each.
   Every anchored leg gets exactly two anchors, one near each end, none in
-  between. Each anchor's pad edge sits `--end-offset` mm (default 1.0)
-  clear, measured along the leg, of the same-net copper the leg ends on: the
-  component pad (its real shape and rotation), a via, or, for a branch, the
-  trunk. A free end measures from the track end. A leg too short for two
+  between. Each anchor's pad edge sits at least `--end-offset` mm (default
+  1.0) clear, in straight-line distance, of the same-net copper the leg ends
+  on: the component pad (its real shape and rotation), a via, or, for a
+  branch, the trunk. If the leg bends soon after leaving that copper, the
+  anchor moves further inward until the clearance holds. A free end measures
+  from the track end. A leg too short for two
   anchors is reported `too_short` and gets none, never one or three. A Y
   junction becomes a `trunk` (the longest through-path, two end anchors) and
   a `branch` (one anchor at its free end, one beside the trunk); loops and
