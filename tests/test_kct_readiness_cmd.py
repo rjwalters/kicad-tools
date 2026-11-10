@@ -2178,17 +2178,101 @@ def test_exemption_does_not_cover_other_blank_rows(tmp_path):
     assert "U1" in blocker and "D1" not in blocker
 
 
-def test_sibling_revisions_and_backups_are_not_required_in_project_zip(tmp_path):
+def _spec_above_board(tmp_path: Path) -> Path:
+    """The reporter's layout: ``project.kct`` one level above ``board_dir``."""
     board = make_board(tmp_path)
-    (board / "project.kct").write_text(_EXEMPT_SPEC)
-    output = board / "output"
-    for name in ("demo_v25", "demo_v26"):
-        (output / f"{name}.kicad_pro").write_text('{"board": {}}\n')
-        (output / f"{name}.kicad_dru").write_text("(version 1)\n")
-    (output / "demo_backup_2026-01-01.kicad_sch").write_text("(kicad_sch old)\n")
+    (board / "project.kct").unlink()
+    (tmp_path / "project.kct").write_text(_EXEMPT_SPEC)
+    return board
+
+
+def test_exemption_from_spec_above_board_dir_generate_8727(tmp_path):
+    board = _spec_above_board(tmp_path)
     fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
 
     code, report = run(board, fake)
 
-    assert code == 0, report.get("blockers")
-    assert check_status(report, "artifacts") == "passed"
+    assert check_status(report, "bom") == "passed", report.get("blockers")
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "D1 (consigned: owner supplies)" in detail
+    assert str(tmp_path / "project.kct") in detail
+    assert code == 0
+
+
+def test_exemption_from_spec_above_board_dir_verify_8727(tmp_path):
+    board = _spec_above_board(tmp_path)
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+    assert run(board, fake)[0] == 0
+
+    _code, report = _verify_report(board, FakeEngines(board, part_numbers=fake.part_numbers))
+
+    assert check_status(report, "bom") == "passed", report.get("blockers")
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "D1 (consigned: owner supplies)" in detail
+
+
+def test_missing_spec_is_reported_not_silent_8727(tmp_path):
+    board = make_board(tmp_path)
+    (board / "project.kct").unlink()
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    assert check_status(report, "bom") == "failed"
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "D1" in detail and "no .kct spec found" in detail and "exemptions not applied" in detail
+
+
+def test_unloadable_spec_is_reported_not_silent_8727(tmp_path):
+    board = make_board(tmp_path)
+    (board / "project.kct").write_text("::: not a spec :::\n  - [\n")
+    fake = FakeEngines(board, part_numbers={"R1": "C17630", "U1": "C8734", "D1": ""})
+
+    code, report = run(board, fake)
+
+    assert code != 0
+    detail = next(c["detail"] for c in report["checks"] if c["name"] == "bom")
+    assert "failed to load" in detail and "exemptions not applied" in detail
+
+
+def test_real_project_zip_carries_local_footprint_library_and_skips_siblings_8727(tmp_path):
+    """The real exporter zip (not the fake bundler) satisfies readiness provenance."""
+    from kicad_tools.cli.readiness_cmd import ReadinessOptions
+    from kicad_tools.export.manufacturing import _create_project_zip
+
+    board = make_board(tmp_path)
+    output = board / "output"
+    pcb = output / PCB_NAME
+    (output / "mylib.pretty").mkdir()
+    (output / "mylib.pretty" / "FP1.kicad_mod").write_text("(footprint FP1)\n")
+    (output / "fp-lib-table").write_text(
+        '(fp_lib_table (lib (name "mylib")(type "KiCad")'
+        '(uri "${KIPRJMOD}/mylib.pretty")(options "")(descr "")))\n'
+    )
+    for name in ("demo_v25", "demo_v26"):
+        (output / f"{name}.kicad_pro").write_text('{"board": {}}\n')
+        (output / f"{name}.kicad_dru").write_text("(version 1)\n")
+    (output / "demo_backup_2026-01-01.kicad_sch").write_text("(kicad_sch old)\n")
+
+    manufacturing = output / "manufacturing"
+    manufacturing.mkdir()
+    _create_project_zip(pcb, manufacturing)
+    with zipfile.ZipFile(manufacturing / "kicad_project.zip") as zf:
+        names = set(zf.namelist())
+    assert {"fp-lib-table", "mylib.pretty/FP1.kicad_mod"} <= names
+
+    options = ReadinessOptions(
+        board_dir=board,
+        pcb=pcb,
+        schematic=output / SCH_NAME,
+        project=output / PRO_NAME,
+        manufacturer="jlcpcb",
+        mode="pcb_only",
+        output_dir=manufacturing,
+        evidence_dir=output / "readiness",
+    )
+    assert readiness_cmd._verify_project_provenance(options) == []
+    required = {p.name for p in readiness_cmd._required_sources(options)}
+    assert not required & {"demo_v25.kicad_pro", "demo_v26.kicad_dru"}
+    assert "demo_backup_2026-01-01.kicad_sch" not in required
