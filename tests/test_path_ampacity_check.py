@@ -366,6 +366,73 @@ class TestLayerChangeVia:
         assert res.ok and res.layer_changes == ()
 
 
+def _series_hop_pcb(*, gap: float) -> PCB:
+    """J1 -F.Cu-> via -B.Cu-> via -F.Cu-> J2: two vias in SERIES."""
+    pcb = PCB.create(width=200, height=120, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=120, y=50, net="NET1")
+    pcb.add_trace(("J1", "1"), (60, 50), width=6.3, layer="F.Cu", net="NET1")
+    pcb.add_trace((60, 50), (60 + gap, 50), width=6.3, layer="B.Cu", net="NET1")
+    pcb.add_trace((60 + gap, 50), ("J2", "1"), width=6.3, layer="F.Cu", net="NET1")
+    pcb.add_via(60, 50, size=0.6, drill=0.3, net="NET1")
+    pcb.add_via(60 + gap, 50, size=0.6, drill=0.3, net="NET1")
+    return pcb
+
+
+class TestSeriesVersusParallelVias:
+    @pytest.mark.parametrize("gap", [1.0, 10.0])
+    def test_series_vias_are_separate_changes_at_any_spacing(self, gap):
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        pcb = _series_hop_pcb(gap=gap)
+        res = resolve_current_path(pcb, _trunk_spec(3.0))
+        assert res.ok, res.reason
+        assert [c.count for c in res.layer_changes] == [1, 1]
+        out = PathAmpacityRule(specs=[_trunk_spec(3.0)]).check(pcb, _design_rules_2oz())
+        assert len([e for e in out.errors if "changes layer" in e.message]) == 2
+
+    def test_proved_via_array_meeting_capacity_is_not_flagged(self):
+        from kicad_tools.router.current_paths import resolve_current_path
+        from tests.test_current_paths_via_array import fixture, spec
+
+        pcb = fixture()
+        res = resolve_current_path(pcb, spec())  # 3 A through a 3-via array
+        assert res.ok, res.reason
+        arrays = [c for c in res.layer_changes if c.count == 3]
+        assert len(arrays) == 1
+        assert arrays[0].current_capacity_a() >= 3.0
+        out = PathAmpacityRule(specs=[spec()]).check(pcb, _design_rules_2oz())
+        assert not any("changes layer" in m.message for m in [*out.errors, *out.warnings])
+
+    def test_audit_json_reports_layer_changes(self, tmp_path, capsys, monkeypatch):
+        import argparse
+        import json
+
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+        from kicad_tools.router.current_paths import dump_current_path_specs
+
+        # Programmatic footprints do not survive a save/load round trip, so
+        # hand the in-memory board to the CLI.
+        pcb_path = tmp_path / "series.kicad_pcb"
+        pcb_path.write_text("")
+        board = _series_hop_pcb(gap=1.0)
+        monkeypatch.setattr(PCB, "load", classmethod(lambda cls, *_a, **_k: board))
+        sidecar = tmp_path / "current_paths.json"
+        sidecar.write_text(json.dumps(dump_current_path_specs([_trunk_spec(3.0)])))
+        args = argparse.Namespace(
+            pcb_command="current-paths-audit",
+            pcb=str(pcb_path),
+            current_paths=str(sidecar),
+            format="json",
+        )
+        assert run_pcb_command(args) == 0
+        changes = json.loads(capsys.readouterr().out)["resolutions"][0]["layer_changes"]
+        assert len(changes) == 2
+        assert changes[0]["via_count"] == 1 and changes[0]["drill_mm"] == 0.3
+        assert changes[0]["from_layer"] == "F.Cu" and changes[0]["to_layer"] == "B.Cu"
+        assert changes[0]["capacity_a"] == pytest.approx(1.6, abs=0.01)
+
+
 def test_via_barrel_capacity_grows_with_drill():
     from kicad_tools.physics.ampacity import via_barrel_current_capacity
 

@@ -158,9 +158,13 @@ def width_for_current(
 
 
 #: Via barrel plating thickness assumed by :func:`via_barrel_current_capacity`
-#: (mm). 25 um is the common 1 oz-class plating figure (IPC Class 2 minimum is
-#: ~20 um); stated so the model is never silently optimistic.
-VIA_PLATING_THICKNESS_MM = 0.025
+#: (mm). 20 um is the IPC-6012 Class 2 *average* barrel plating requirement
+#: (what most fabs build to by default); Class 3 is 25 um average, and the
+#: Class 2 thin-area minimum is 18 um. The lower Class 2 figure is used so a
+#: screening rule whose failure mode is a false pass is not optimistic.
+#: Barrel plating is unrelated to the 1 oz (35 um) foil weight. See
+#: ``docs/research/via-current-capacity.md`` for the model and its sources.
+VIA_PLATING_THICKNESS_MM = 0.020
 
 
 def via_barrel_current_capacity(
@@ -174,7 +178,10 @@ def via_barrel_current_capacity(
     :func:`width_for_current` to the copper annulus of the barrel
     (``pi * t * (drill + t)``), assuming ``plating_mm`` of plating. This is a
     simple screening model (issue #8745), not a thermal simulation: the barrel
-    is treated as a conductor in free air at ``delta_t_c`` rise.
+    is treated as a conductor in free air at ``delta_t_c`` rise. Applying the
+    external-layer constant to a barrel annulus is a calculator convention,
+    not something IPC-2221 specifies for vias; see
+    ``docs/research/via-current-capacity.md``.
     """
     if drill_mm <= 0 or plating_mm <= 0 or delta_t_c <= 0:
         return 0.0
