@@ -296,10 +296,81 @@ def test_layer_transition_is_audited_before_ampacity(bridge):
         pcb.add_via(60, 50, net="NET1")
     result = PathAmpacityRule(specs=[_trunk_spec(), _sense_spec()]).check(pcb, _design_rules_2oz())
     if bridge:
-        assert result.errors == []
+        # Issue #8745: the 15 A path now crosses layers through one 0.3 mm
+        # via -- a true positive -- but it is no longer "unresolved".
+        assert result.errors
+        assert not any("unresolved" in error.message.lower() for error in result.errors)
+        assert all("changes layer" in error.message for error in result.errors)
     else:
         assert result.errors
         assert any("unresolved" in error.message.lower() for error in result.errors)
+
+
+# --------------------------------------------------------------------------
+# Layer-change via capacity (Issue #8745)
+# --------------------------------------------------------------------------
+
+
+def _layer_change_pcb(*, drill: float = 0.3) -> PCB:
+    pcb = _t_network_pcb(trunk_width=6.3)
+    pcb.segments[1].layer = "B.Cu"
+    pcb.add_via(60, 50, size=drill + 0.3, drill=drill, net="NET1")
+    return pcb
+
+
+class TestLayerChangeVia:
+    def test_undersized_via_is_error_for_force_path(self):
+        res = PathAmpacityRule(specs=[_trunk_spec(), _sense_spec()]).check(
+            _layer_change_pcb(), _design_rules_2oz()
+        )
+        assert len(res.errors) == 1
+        assert "changes layer" in res.errors[0].message
+        assert res.errors[0].required_value == 15.0
+
+    def test_warning_when_not_reinforcement_eligible(self):
+        import dataclasses
+
+        spec = dataclasses.replace(_trunk_spec(), reinforcement_eligible=False)
+        res = PathAmpacityRule(specs=[spec, _sense_spec()]).check(
+            _layer_change_pcb(), _design_rules_2oz()
+        )
+        assert res.errors == []
+        assert any("changes layer" in w.message for w in res.warnings)
+
+    def test_low_current_does_not_fail(self):
+        res = PathAmpacityRule(specs=[_trunk_spec(0.05), _sense_spec()]).check(
+            _layer_change_pcb(), _design_rules_2oz()
+        )
+        assert res.errors == []
+        assert not any("changes layer" in w.message for w in res.warnings)
+
+    def test_adequate_via_does_not_newly_fail(self):
+        res = PathAmpacityRule(specs=[_trunk_spec(), _sense_spec()]).check(
+            _layer_change_pcb(drill=8.0), _design_rules_2oz()
+        )
+        assert res.errors == []
+
+    def test_layer_changes_recorded_on_resolution(self):
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        res = resolve_current_path(_layer_change_pcb(), _trunk_spec())
+        assert res.ok and len(res.layer_changes) == 1
+        change = res.layer_changes[0]
+        assert change.count == 1 and change.drill == 0.3 and change.pad_diameter == 0.6
+        assert change.position == (60.0, 50.0)
+
+    def test_single_layer_path_has_no_layer_changes(self):
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        res = resolve_current_path(_t_network_pcb(trunk_width=6.3), _trunk_spec())
+        assert res.ok and res.layer_changes == ()
+
+
+def test_via_barrel_capacity_grows_with_drill():
+    from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+    assert 1.0 < via_barrel_current_capacity(0.3) < 3.0
+    assert via_barrel_current_capacity(0.6) > via_barrel_current_capacity(0.3)
 
 
 # --------------------------------------------------------------------------

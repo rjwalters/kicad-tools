@@ -157,6 +157,32 @@ def width_for_current(
     return float(width_mils * _MM_PER_MIL)
 
 
+#: Via barrel plating thickness assumed by :func:`via_barrel_current_capacity`
+#: (mm). 25 um is the common 1 oz-class plating figure (IPC Class 2 minimum is
+#: ~20 um); stated so the model is never silently optimistic.
+VIA_PLATING_THICKNESS_MM = 0.025
+
+
+def via_barrel_current_capacity(
+    drill_mm: float,
+    delta_t_c: float = 10.0,
+    plating_mm: float = VIA_PLATING_THICKNESS_MM,
+) -> float:
+    """Approximate continuous current (A) one plated via barrel can carry.
+
+    Applies the same IPC-2221 external-layer formula as
+    :func:`width_for_current` to the copper annulus of the barrel
+    (``pi * t * (drill + t)``), assuming ``plating_mm`` of plating. This is a
+    simple screening model (issue #8745), not a thermal simulation: the barrel
+    is treated as a conductor in free air at ``delta_t_c`` rise.
+    """
+    if drill_mm <= 0 or plating_mm <= 0 or delta_t_c <= 0:
+        return 0.0
+    area_mm2 = math.pi * plating_mm * (drill_mm + plating_mm)
+    area_mils2 = area_mm2 / (_MM_PER_MIL**2)
+    return float(_K_EXTERNAL * delta_t_c**_DELTA_T_EXPONENT * area_mils2**_AREA_EXPONENT)
+
+
 def rms_current_for_duty_cycle(
     peak_a: float,
     duty_cycle: float,
