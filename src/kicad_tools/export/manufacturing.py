@@ -322,6 +322,35 @@ def _project_symbol_files(project_dir: Path) -> list[Path]:
     return files
 
 
+def project_library_members(directory: Path, boundary: Path) -> list[Path]:
+    """Files under a library directory that stay inside *boundary* (#8763).
+
+    Shared by the project-zip exporter and ``kct readiness`` so both agree on
+    which library members ship.  A member (or a symlinked directory holding it)
+    whose real path leaves *boundary* is excluded with a warning naming it;
+    in-boundary symlinks are kept.  Broken links and symlink loops are skipped.
+    """
+    boundary = boundary.resolve()
+    members: list[Path] = []
+    for member in sorted(directory.rglob("*")):
+        try:
+            if not member.is_file():
+                continue
+            inside = member.resolve().is_relative_to(boundary)
+        except (OSError, RuntimeError):  # symlink loop / unreadable
+            logger.warning("Excluding unresolvable library member from project zip: %s", member)
+            continue
+        if inside:
+            members.append(member)
+        else:
+            logger.warning(
+                "Excluding library member resolving outside the project: %s -> %s",
+                member,
+                member.resolve(),
+            )
+    return members
+
+
 def _project_footprint_files(project_dir: Path) -> list[Path]:
     """Project-local footprint library inventory (#8727).
 
@@ -342,7 +371,7 @@ def _project_footprint_files(project_dir: Path) -> list[Path]:
         if directory.is_dir() and (
             directory.name in {"footprints", "symbols"} or directory.suffix == ".pretty"
         ):
-            files.update(p for p in directory.rglob("*") if p.is_file())
+            files.update(project_library_members(directory, root))
     if table.is_file():
         for uri in re.findall(r'\(uri\s+"([^"\n]+)"\)', table.read_text(errors="replace")):
             if "${KIPRJMOD}" in uri:
@@ -355,7 +384,7 @@ def _project_footprint_files(project_dir: Path) -> list[Path]:
             if not dependency.exists() or not dependency.resolve().is_relative_to(root):
                 continue
             if dependency.is_dir():
-                files.update(p for p in dependency.rglob("*") if p.is_file())
+                files.update(project_library_members(dependency, root))
             else:
                 files.add(dependency)
     return sorted(files)
