@@ -8,6 +8,10 @@ from typing import Any
 __all__ = ["run_pcb_command"]
 
 
+#: Upper bound on re-plan passes in one ``kct pcb prune`` run (#8730).
+_PRUNE_MAX_PASSES = 10
+
+
 def _carry_sidecars(src: Path, dst: Path) -> None:
     """Carry the input's .kicad_pro/.kicad_dru to a ``-o`` output (#8366)."""
     from kicad_tools.sidecars import copy_project_sidecars
@@ -789,23 +793,59 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         print(region_err, file=sys.stderr)
         return 1
 
+    from dataclasses import replace as _replace
+
+    unverified = getattr(args, "unverified", False)
+    src_path = pcb_path
+    res = None
     try:
-        pcb, res = prune_board(
-            pcb_path,
-            nets=nets,
-            region=region,
-            verify_drc=not getattr(args, "no_drc", False),
-            apply=not dry_run,
-            declared_nets=declared_nets,
-            wide=getattr(args, "wide", None),
-            required_widths=required_widths,
-            project=getattr(args, "project", None),
-            allow_default_rules=getattr(args, "allow_default_rules", False),
-            current_paths=specs,
-        )
+        # Issue #8730: one invocation iterates to a fixed point -- a pass can
+        # expose more redundant copper (a split container's piece is frozen
+        # for the rest of its own pass), so re-plan on the edited board until
+        # a pass changes nothing.  Intermediate passes go to the output file.
+        for pass_no in range(_PRUNE_MAX_PASSES):
+            pcb, step = prune_board(
+                src_path,
+                nets=nets,
+                region=region,
+                verify_drc=not getattr(args, "no_drc", False),
+                apply=not dry_run,
+                declared_nets=declared_nets,
+                wide=getattr(args, "wide", None),
+                required_widths=required_widths,
+                project=getattr(args, "project", None),
+                allow_default_rules=getattr(args, "allow_default_rules", False),
+                current_paths=specs,
+            )
+            if res is None:
+                res = step
+            else:
+                stats = dict(res.stats)
+                for key, val in step.stats.items():
+                    stats[key] = stats.get(key, 0) + val
+                res = _replace(
+                    step,
+                    plans=[*res.plans, *step.plans],
+                    accepted=[*res.accepted, *step.accepted],
+                    stats=stats,
+                )
+            step_changed = (
+                step.stats["segments_removed"]
+                or step.stats.get("vias_removed", 0)
+                or step.stats["ends_snapped"]
+            )
+            if dry_run or not step_changed or (not step.drc_verified and not unverified):
+                break
+            if pass_no + 1 == _PRUNE_MAX_PASSES:
+                break
+            pcb.save(output_path)
+            if output_path != pcb_path:
+                _carry_sidecars(pcb_path, output_path)
+            src_path = output_path
     except Exception as e:
         print(f"Error pruning PCB: {e}", file=sys.stderr)
         return 1
+    assert res is not None  # _PRUNE_MAX_PASSES >= 1, so the loop ran at least once
 
     def _net(p) -> dict[str, Any]:
         return {
