@@ -1,8 +1,8 @@
 ---
 title: "voltage_divider_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.27.0"
-date: "Rev 1 | 2026-11-04 | jlcpcb"
+author: "kicad-tools 0.29.0"
+date: "Rev 1 | 2026-11-10 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,9 +18,9 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 2 copper (F.Cu, B.Cu) |
-| Footprints | 4 (2 SMD, 2 THT, 0 other) |
+| Footprints | 7 (5 SMD, 2 THT, 0 other) |
 | Nets | 3 |
-| Traces | 14 segments |
+| Traces | 11 segments |
 | Vias | 3 |
 | Board Size | 30.0 x 25.0 mm |
 
@@ -148,9 +148,9 @@ Simple 2-resistor voltage divider
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~0.55 USD |
-| Components (estimated) | ~0.21 USD |
-| Assembly (estimated) | ~1.93 USD |
-| **Total (estimated)** | **~2.69 USD** |
+| Components (estimated) | ~0.24 USD |
+| Assembly (estimated) | ~1.95 USD |
+| **Total (estimated)** | **~2.74 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~13.44 USD |
+| Batch Total (estimated) | ~13.69 USD |
 

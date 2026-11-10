@@ -1,23 +1,25 @@
 {
   "file": "output/voltage_divider_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "822aec175f6366129e0be0854c7c7cec108898adcff3f71d25ab417363f1be79",
+  "pcb_sha256": "6ec90fa18d1b454b885e440664bb2072a0078fbe3d70a634c4b3b25ebb1e552a",
   "layers": 2,
   "summary": {
     "errors": 0,
     "warnings": 0,
     "infos": 2,
     "waived": 0,
-    "rules_checked": 68,
+    "rules_checked": 71,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
       "track_dangling": 1,
       "via_dangling": 1,
+      "pour_slot": 1,
       "redundant_copper_duplicate": 1,
       "redundant_copper_fragments": 1,
       "redundant_copper_detour": 1,
       "redundant_copper_via_offcentre": 1,
+      "redundant_copper_covered": 1,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
@@ -40,7 +42,8 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 31,
+    "orphan_waivers": 0,
+    "coverage_checked": 34,
     "coverage_skipped": 10,
     "coverage_unknown": [
       "model_coverage",
@@ -69,7 +72,7 @@
       "status": "info",
       "waived": false,
       "key": "connector_edge_distance|J2||F.Cu",
-      "evidence_hash": "ev2:74eed1079c727e55"
+      "evidence_hash": "ev3:74eed1079c727e55"
     },
     {
       "rule_id": "connector_edge_distance",
@@ -90,7 +93,7 @@
       "status": "info",
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
-      "evidence_hash": "ev2:47c6a04f9a2c6ff4"
+      "evidence_hash": "ev3:47c6a04f9a2c6ff4"
     }
   ],
   "mask_copper_assessments": [],
@@ -136,7 +139,7 @@
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "68 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "71 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -159,15 +162,15 @@
     "schematic_missing": false
   },
   "routing_quality": {
-    "total_segments": 14,
+    "total_segments": 11,
     "nets_with_copper": 2,
-    "segments_per_net": 7.0,
+    "segments_per_net": 5.5,
     "zero_length_count": 0,
-    "median_length_mm": 1.2727922061357937,
-    "fragment_count": 1,
-    "fragment_fraction": 0.07142857142857142,
-    "orthogonal_count": 7,
-    "diagonal_45_count": 7,
+    "median_length_mm": 1.3999999999999915,
+    "fragment_count": 0,
+    "fragment_fraction": 0.0,
+    "orthogonal_count": 5,
+    "diagonal_45_count": 6,
     "off_axis_count": 0,
     "staircase_step_count": 0,
     "staircase_fraction": 0.0
@@ -178,6 +181,12 @@
       "state": "skipped",
       "reason": "no_declared_targets",
       "blocking": true
+    },
+    "board_id": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
     },
     "clearance": {
       "status": "checked",
@@ -257,6 +266,12 @@
       "reason": null,
       "blocking": true
     },
+    "fiducials": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "impedance": {
       "status": "checked",
       "state": "checked",
@@ -330,6 +345,12 @@
       "blocking": false
     },
     "placement": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "pour_slot": {
       "status": "checked",
       "state": "checked",
       "reason": null,
