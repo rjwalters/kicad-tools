@@ -2543,8 +2543,14 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_reinforce.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_reinforce.add_argument(
         "--net",
-        required=True,
-        help="Net name to reinforce (must have routed copper)",
+        help="Net name to reinforce (must have routed copper; required unless --list-wires)",
+    )
+    pcb_reinforce.add_argument(
+        "--list-wires",
+        dest="list_wires",
+        action="store_true",
+        help="Read-only: print the wire list from BOARD's .reinforcement.json sidecar "
+        "(#8744) and exit; --net filters it. Honours --format json.",
     )
     pcb_reinforce.add_argument(
         "--wire-gauge",

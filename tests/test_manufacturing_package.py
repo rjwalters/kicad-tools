@@ -55,6 +55,62 @@ class TestSha256File:
         assert len(digest) == 64
 
 
+class TestCreateProjectZipInventory:
+    """Issue #8752: zip inventory matches readiness (own stem + sheet hierarchy)."""
+
+    @staticmethod
+    def _names(pcb, tmp_path, **kw):
+        out = tmp_path / "out"
+        out.mkdir(exist_ok=True)
+        with zipfile.ZipFile(_create_project_zip(pcb, out, **kw)) as zf:
+            return set(zf.namelist())
+
+    def test_sibling_variant_and_backup_excluded(self, tmp_path):
+        for stem in ("a", "b"):
+            (tmp_path / f"{stem}.kicad_pcb").write_text("(kicad_pcb)")
+            (tmp_path / f"{stem}.kicad_pro").write_text("{}")
+            (tmp_path / f"{stem}.kicad_sch").write_text("(kicad_sch)")
+        (tmp_path / "a_backup_1.kicad_sch").write_text("(kicad_sch)")
+        names = self._names(tmp_path / "a.kicad_pcb", tmp_path)
+        assert {"a.kicad_pcb", "a.kicad_pro", "a.kicad_sch"} <= names
+        assert not any(n.startswith("b.") or "_backup_" in n for n in names)
+
+    def test_routed_pcb_and_subsheets(self, tmp_path):
+        (tmp_path / "board_routed.kicad_pcb").write_text("(kicad_pcb)")
+        (tmp_path / "board.kicad_sch").write_text(
+            '(kicad_sch (sheet (property "Sheetfile" "sub/power.kicad_sch")'
+            ' (property "Sheetfile" "../outside.kicad_sch")))'
+        )
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "power.kicad_sch").write_text(
+            '(kicad_sch (sheet (property "Sheetfile" "../board.kicad_sch")))'
+        )  # cycle
+        (tmp_path.parent / "outside.kicad_sch").write_text("(kicad_sch)")
+        (tmp_path / "other.kicad_sch").write_text("(kicad_sch)")
+        names = self._names(tmp_path / "board_routed.kicad_pcb", tmp_path)
+        assert "board.kicad_sch" in names and "sub/power.kicad_sch" in names
+        assert "other.kicad_sch" not in names
+        assert not any("outside" in n for n in names)
+
+    def test_ambiguous_schematic_includes_none(self, tmp_path, caplog):
+        (tmp_path / "a.kicad_pcb").write_text("(kicad_pcb)")
+        (tmp_path / "x.kicad_sch").write_text("(kicad_sch)")
+        (tmp_path / "y.kicad_sch").write_text("(kicad_sch)")
+        with caplog.at_level(logging.WARNING):
+            names = self._names(tmp_path / "a.kicad_pcb", tmp_path)
+        assert names == {"a.kicad_pcb"}
+        assert "no schematics" in caplog.text
+
+    def test_explicit_schematic_preferred(self, tmp_path):
+        (tmp_path / "a.kicad_pcb").write_text("(kicad_pcb)")
+        (tmp_path / "x.kicad_sch").write_text("(kicad_sch)")
+        (tmp_path / "y.kicad_sch").write_text("(kicad_sch)")
+        names = self._names(
+            tmp_path / "a.kicad_pcb", tmp_path, schematic_path=tmp_path / "y.kicad_sch"
+        )
+        assert names == {"a.kicad_pcb", "y.kicad_sch"}
+
+
 class TestCreateProjectZip:
     """Tests for _create_project_zip."""
 

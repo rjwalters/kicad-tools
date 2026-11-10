@@ -754,3 +754,6 @@ first coupled search already differs (DQS `corridor_iters` 146085 vs 144767).
 - `per-run-net-order.txt` -- captured net iteration order from the
   original 5-run validation (pre-rebase, against #3193's
   `insertion_order` tie-break). Preserved for historical context.
+- `astra-j1-orientation.md` -- Astra J1 orientation experiment
+  (2026-09-09): A/B of rotating board 07's source connector J1 from 0° to
+  -90° and rerouting the six MIPI nets.
