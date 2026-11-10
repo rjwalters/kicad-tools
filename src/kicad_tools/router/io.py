@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
     from .board_clearance_rules import BoardClearanceRules
     from .clearance_shapes import KPad, KShape
-    from .primitives import Pad, Route, Segment
+    from .primitives import Pad, Route, Segment, Via
     from .stub_terminals import StubTerminal
 
 from .class_clearance_floors import (
@@ -2681,6 +2681,36 @@ def _build_net_number_map(pcb_text: str) -> dict[str, int]:
         next_id += 1
 
     return net_map
+
+
+def rekey_name_only_copper(
+    net_id: int,
+    net_name: str,
+    segments: list[Segment],
+    vias: list[Via],
+    net_map: dict[str, int],
+) -> tuple[int, list[Segment], list[Via]]:
+    """Give name-only kept copper its board net id (Issues #6970, #8658).
+
+    On a KiCad-10 name-only board (``(net "NAME")``, no numeric ids) the
+    optimizer parser returns every trace and via under net id 0.  When
+    ``net_name`` resolves to a positive id in ``net_map`` (from
+    :func:`_build_net_number_map`), that id replaces the 0 on the copper.
+    Copper whose name does not resolve -- genuinely anonymous copper -- stays
+    at id 0, so it remains foreign to every net.  Numeric-dialect copper is
+    returned unchanged because its id is never 0.
+
+    Shared by :func:`load_pcb_for_routing` and the CLI's preserved-copper
+    capture so the two cannot disagree about a kept trace's net.
+    """
+    mapped_id = net_map.get(net_name, 0)
+    if net_id != 0 or mapped_id <= 0:
+        return net_id, segments, vias
+    return (
+        mapped_id,
+        [replace(seg, net=mapped_id) for seg in segments],
+        [replace(via, net=mapped_id) for via in vias],
+    )
 
 
 def load_pads_for_analysis(pcb_path_or_text: str | Path) -> list[Pad]:
@@ -6216,11 +6246,7 @@ def load_pcb_for_routing(
             # parses as net 0, which would make it foreign to every real net.
             # Resolve it through the dialect-normalized net_map, as the
             # preserve_placement re-key below does.
-            mapped_id = net_map.get(net_name, 0)
-            if net_id == 0 and mapped_id > 0:
-                net_id = mapped_id
-                segs = [replace(seg, net=net_id) for seg in segs]
-                vias = [replace(via, net=net_id) for via in vias]
+            net_id, segs, vias = rekey_name_only_copper(net_id, net_name, segs, vias, net_map)
 
             route = Route(
                 net=net_id,
