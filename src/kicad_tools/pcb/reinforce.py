@@ -1,12 +1,36 @@
-"""Buttress-wire reinforcement: anchor-PTH row along a named net.
+"""Buttress-wire reinforcement: same-net PTH anchors along a routed net.
 
-Unit A (MVP) of the #4218 buttress-wire reinforcement design (Part 2 of
-the #4215 ampacity feature). This is a **post-route** pass that reads an
-already-routed board, walks the routed copper of one named net into
-ordered polylines, and emits a spaced row of **same-net** plated
-through-hole (PTH) anchor vias along the longest run. A solid-core copper
-wire ("buttress wire") is later soldered through the anchor row by hand to
-carry additional current.
+Unit A of the #4218 buttress-wire reinforcement design (Part 2 of the #4215
+ampacity feature), reworked for the owner's intended build in #8741. This is
+a **post-route** pass that reads an already-routed board, walks the routed
+copper of one named net into ordered polylines, and emits **same-net**
+plated through-hole (PTH) anchor vias for a buttress wire.
+
+The intended build: a hand-bent solid-core copper wire (default 16 AWG) is
+laid along a high-current trace and soldered to that trace along its whole
+length, held by **exactly two anchor holes, one at each end of the wire**.
+One wire stays on one copper layer, so a current path that changes layer is
+two wires.
+
+Two placement modes (``anchor_mode``, Issue #8742):
+
+* ``"ends"`` (the default): the net's copper is split into **legs** -- a
+  maximal run on ONE copper layer with no junction inside it -- and each leg
+  gets exactly two anchors, one near each end, none in between. Each end
+  anchor's pad edge sits ``end_offset_mm`` clear (measured along the leg) of
+  the same-net copper the leg end lands on: the component pad, a via, or the
+  trunk a branch tees off. A leg too short for two anchors is reported
+  ``too_short`` and gets none. A Y junction is a trunk (the longest
+  through-path) plus a branch; loops and higher-degree junctions are
+  reported ``unhandled``, never guessed. The per-leg result
+  (:class:`LegSummary`, on :attr:`ReinforceResult.legs`) keeps each leg's
+  polyline and its two anchor positions.
+* ``"spaced"``: the historical row of anchors every ``spacing_mm`` along the
+  longest run (or every run with ``all_runs``), unchanged.
+
+Until #8743 lands, anchors are still plain same-net vias that inherit the
+board's via tenting, and no solder-mask opening is emitted along the run, so
+the trace is not yet exposed for soldering.
 
 Structural template: ``kct stitch`` (``cli/stitch_cmd.py``) -- a
 load -> add-geometry-to-a-named-net -> save pass. Anchors are emitted via
@@ -26,13 +50,11 @@ Key properties:
   junction-splitting chainer
   (:func:`kicad_tools.router.optimizer.chain.sort_into_chains`) via a thin
   adapter from :class:`kicad_tools.schema.pcb.Segment` to
-  :class:`kicad_tools.router.primitives.Segment`. For the MVP the longest
-  run is anchored and any additional branches are *reported* as unhandled.
+  :class:`kicad_tools.router.primitives.Segment`.
 
-Out of scope (later units, tracked on #4218): mask-opening channel
-(Unit B), net-class ``reinforced`` wiring (Unit C), HV keep-away
-(Unit D), ampacity-credit coupling in #4217 (Unit E), first-class
-HV/creepage model (Unit F).
+Out of scope (later units, tracked on #4218 / #8741): mask-opening channel
+and mask-open anchors (#8743), wire-list sidecar (#8744), net-class
+``reinforced`` wiring (Unit C), ampacity-credit coupling in #4217 (Unit E).
 """
 
 from __future__ import annotations
@@ -41,6 +63,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from kicad_tools.core.geometry import rotate_pad_offset
 from kicad_tools.core.types import CopperLayer
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.physics.wire_gauge import (
@@ -49,7 +72,11 @@ from kicad_tools.physics.wire_gauge import (
     anchor_pad_for_drill,
 )
 from kicad_tools.router.board_clearance_rules import BoardClearanceRules
-from kicad_tools.router.current_paths import CurrentPathSpec, reinforcement_eligible_segment_ids
+from kicad_tools.router.current_paths import (
+    CurrentPathSpec,
+    reinforcement_eligible_segment_ids,
+    reinforcement_path_resolutions,
+)
 from kicad_tools.router.optimizer.algorithms import merge_collinear
 from kicad_tools.router.optimizer.chain import sort_into_chains
 from kicad_tools.router.optimizer.config import OptimizationConfig
@@ -62,7 +89,7 @@ from kicad_tools.router.via_clearance import (
     drill_hole_to_hole_clear,
     point_clear_of_copper,
 )
-from kicad_tools.schema.pcb import PCB, Segment
+from kicad_tools.schema.pcb import PCB, Pad, Segment
 
 # Default spacing between mid-run anchors (mm). Matches the architect's
 # ``ReinforcementSpec.anchor_spacing_mm`` default.
@@ -76,6 +103,39 @@ DEFAULT_ANCHOR_SPACING_MM = 15.0
 # the whole window) is still hard-refused -- the search is finite and cheap.
 NUDGE_MAX_FRACTION_OF_SPACING = 0.5
 NUDGE_STEPS = 4
+
+# Anchor placement modes (Issue #8742). ``ends`` is the default: two anchors
+# per single-layer leg, one at each end. ``spaced`` is the historical row.
+ANCHOR_MODE_ENDS = "ends"
+ANCHOR_MODE_SPACED = "spaced"
+ANCHOR_MODES = (ANCHOR_MODE_ENDS, ANCHOR_MODE_SPACED)
+DEFAULT_ANCHOR_MODE = ANCHOR_MODE_ENDS
+
+# ``ends`` mode: clearance (mm), measured along the leg, between an end
+# anchor's pad edge and the same-net copper the leg end lands on (component
+# pad, via, or the trunk a branch tees off). Proposed default pending the
+# operator's answer on #8741; a one-line change to override.
+DEFAULT_END_OFFSET_MM = 1.0
+
+# ``ends`` mode nudge: a refused end anchor is searched INWARD along the leg
+# only (never outward onto the pad), by at most ``END_NUDGE_MAX_MM`` in
+# ``END_NUDGE_STEPS`` increments, and never past the other end's anchor.
+END_NUDGE_MAX_MM = 2.0
+END_NUDGE_STEPS = 8
+
+# Leg kinds and statuses reported on :class:`LegSummary` (Issue #8742).
+LEG_KIND_RUN = "run"
+LEG_KIND_TRUNK = "trunk"
+LEG_KIND_BRANCH = "branch"
+LEG_FULL = "full"
+LEG_PARTIAL = "partial"
+LEG_UNANCHORED = "unanchored"
+LEG_TOO_SHORT = "too_short"
+LEG_UNHANDLED = "unhandled"
+
+# Step (mm) of the march that finds where a leg leaves the copper it starts
+# on; the crossing is then bisected to well below a micron.
+_EXIT_MARCH_STEP_MM = 0.02
 
 # Config used for the tier-3 within-run collinear merge (#4319). Only
 # ``tolerance`` is consulted by :func:`merge_collinear`'s connectivity /
@@ -128,6 +188,54 @@ class PlacedAnchor:
 
     x: float
     y: float
+
+
+@dataclass
+class LegSummary:
+    """One buttress-wire leg in ``ends`` mode (Issue #8742).
+
+    A leg is a maximal run of the net's eligible copper on ONE copper layer
+    with no junction inside it except at its ends -- one hand-bent wire. This
+    is the public seam later slices consume (#8743 opens the solder mask
+    along :attr:`polyline`; #8744 lists the wires), so the polyline is kept,
+    not only the anchors.
+
+    Coordinates are board-relative, like :class:`PlacedAnchor`.
+    """
+
+    net: str
+    layer: str
+    #: ``run`` (a plain leg), ``trunk`` (the longest through-path across a Y
+    #: junction) or ``branch`` (the third arm of that Y, oriented from the
+    #: junction to its free end).
+    kind: str
+    #: Ordered centreline vertices, collinear interior vertices removed.
+    polyline: list[tuple[float, float]]
+    length_mm: float
+    #: The anchors actually placed on this leg this pass, in leg order
+    #: (0, 1 or 2). In ``full`` status: ``[start-end anchor, far-end anchor]``.
+    anchors: list[PlacedAnchor] = field(default_factory=list)
+    #: ``full`` (2 placed) / ``partial`` (1) / ``unanchored`` (0: refused or
+    #: not selected) / ``too_short`` / ``unhandled`` (loop, degree>=4 or
+    #: multi-junction topology, or copper on a layer this call does not
+    #: process).
+    status: str = LEG_UNANCHORED
+    #: Why the leg is not ``full`` (empty when it is).
+    reason: str = ""
+    #: Widest track width (mm) on the leg.
+    width_mm: float = 0.0
+    #: Names of the declared current paths covering this leg (empty without
+    #: ``current_paths``).
+    paths: list[str] = field(default_factory=list)
+
+
+@dataclass
+class UnresolvedPath:
+    """A declared current path on the net that could not be used (#8742)."""
+
+    path: str
+    status: str
+    reason: str
 
 
 @dataclass
@@ -187,6 +295,10 @@ class ReinforceResult:
     anchor_pad_mm: float
     spacing_mm: float
     layer: str = ""
+    #: ``ends`` or ``spaced`` (Issue #8742).
+    anchor_mode: str = DEFAULT_ANCHOR_MODE
+    #: ``ends`` mode end offset (mm); reported in ``spaced`` mode too.
+    end_offset_mm: float = DEFAULT_END_OFFSET_MM
     #: Segments chained into the primary anchored (longest anchored) run,
     #: after the tier-3 collinear merge.
     run_segment_count: int = 0
@@ -200,6 +312,10 @@ class ReinforceResult:
     runs: list[RunSummary] = field(default_factory=list)
     placed: list[PlacedAnchor] = field(default_factory=list)
     refused: list[RefusedAnchor] = field(default_factory=list)
+    #: ``ends`` mode: one entry per leg (empty in ``spaced`` mode).
+    legs: list[LegSummary] = field(default_factory=list)
+    #: Declared current paths on this net that did not resolve (both modes).
+    unresolved_paths: list[UnresolvedPath] = field(default_factory=list)
 
     @property
     def placed_count(self) -> int:
@@ -707,27 +823,38 @@ def reinforce_net(
     net_class_clearances: Mapping[str, float] | None = None,
     pairwise_clearance: PairwiseClearanceTable | None = None,
     board_rules: BoardClearanceRules | None = None,
+    anchor_mode: str = DEFAULT_ANCHOR_MODE,
+    end_offset_mm: float = DEFAULT_END_OFFSET_MM,
 ) -> ReinforceResult:
-    """Emit a spaced same-net PTH anchor row along a routed net's trace.
+    """Emit same-net PTH buttress-wire anchors along a routed net's trace.
 
     Post-route pass: chains the target net's routed segments into ordered
-    polylines and places gauge-sized plated-PTH anchor vias at both endpoints
-    and every ``spacing_mm`` along the selected run(s). Each candidate anchor
-    is clearance-checked against all other-net copper; a colliding candidate is
-    nudged a bounded distance along the run's arc-length axis and, only if no
+    polylines and places gauge-sized plated-PTH anchor vias. Each candidate
+    anchor is clearance-checked against all other-net copper; a colliding
+    candidate is nudged a bounded distance along the run and, only if no
     clear position is found, refused (reported, not placed).
 
-    By default (``all_runs=False``) only the single longest run is anchored --
-    the historical MVP behavior. A multi-branch HV net (T/Y fan-out at
-    junctions) splits into several runs; passing ``all_runs=True`` anchors
-    *every* run so N-1 branches are no longer left un-reinforced (#4319).
+    ``anchor_mode="ends"`` (default, Issue #8742) places exactly two anchors
+    per single-layer leg, one near each end and none between, for a wire
+    soldered along the trace and held only at its ends; see the module
+    docstring and :class:`LegSummary`. With ``current_paths`` declared for the
+    net, every leg of every resolved eligible path is anchored (on any copper
+    layer, one leg per layer); without, one layer is processed per call and
+    only the longest leg is anchored unless ``all_runs``.
+
+    ``anchor_mode="spaced"`` is the historical behaviour: anchors at both
+    endpoints and every ``spacing_mm`` along the selected run(s) of one layer.
+    By default (``all_runs=False``) only the single longest run is anchored; a
+    multi-branch net (T/Y fan-out at junctions) splits into several runs and
+    ``all_runs=True`` anchors *every* run (#4319).
 
     Args:
         pcb: A loaded :class:`~kicad_tools.schema.pcb.PCB`.
         net_name: Target net name (must have routed copper).
         wire_gauge_awg: Buttress-wire gauge (default 16 AWG). Sizes the
             anchor drill/pad.
-        spacing_mm: Arc-length spacing between mid-run anchors (mm).
+        spacing_mm: Arc-length spacing between mid-run anchors (mm);
+            ``spaced`` mode only.
         design_rules: Manufacturer :class:`DesignRules` supplying
             ``min_annular_ring_mm`` (anchor pad sizing), ``min_clearance_mm``
             (other-net clearance), and ``min_hole_to_hole_mm``. Falls back to
@@ -764,17 +891,29 @@ def reinforce_net(
         pairwise_clearance: Optional ``--voltage-map`` pairwise table (#8085);
             when given, the requirement for (target, obstacle) is raised to
             the table's value. ``None`` keeps the scalar-floor behavior.
+        anchor_mode: ``"ends"`` (default) or ``"spaced"`` (Issue #8742).
+        end_offset_mm: ``ends`` mode: clearance in mm, measured along the leg,
+            from an end anchor's pad edge to the same-net pad / via / trunk
+            copper the leg end lands on (default 1.0).
 
     Returns:
         A :class:`ReinforceResult` summarising placed/refused anchors, the
-        primary anchored run, and a per-run :class:`RunSummary` list.
+        primary anchored run, a per-run :class:`RunSummary` list, and (in
+        ``ends`` mode) a per-leg :class:`LegSummary` list.
 
     Raises:
-        ReinforceError: If the net does not exist, has no routed copper, or
-            ``spacing_mm`` is non-positive.
+        ReinforceError: If the net does not exist, has no routed copper,
+            ``spacing_mm`` is non-positive, ``end_offset_mm`` is negative or
+            ``anchor_mode`` is unknown.
     """
     if spacing_mm <= 0:
         raise ReinforceError(f"spacing_mm must be positive, got {spacing_mm}")
+    if anchor_mode not in ANCHOR_MODES:
+        raise ReinforceError(
+            f"anchor_mode must be one of {', '.join(ANCHOR_MODES)}, got {anchor_mode!r}"
+        )
+    if end_offset_mm < 0 or not math.isfinite(end_offset_mm):
+        raise ReinforceError(f"end_offset_mm must be >= 0, got {end_offset_mm}")
 
     rules = design_rules or _FALLBACK_DESIGN_RULES
 
@@ -804,10 +943,45 @@ def reinforce_net(
         anchor_drill_mm=anchor_drill,
         anchor_pad_mm=anchor_pad,
         spacing_mm=spacing_mm,
+        anchor_mode=anchor_mode,
+        end_offset_mm=end_offset_mm,
     )
 
     if not net_segments:
         raise ReinforceError(f"net {net_name!r} has no routed copper to reinforce")
+
+    # Declarations on this net that cannot be used are reported in both
+    # modes, never silently skipped (Issue #8742).
+    net_path_specs = [spec for spec in (current_paths or ()) if spec.net_name == net_name]
+    partition = reinforcement_path_resolutions(pcb, net_path_specs) if net_path_specs else None
+    if partition is not None:
+        result.unresolved_paths = [
+            UnresolvedPath(path=res.spec.name, status=res.status, reason=res.reason)
+            for res in partition.unresolved
+        ]
+
+    if anchor_mode == ANCHOR_MODE_ENDS:
+        if layer is not None and layer not in {s.layer for s in net_segments}:
+            raise ReinforceError(f"net {net_name!r} has no routed copper on layer {layer!r}")
+        return _reinforce_ends(
+            pcb,
+            result,
+            net_segments=net_segments,
+            target_net_number=target_net_number,
+            eligible_resolutions=(partition.eligible if partition is not None else None),
+            layer=layer,
+            all_runs=all_runs,
+            min_run_length_mm=min_run_length_mm,
+            rules=rules,
+            policy=_ClearancePolicy(
+                fab_floor=rules.min_clearance_mm,
+                target_net=net_name,
+                class_floors=net_class_clearances or {},
+                pairwise=pairwise_clearance,
+                board_rules=board_rules,
+            ),
+            dry_run=dry_run,
+        )
 
     # Group by layer; pick the layer with the most cumulative length (MVP).
     by_layer: dict[str, list[Segment]] = {}
@@ -826,7 +1000,6 @@ def reinforce_net(
     # identity through the walk so path eligibility remains physical.
     original_ids: dict[int, int] = {}
     runs = _chain_polylines(by_layer[target_layer], original_ids=original_ids)
-    net_path_specs = [spec for spec in (current_paths or ()) if spec.net_name == net_name]
     classified_runs: list[tuple[list[Segment], str | None]] = []
     if net_path_specs:
         allowed_ids = reinforcement_eligible_segment_ids(pcb, net_path_specs)
@@ -967,4 +1140,542 @@ def reinforce_net(
             )
         )
 
+    return result
+
+
+# --------------------------------------------------------------------------
+# ``ends`` mode (Issue #8742): two anchors per single-layer leg
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class _LegCandidate:
+    """A leg before placement: oriented segments plus topology verdict."""
+
+    layer: str
+    kind: str
+    run: list[Segment]
+    #: Extra copper extent (mm) at the leg START that is not a pad or via --
+    #: the trunk half-width for a branch, which starts at the junction.
+    start_extra_mm: float = 0.0
+    #: ``LEG_UNHANDLED`` when topology (or the layer selection) rules the leg
+    #: out before placement; ``None`` when it may be anchored.
+    status: str | None = None
+    reason: str = ""
+
+
+def _run_points(run: list[Segment]) -> list[tuple[float, float]]:
+    return [run[0].start] + [s.end for s in run]
+
+
+def _reverse_run(run: list[Segment], original_ids: dict[int, int]) -> list[Segment]:
+    """Walk ``run`` the other way, keeping each copy's original PCB identity."""
+    out: list[Segment] = []
+    for s in reversed(run):
+        flipped = Segment(
+            start=s.end,
+            end=s.start,
+            width=s.width,
+            layer=s.layer,
+            net_number=s.net_number,
+            net_name=s.net_name,
+            uuid=s.uuid,
+        )
+        original_ids[id(flipped)] = original_ids.get(id(s), id(s))
+        out.append(flipped)
+    return out
+
+
+def _vertex(p: tuple[float, float]) -> tuple[float, float]:
+    return (round(p[0], 4), round(p[1], 4))
+
+
+def _derive_legs(
+    segments: list[Segment], layer: str, original_ids: dict[int, int]
+) -> list[_LegCandidate]:
+    """Split one layer's copper into wire legs (Issue #8742).
+
+    The junction-aware chainer already cuts the copper at every degree>=3
+    vertex, so each chain is a junction-free run. Chains are then grouped
+    into connected components by their end vertices:
+
+    * a component that is a single chain is one ``run`` leg;
+    * a single Y (exactly one degree-3 junction and three chains) becomes a
+      ``trunk`` -- the two longest arms joined through the junction, i.e. the
+      longest simple through-path -- plus one ``branch`` oriented from the
+      junction to its free end;
+    * a loop (a closed chain, or a component with as many chains as end
+      vertices), a degree>=4 junction, or more than one junction is reported
+      ``unhandled`` chain by chain: no single wire layout is implied, so none
+      is guessed.
+    """
+    runs = _chain_polylines(segments, original_ids=original_ids)
+    if not runs:
+        return []
+
+    ends = [(_vertex(r[0].start), _vertex(r[-1].end)) for r in runs]
+    parent: dict[tuple[float, float], tuple[float, float]] = {}
+
+    def find(v: tuple[float, float]) -> tuple[float, float]:
+        parent.setdefault(v, v)
+        while parent[v] != v:
+            parent[v] = parent[parent[v]]
+            v = parent[v]
+        return v
+
+    for a, b in ends:
+        parent[find(a)] = find(b)
+
+    components: dict[tuple[float, float], list[int]] = {}
+    for i, (a, _) in enumerate(ends):
+        components.setdefault(find(a), []).append(i)
+
+    legs: list[_LegCandidate] = []
+    for idxs in components.values():
+        degree: dict[tuple[float, float], int] = {}
+        for i in idxs:
+            for v in ends[i]:
+                degree[v] = degree.get(v, 0) + 1
+        closed = any(ends[i][0] == ends[i][1] for i in idxs)
+        junctions = [v for v, d in degree.items() if d >= 3]
+        reason = ""
+        if closed or len(idxs) >= len(degree):
+            reason = "copper loop on this layer: a closed ring has no two wire ends"
+        elif max(degree.values()) >= 4:
+            reason = (
+                f"junction of degree {max(degree.values())} on this layer: only a "
+                "single Y (one trunk plus one branch) is handled"
+            )
+        elif len(junctions) > 1:
+            reason = (
+                f"{len(junctions)} junctions on one connected copper tree: only a "
+                "single Y (one trunk plus one branch) is handled"
+            )
+        elif len(junctions) == 1 and len(idxs) != 3:
+            reason = "unrecognised junction topology"
+        if reason:
+            legs.extend(
+                _LegCandidate(layer, LEG_KIND_RUN, runs[i], status=LEG_UNHANDLED, reason=reason)
+                for i in idxs
+            )
+            continue
+        if not junctions:
+            legs.extend(_LegCandidate(layer, LEG_KIND_RUN, runs[i]) for i in idxs)
+            continue
+
+        junction = junctions[0]
+        # Every arm walked AWAY from the junction; the two longest form the
+        # trunk (ties keep chainer order, so the choice is deterministic).
+        arms = [
+            runs[i]
+            if _vertex(runs[i][0].start) == junction
+            else _reverse_run(runs[i], original_ids)
+            for i in idxs
+        ]
+        arms.sort(key=_run_length, reverse=True)
+        trunk = _reverse_run(arms[0], original_ids) + arms[1]
+        trunk_half_width = max(arms[0][0].width, arms[1][0].width) / 2.0
+        legs.append(_LegCandidate(layer, LEG_KIND_TRUNK, trunk))
+        legs.append(_LegCandidate(layer, LEG_KIND_BRANCH, arms[2], start_extra_mm=trunk_half_width))
+    return legs
+
+
+def _pad_copper_contains(pad: Pad, center: tuple[float, float], point: tuple[float, float]) -> bool:
+    """True when ``point`` lies on ``pad``'s copper (board frame).
+
+    ``pad.rotation`` is absolute. Board offsets come from pad-local ones by
+    :func:`~kicad_tools.core.geometry.rotate_pad_offset` (KiCad's negated-angle
+    convention), so the inverse -- board to pad-local -- is the same function
+    at the negated angle. Circle / oval (capsule) / rect / roundrect are exact;
+    trapezoid and chamfered rect use their bounding rectangle, and custom pads
+    the disc circumscribing the anchor rectangle -- both over-estimate, which
+    only moves the anchor further inward.
+    """
+    try:
+        half_w = float(pad.size[0]) / 2.0
+        half_h = float(pad.size[1]) / 2.0
+    except (TypeError, ValueError, IndexError):
+        return False
+    if half_w <= 0.0 or half_h <= 0.0:
+        return False
+    eps = 1e-6
+    lx, ly = rotate_pad_offset(
+        point[0] - center[0], point[1] - center[1], -float(pad.rotation or 0.0)
+    )
+    shape = pad.shape
+    if shape == "circle":
+        return math.hypot(lx, ly) <= max(half_w, half_h) + eps
+    if shape in ("oval", "roundrect"):
+        if shape == "oval":
+            radius = min(half_w, half_h)
+        else:
+            ratio = min(max(float(pad.roundrect_rratio), 0.0), 0.5)
+            radius = 2.0 * min(half_w, half_h) * ratio
+        dx = max(abs(lx) - (half_w - radius), 0.0)
+        dy = max(abs(ly) - (half_h - radius), 0.0)
+        return math.hypot(dx, dy) <= radius + eps
+    if shape in ("rect", "trapezoid", "chamfered_rect"):
+        return abs(lx) <= half_w + eps and abs(ly) <= half_h + eps
+    return math.hypot(lx, ly) <= math.hypot(half_w, half_h) + eps
+
+
+@dataclass
+class _EndFeature:
+    """Same-net copper a leg end can land on: a pad or a non-anchor via."""
+
+    x: float
+    y: float
+    #: Bounding radius, for a cheap reject before the exact test.
+    bound: float
+    layers: tuple[str, ...]
+    pad: Pad | None = None
+    via_radius: float = 0.0
+
+    def on_layer(self, layer: str) -> bool:
+        return not self.layers or layer in self.layers or "*.Cu" in self.layers
+
+    def contains(self, p: tuple[float, float]) -> bool:
+        if math.hypot(p[0] - self.x, p[1] - self.y) > self.bound + 1e-6:
+            return False
+        if self.pad is not None:
+            return _pad_copper_contains(self.pad, (self.x, self.y), p)
+        return math.hypot(p[0] - self.x, p[1] - self.y) <= self.via_radius + 1e-6
+
+
+def _same_net_end_features(
+    pcb: PCB, target_net: int, anchor_drill: float, anchor_pad: float
+) -> list[_EndFeature]:
+    """Same-net pads and vias (previous anchors excluded) for end offsets."""
+    features: list[_EndFeature] = []
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_number != target_net or pad.type == "np_thru_hole":
+                continue
+            off = rotate_pad_offset(pad.position[0], pad.position[1], fp.rotation)
+            try:
+                bound = math.hypot(float(pad.size[0]), float(pad.size[1])) / 2.0
+            except (TypeError, ValueError, IndexError):
+                continue
+            # A plated through-hole pad has copper on every layer.
+            layers = () if pad.type == "thru_hole" else tuple(pad.layers)
+            features.append(
+                _EndFeature(fp.position[0] + off[0], fp.position[1] + off[1], bound, layers, pad)
+            )
+    for via in pcb.vias:
+        if via.net_number != target_net:
+            continue
+        if abs(via.drill - anchor_drill) < 1e-6 and abs(via.size - anchor_pad) < 1e-6:
+            continue  # a previous anchor, not the copper a leg ends on
+        vx, vy = via.position
+        features.append(_EndFeature(vx, vy, via.size / 2.0, (), via_radius=via.size / 2.0))
+    return features
+
+
+def _exit_arc(points: list[tuple[float, float]], contains) -> float | None:
+    """Arc length at which the polyline from ``points[0]`` leaves ``contains``.
+
+    ``None`` when the copper covers the whole polyline.
+    """
+    cum = _cumulative_arc(points)
+    total = cum[-1]
+    prev = 0.0
+    t = 0.0
+    while t < total - 1e-12:
+        t = min(total, t + _EXIT_MARCH_STEP_MM)
+        if not contains(_point_at_arc(points, cum, t)):
+            lo, hi = prev, t
+            for _ in range(40):
+                mid = (lo + hi) / 2.0
+                if contains(_point_at_arc(points, cum, mid)):
+                    lo = mid
+                else:
+                    hi = mid
+            return hi
+        prev = t
+    return None
+
+
+def _end_extent(
+    points: list[tuple[float, float]],
+    layer: str,
+    features: list[_EndFeature],
+    extra_mm: float,
+) -> float | None:
+    """Arc length from ``points[0]`` to the edge of the copper it starts on.
+
+    The largest of: the exit from every same-net pad / via on ``layer`` that
+    contains the start point (measured along the leg), and ``extra_mm`` (the
+    trunk half-width at a branch's junction end). ``0.0`` for a free track
+    end. ``None`` when that copper covers the whole leg.
+    """
+    extent = extra_mm
+    start = points[0]
+    for feat in features:
+        if not feat.on_layer(layer) or not feat.contains(start):
+            continue
+        t = _exit_arc(points, feat.contains)
+        if t is None:
+            return None
+        extent = max(extent, t)
+    return extent
+
+
+def _reinforce_ends(
+    pcb: PCB,
+    result: ReinforceResult,
+    *,
+    net_segments: list[Segment],
+    target_net_number: int,
+    eligible_resolutions: Sequence | None,
+    layer: str | None,
+    all_runs: bool,
+    min_run_length_mm: float | None,
+    rules: DesignRules,
+    policy: _ClearancePolicy,
+    dry_run: bool,
+) -> ReinforceResult:
+    """``anchor_mode="ends"``: two anchors per leg (Issue #8742)."""
+    net_name = result.net_name
+    anchor_pad = result.anchor_pad_mm
+    anchor_drill = result.anchor_drill_mm
+    end_offset = result.end_offset_mm
+    gated = eligible_resolutions is not None
+
+    by_layer: dict[str, list[Segment]] = {}
+    for s in net_segments:
+        by_layer.setdefault(s.layer, []).append(s)
+
+    original_ids: dict[int, int] = {}
+    candidates: list[_LegCandidate] = []
+    excluded_runs: list[list[Segment]] = []
+    path_names: dict[int, list[str]] = {}
+    target_layer: str | None = layer
+
+    if gated:
+        for res in eligible_resolutions or ():
+            for seg in res.segments:
+                covering = path_names.setdefault(id(seg), [])
+                if res.spec.name not in covering:
+                    covering.append(res.spec.name)
+        for lay in sorted(by_layer):
+            segs = by_layer[lay]
+            eligible = [s for s in segs if id(s) in path_names]
+            excluded_runs.extend(_chain_polylines([s for s in segs if id(s) not in path_names]))
+            legs = _derive_legs(eligible, lay, original_ids)
+            if layer is not None and lay != layer:
+                for c in legs:
+                    if c.status is None:
+                        c.status = LEG_UNHANDLED
+                        c.reason = f"on {lay}: --layer restricts this call to {layer}"
+            candidates.extend(legs)
+    else:
+        if target_layer is None:
+            target_layer = max(by_layer, key=lambda lay: sum(_seg_length(s) for s in by_layer[lay]))
+        for lay in sorted(by_layer):
+            legs = _derive_legs(by_layer[lay], lay, original_ids)
+            if lay != target_layer:
+                for c in legs:
+                    if c.status is None:
+                        c.status = LEG_UNHANDLED
+                        c.reason = (
+                            f"on {lay}: without --current-paths one copper layer is "
+                            f"processed per call (this call: {target_layer}; pass "
+                            f"--layer {lay})"
+                        )
+            candidates.extend(legs)
+
+    if not candidates and not excluded_runs:
+        raise ReinforceError(f"net {net_name!r} produced no walkable polyline")
+
+    geoms = [_run_geometry(c.run) for c in candidates]
+
+    # Selection mirrors ``spaced``: --min-run-length reports (never drops)
+    # short legs; without declared paths only the longest leg is anchored
+    # unless --all-runs. With declared paths the declaration IS the
+    # selection: every eligible leg is anchored.
+    not_selected: dict[int, str] = {}
+    selectable = [i for i, c in enumerate(candidates) if c.status is None]
+    if min_run_length_mm is not None:
+        for i in selectable:
+            if geoms[i].length_mm < min_run_length_mm:
+                not_selected[i] = f"shorter than --min-run-length {min_run_length_mm:g} mm"
+        selectable = [i for i in selectable if i not in not_selected]
+    if not gated and not all_runs and selectable:
+        longest = max(selectable, key=lambda i: (geoms[i].length_mm, -i))
+        for i in selectable:
+            if i != longest:
+                not_selected[i] = (
+                    "not selected: without --all-runs only the longest leg is anchored"
+                )
+
+    # Trunks / plain runs before branches, so a branch's junction-side anchor
+    # steers clear of the trunk anchors; longest first within each.
+    order = sorted(
+        range(len(candidates)),
+        key=lambda i: (candidates[i].kind == LEG_KIND_BRANCH, -geoms[i].length_mm, i),
+    )
+
+    other = _collect_other_net_copper(pcb, target_net_number, anchor_drill, anchor_pad)
+    features = _same_net_end_features(pcb, target_net_number, anchor_drill, anchor_pad)
+    dedup_floor = max(anchor_pad, anchor_drill + rules.min_hole_to_hole_mm)
+    placed_positions: list[tuple[float, float]] = []
+    step = END_NUDGE_MAX_MM / END_NUDGE_STEPS if END_NUDGE_STEPS > 0 else 0.0
+    nudges = [k * step for k in range(END_NUDGE_STEPS + 1)] if step > 0 else [0.0]
+
+    def try_place(points, cum, arcs):
+        """First clear arc among ``arcs``; else the first violation seen."""
+        first: _Violation | None = None
+        for t in arcs:
+            cx, cy = _point_at_arc(points, cum, t)
+            if _too_close((cx, cy), placed_positions, dedup_floor):
+                continue
+            violation = _position_violation(cx, cy, anchor_pad, anchor_drill, rules, other, policy)
+            if violation is None:
+                return t, (cx, cy), None
+            if first is None:
+                first = violation
+        return None, None, first
+
+    def refuse(points, cum, t, violation: _Violation | None) -> None:
+        bx, by = _point_at_arc(points, cum, t)
+        result.refused.append(
+            RefusedAnchor(
+                x=bx,
+                y=by,
+                reason=(
+                    "other-net clearance/hole-to-hole violation"
+                    if violation
+                    else "no clear inward position: within one anchor pad of another anchor"
+                ),
+                rule=violation.rule if violation else "",
+                required_mm=violation.required_mm if violation else 0.0,
+                actual_mm=violation.actual_mm if violation else 0.0,
+                obstacle_net=violation.obstacle_net if violation else "",
+            )
+        )
+
+    attempted_flags: list[bool] = []
+    for index in order:
+        cand = candidates[index]
+        g = geoms[index]
+        names: list[str] = []
+        for s in cand.run:
+            for name in path_names.get(original_ids.get(id(s), id(s)), ()):
+                if name not in names:
+                    names.append(name)
+        leg = LegSummary(
+            net=net_name,
+            layer=cand.layer,
+            kind=cand.kind,
+            polyline=list(g.points),
+            length_mm=g.length_mm,
+            width_mm=max(s.width for s in cand.run),
+            paths=names,
+        )
+        refused_here = 0
+        attempted_here = False
+        if cand.status is not None:
+            leg.status, leg.reason = cand.status, cand.reason
+        elif index in not_selected:
+            leg.status, leg.reason = LEG_UNANCHORED, not_selected[index]
+        else:
+            attempted_here = True
+            points = g.points
+            cum = _cumulative_arc(points)
+            total = cum[-1]
+            e0 = _end_extent(points, cand.layer, features, cand.start_extra_mm)
+            e1 = _end_extent(points[::-1], cand.layer, features, 0.0)
+            half = anchor_pad / 2.0
+            if e0 is None or e1 is None:
+                leg.status = LEG_TOO_SHORT
+                leg.reason = "same-net pad/via copper covers the whole leg"
+            else:
+                t0 = e0 + end_offset + half
+                t1 = total - (e1 + end_offset + half)
+                if t1 - t0 < dedup_floor - 1e-9:
+                    leg.status = LEG_TOO_SHORT
+                    leg.reason = (
+                        f"{total:.3f} mm leg needs {total - (t1 - t0) + dedup_floor:.3f} mm "
+                        f"for two {anchor_pad:.3f} mm anchors at a {end_offset:g} mm end offset"
+                    )
+                else:
+                    # Start anchor: inward only, never past the far anchor.
+                    start_arcs = [t0 + d for d in nudges if t0 + d <= t1 - dedup_floor + 1e-9]
+                    chosen_t, start_pos, v0 = try_place(points, cum, start_arcs)
+                    start_t = t0 if chosen_t is None else chosen_t
+                    if start_pos is not None:
+                        leg.anchors.append(PlacedAnchor(x=start_pos[0], y=start_pos[1]))
+                        placed_positions.append(start_pos)
+                    else:
+                        refuse(points, cum, t0, v0)
+                        refused_here += 1
+                    # Far anchor: inward only, never past the start anchor.
+                    end_arcs = [t1 - d for d in nudges if t1 - d >= start_t + dedup_floor - 1e-9]
+                    _, end_pos, v1 = try_place(points, cum, end_arcs)
+                    if end_pos is not None:
+                        leg.anchors.append(PlacedAnchor(x=end_pos[0], y=end_pos[1]))
+                        placed_positions.append(end_pos)
+                    else:
+                        refuse(points, cum, t1, v1)
+                        refused_here += 1
+                    for a in leg.anchors:
+                        if not dry_run:
+                            pcb.add_via(
+                                a.x,
+                                a.y,
+                                size=anchor_pad,
+                                drill=anchor_drill,
+                                layers=("F.Cu", "B.Cu"),
+                                net=net_name,
+                                dedupe=True,
+                            )
+                        result.placed.append(PlacedAnchor(x=a.x, y=a.y))
+                    if len(leg.anchors) == 2:
+                        leg.status = LEG_FULL
+                    elif leg.anchors:
+                        leg.status = LEG_PARTIAL
+                        leg.reason = "1 of 2 end anchors refused (see refused)"
+                    else:
+                        leg.status = LEG_UNANCHORED
+                        leg.reason = "both end anchors refused (see refused)"
+        result.legs.append(leg)
+        attempted_flags.append(attempted_here)
+        result.runs.append(
+            RunSummary(
+                run_index=len(result.runs),
+                length_mm=g.length_mm,
+                segment_count=g.segment_count,
+                anchors_needed=2,
+                anchors_placed=len(leg.anchors),
+                anchors_refused=refused_here,
+            )
+        )
+
+    excluded_reason = (
+        "excluded by declared current-path intent (Issue #4980): not covered by a "
+        f"resolved, reinforcement-eligible CurrentPathSpec for net {net_name!r}"
+    )
+    for run in sorted(excluded_runs, key=_run_length, reverse=True):
+        g = _run_geometry(run)
+        result.runs.append(
+            RunSummary(
+                run_index=len(result.runs),
+                length_mm=g.length_mm,
+                segment_count=g.segment_count,
+                anchors_needed=0,
+                anchors_placed=0,
+                anchors_refused=0,
+                path_excluded_reason=excluded_reason,
+            )
+        )
+
+    attempted = [(leg, result.runs[i]) for i, leg in enumerate(result.legs) if attempted_flags[i]]
+    if attempted:
+        primary_leg, primary_run = max(attempted, key=lambda item: item[0].length_mm)
+        result.run_segment_count = primary_run.segment_count
+        result.run_length_mm = primary_run.length_mm
+        result.layer = target_layer if target_layer is not None else primary_leg.layer
+    else:
+        result.layer = target_layer or (result.legs[0].layer if result.legs else "")
+    result.unhandled_runs = len(result.runs) - len(attempted)
     return result
