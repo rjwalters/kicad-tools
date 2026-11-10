@@ -29,10 +29,13 @@ import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.cost.suggest import parse_component_value
 from kicad_tools.schema.bom import extract_bom
+
+if TYPE_CHECKING:
+    from kicad_tools.schema.pcb import Segment, Via
 
 # Relative tolerance for comparing parsed passive magnitudes.  Mirrors
 # ``kicad_tools.export.lcsc_value_check.VALUE_REL_TOLERANCE`` so both consumers
@@ -219,6 +222,11 @@ class SyncAnalysis:
             net is not the net the schematic connects the pin to (compared by
             connectivity, not net-name equality; Issue #8703).  Each entry has
             ``reference``, ``pad``, ``pcb_net`` and ``schematic_net``.
+        stranded_copper: Tracks/vias still carrying the *old* net of a pad in
+            ``pad_net_mismatches`` and electrically attached to that pad
+            (Issue #8705).  Each entry has ``kind`` (``segment``|``via``),
+            ``uuid``, ``net``, ``pad`` (``REF.PAD``), ``layer``, ``position``
+            and ``locked`` (``"true"``/``"false"``).
     """
 
     matches: list[SyncMatch] = field(default_factory=list)
@@ -229,6 +237,7 @@ class SyncAnalysis:
     footprint_mismatches: list[dict[str, str]] = field(default_factory=list)
     add_footprint_actions: list[dict[str, str]] = field(default_factory=list)
     pad_net_mismatches: list[dict[str, str]] = field(default_factory=list)
+    stranded_copper: list[dict[str, str]] = field(default_factory=list)
 
     @property
     def high_confidence_matches(self) -> list[SyncMatch]:
@@ -253,6 +262,7 @@ class SyncAnalysis:
             or self.footprint_mismatches
             or self.add_footprint_actions
             or self.pad_net_mismatches
+            or self.stranded_copper
         )
 
     @property
@@ -264,6 +274,7 @@ class SyncAnalysis:
             and not self.value_mismatches
             and not self.footprint_mismatches
             and not self.pad_net_mismatches
+            and not self.stranded_copper
             and not any(m.actions for m in self.matches)
         )
 
@@ -291,6 +302,8 @@ class SyncAnalysis:
                     f"    {mm['reference']}.{mm['pad']}: "
                     f"{mm['pcb_net'] or '(unconnected)'} -> {mm['schematic_net']}"
                 )
+        if self.stranded_copper:
+            lines.append(f"  Stranded copper:      {len(self.stranded_copper)}")
         if self.schematic_orphans:
             lines.append(f"  Schematic-only:       {len(self.schematic_orphans)}")
         if self.pcb_orphans:
@@ -312,6 +325,7 @@ class SyncAnalysis:
             "footprint_mismatches": self.footprint_mismatches,
             "add_footprint_actions": self.add_footprint_actions,
             "pad_net_mismatches": self.pad_net_mismatches,
+            "stranded_copper": self.stranded_copper,
             "summary": {
                 "total_matches": len(self.matches),
                 "high_confidence": len(self.high_confidence_matches),
@@ -319,6 +333,7 @@ class SyncAnalysis:
                 "low_confidence": len(self.low_confidence_matches),
                 "add_footprint": len(self.add_footprint_actions),
                 "pad_net_mismatches": len(self.pad_net_mismatches),
+                "stranded_copper": len(self.stranded_copper),
             },
         }
 
@@ -634,8 +649,148 @@ class Reconciler:
                 analysis.add_footprint_actions.append(action)
 
         analysis.pad_net_mismatches = self._find_pad_net_mismatches()
+        analysis.stranded_copper = self._find_stranded_copper(analysis.pad_net_mismatches)
 
         return analysis
+
+    def _find_stranded_copper(self, mismatches: list[dict[str, str]]) -> list[dict[str, str]]:
+        """Report copper left on the old net of pads whose net changed (Issue #8705)."""
+        if not mismatches or self._pcb_path is None:
+            return []
+        from kicad_tools.schema.pcb import PCB
+
+        try:
+            pcb = PCB.load(str(self._pcb_path))
+        except Exception as exc:
+            logger.warning("Stranded-copper scan skipped: %s", exc)
+            return []
+        return [info for _obj, info in self._collect_stranded(pcb, mismatches)]
+
+    @staticmethod
+    def _collect_stranded(
+        pcb, mismatches: list[dict[str, str]]
+    ) -> list[tuple[Any, dict[str, str]]]:
+        """Walk copper attached to each mismatched pad on its old (PCB) net.
+
+        Seeds are segment endpoints / vias within 0.01 mm of the pad centre
+        (the tolerance ``PCB.footprint_has_traces`` uses) on the old net.  The
+        walk continues through copper touching already-stranded copper on the
+        same net only along pass-through chains: it stops at junctions, at any
+        pad that still legitimately carries that net, and at other mismatched
+        pads (their own seeds), so routing that serves other pads is kept.  Evaluated against the PCB
+        before nets are reassigned.
+
+        Returns:
+            ``(Segment | Via, info-dict)`` pairs, de-duplicated.
+        """
+        tol = 0.01
+
+        def net_of(obj) -> str:
+            if obj.net_name:
+                return str(obj.net_name)
+            net = pcb._nets.get(obj.net_number)
+            return str(net.name) if net else ""
+
+        def near(a, b) -> bool:
+            return math.hypot(a[0] - b[0], a[1] - b[1]) < tol
+
+        mismatch_pads = {(m["reference"], m["pad"]) for m in mismatches}
+        results: list[tuple[Any, dict[str, str]]] = []
+        seen: set[int] = set()
+
+        for mm in mismatches:
+            old_net = mm["pcb_net"]
+            if not old_net:
+                continue
+            pad_pos = pcb.get_pad_position(mm["reference"], mm["pad"])
+            if pad_pos is None:
+                continue
+            label = f"{mm['reference']}.{mm['pad']}"
+
+            # Points where this net legitimately terminates on a pad.
+            keep_points: list[tuple[float, float]] = []
+            for fp in pcb.footprints:
+                for pad in fp.pads:
+                    if pad.net_name != old_net or (fp.reference, pad.number) in mismatch_pads:
+                        continue
+                    pos = pcb.get_pad_position(fp.reference, pad.number)
+                    if pos:
+                        keep_points.append(pos)
+
+            segs = [s for s in pcb.segments if net_of(s) == old_net]
+            vias = [v for v in pcb.vias if net_of(v) == old_net]
+            segs_vias = segs + vias
+
+            def pts_of(obj):
+                return [obj.start, obj.end] if hasattr(obj, "start") else [obj.position]
+
+            def touching(pt, exclude):
+                return [
+                    o
+                    for o in segs_vias
+                    if id(o) not in exclude and any(near(pt, q) for q in pts_of(o))
+                ]
+
+            # Other mismatched pads are their own seeds: never walk through them.
+            other_mismatch_pts = [
+                p
+                for (r, n) in mismatch_pads
+                if (r, n) != (mm["reference"], mm["pad"])
+                for p in [pcb.get_pad_position(r, n)]
+                if p
+            ]
+
+            found: list[Any] = []
+            found_ids: set[int] = set()
+
+            def claim(obj) -> None:
+                found.append(obj)
+                found_ids.add(id(obj))
+
+            # Everything touching the mismatched pad itself is stranded.  Beyond
+            # that, only follow a pass-through chain (exactly one other copper
+            # object at a non-pad point).  A junction (T, or a via where the net
+            # continues) may feed pads that still belong on the net, so the
+            # walk stops there and leaves every branch alone (Issue #8705).
+            frontier: list[tuple[float, float]] = []
+            for obj in touching(pad_pos, found_ids):
+                claim(obj)
+                frontier.extend(q for q in pts_of(obj) if not near(q, pad_pos))
+            while frontier:
+                pt = frontier.pop()
+                if any(near(pt, k) for k in keep_points):
+                    continue
+                if any(near(pt, k) for k in other_mismatch_pts):
+                    continue
+                nxt = touching(pt, found_ids)
+                # A via is a layer change, not a branch: count only segments.
+                nxt_segs = [o for o in nxt if hasattr(o, "start")]
+                if len(nxt_segs) > 1:
+                    continue  # junction: other branches may feed legit pads
+                for o in nxt:
+                    if not hasattr(o, "start"):
+                        claim(o)
+                if nxt_segs:
+                    claim(nxt_segs[0])
+                    frontier.extend(q for q in pts_of(nxt_segs[0]) if not near(q, pt))
+
+            for obj in found:
+                if id(obj) in seen:
+                    continue
+                seen.add(id(obj))
+                is_seg = hasattr(obj, "start")
+                pos = obj.start if is_seg else obj.position
+                info = {
+                    "kind": "segment" if is_seg else "via",
+                    "uuid": obj.uuid or "",
+                    "net": old_net,
+                    "pad": label,
+                    "layer": obj.layer if is_seg else "/".join(obj.layers),
+                    "position": f"{pos[0]:.4f},{pos[1]:.4f}",
+                    "locked": "true" if getattr(obj, "locked", False) else "false",
+                }
+                results.append((obj, info))
+        return results
 
     def _find_pad_net_mismatches(self) -> list[dict[str, str]]:
         """Find pads on shared components whose PCB net differs from the schematic.
@@ -729,6 +884,7 @@ class Reconciler:
         output: str | Path | None = None,
         remove_orphans: bool = False,
         force: bool = False,
+        remove_stranded: bool = False,
     ) -> list[SyncChange]:
         """Apply proposed changes from an analysis to the PCB.
 
@@ -741,6 +897,9 @@ class Reconciler:
             output: Path to write the modified PCB (default: overwrite original).
             remove_orphans: If True, remove PCB footprints not present in schematic.
             force: If True, remove orphans even when they have routed traces.
+            remove_stranded: If True, remove copper stranded by a pad-net change
+                (``analysis.stranded_copper``).  Locked segments are never
+                removed (Issue #8705).
 
         Returns:
             List of SyncChange records documenting what was (or would be) changed.
@@ -766,7 +925,14 @@ class Reconciler:
 
         pad_net_mismatches = analysis.pad_net_mismatches
 
-        if not actions_to_apply and not has_orphans_to_remove and not pad_net_mismatches:
+        has_stranded_to_remove = remove_stranded and bool(analysis.stranded_copper)
+
+        if (
+            not actions_to_apply
+            and not has_orphans_to_remove
+            and not pad_net_mismatches
+            and not has_stranded_to_remove
+        ):
             return changes
 
         # Load PCB as a PCB object for full API access (add_footprint, add_net, etc.)
@@ -829,6 +995,32 @@ class Reconciler:
                 change = self._apply_remove_orphan(pcb, ref, dry_run, force)
                 if change:
                     changes.append(change)
+
+        # Remove stranded copper while nets still hold their old values (#8705)
+        if has_stranded_to_remove:
+            to_remove_segs: list[Segment] = []
+            to_remove_vias: list[Via] = []
+            for obj, info in self._collect_stranded(pcb, pad_net_mismatches):
+                locked = info["locked"] == "true"
+                if locked:
+                    outcome = "locked (skipped)"
+                elif dry_run:
+                    outcome = "would remove"
+                else:
+                    outcome = "removed"
+                    (to_remove_segs if info["kind"] == "segment" else to_remove_vias).append(obj)
+                changes.append(
+                    SyncChange(
+                        reference=f"{info['kind']}:{info['uuid'] or info['position']}",
+                        change_type="remove_stranded_copper",
+                        old_value=f"{info['net']} @ {info['pad']} ({info['layer']})",
+                        new_value=outcome,
+                        applied=not dry_run and not locked,
+                    )
+                )
+            if not dry_run:
+                pcb.remove_segments(to_remove_segs)
+                pcb.remove_vias(to_remove_vias)
 
         # Assign nets from schematic netlist after all footprints are added/swapped
         needs_net_assignment = (
