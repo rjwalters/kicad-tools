@@ -151,6 +151,7 @@ def compress_staircase(
     segments: list[Segment],
     config: OptimizationConfig,
     path_is_clear: Callable[[Segment], bool] | None = None,
+    other_copper: Iterable[Segment] = (),
 ) -> list[Segment]:
     """Compress staircase patterns into optimal diagonal+orthogonal paths.
 
@@ -158,10 +159,19 @@ def compress_staircase(
     (e.g., horizontal and 45° diagonal) and replaces them with an
     optimal 2-3 segment path, but only if the replacement is clear.
 
+    The replacement is tried diagonal-first, then orthogonal-first, and a
+    candidate is only taken if none of its legs lies on copper this chain
+    keeps (Issue #8603).  A serpentine rung (W, S, W between two N legs)
+    alternates two directions too, but every start-to-end shortcut of it
+    runs back along a neighbouring leg; it is left alone.
+
     Args:
         segments: List of segments to process.
         config: Optimization configuration.
         path_is_clear: Optional function to check if a path is clear.
+        other_copper: The net's other copper (other chains) a replacement
+            must not lie on either -- e.g. the far half of a serpentine whose
+            apex is a sub-micron gap, which chain sorting splits off.
 
     Returns:
         List with staircase patterns compressed.
@@ -172,6 +182,7 @@ def compress_staircase(
     if len(segments) < config.min_staircase_segments:
         return list(segments)
 
+    others = list(other_copper)
     result: list[Segment] = []
     i = 0
 
@@ -184,17 +195,22 @@ def compress_staircase(
             start_point = (segments[i].x1, segments[i].y1)
             end_point = (segments[staircase_end - 1].x2, segments[staircase_end - 1].y2)
 
-            # Generate optimal replacement path
+            # Copper kept around this run: what is already emitted (earlier
+            # replacements included), everything after the run, other chains.
+            kept = [*result, *segments[staircase_end:], *others]
             template = segments[i]
-            replacement = _optimal_path(start_point, end_point, template, config)
+            replacement: list[Segment] = []
+            for candidate in (
+                _optimal_path(start_point, end_point, template, config),
+                _reverse_path(_optimal_path(end_point, start_point, template, config)),
+            ):
+                if not candidate or _overlaps_own_copper(candidate, kept):
+                    continue
+                if path_is_clear is None or all(path_is_clear(seg) for seg in candidate):
+                    replacement = candidate
+                    break
 
-            # Check if all replacement segments are clear
-            if path_is_clear is None:
-                all_clear = True
-            else:
-                all_clear = all(path_is_clear(seg) for seg in replacement)
-
-            if all_clear and replacement:
+            if replacement:
                 result.extend(replacement)
             else:
                 # Collision detected - keep original staircase segments
@@ -207,6 +223,42 @@ def compress_staircase(
             i += 1
 
     return result
+
+
+#: "Lies on the centreline" tolerance (mm) for a staircase replacement against
+#: its own chain -- the same 1 micron ``redundant_copper_covered`` uses, so a
+#: shortcut this rejects is exactly one ``kct check`` would report.
+_OWN_COPPER_TOL_MM = 0.001
+
+
+def _overlaps_own_copper(replacement: list[Segment], kept: list[Segment]) -> bool:
+    """True if a *replacement* leg and a *kept* segment lie on each other.
+
+    Same-layer, same-net copper laid twice: the two segments are collinear
+    (the shorter one's ends both on the longer one's line) and share more
+    than the tolerance along it -- a fold-back onto a neighbour, a partial
+    overlap, or one wholly covering the other.  Segments that merely meet at
+    an end, or cross, do not count.
+    """
+    tol = _OWN_COPPER_TOL_MM
+    for new in replacement:
+        for old in kept:
+            if old is new or old.layer != new.layer or old.net != new.net:
+                continue
+            short, long_ = sorted((new, old), key=segment_length)
+            length = segment_length(long_)
+            if length <= tol:
+                continue
+            ux, uy = (long_.x2 - long_.x1) / length, (long_.y2 - long_.y1) / length
+            ends = ((short.x1, short.y1), (short.x2, short.y2))
+            # Perpendicular offset from the longer segment's line.
+            if any(abs((x - long_.x1) * uy - (y - long_.y1) * ux) > tol for x, y in ends):
+                continue
+            # Collinear: shared extent along the longer one's direction.
+            t0, t1 = sorted((x - long_.x1) * ux + (y - long_.y1) * uy for x, y in ends)
+            if min(t1, length) - max(t0, 0.0) > tol:
+                return True
+    return False
 
 
 def _find_staircase_end(segments: list[Segment], start_idx: int, config: OptimizationConfig) -> int:

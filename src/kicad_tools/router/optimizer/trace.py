@@ -16,6 +16,7 @@ from ..primitives import Route, Segment
 from .algorithms import (
     _find_staircase_end,
     _optimal_path,
+    _overlaps_own_copper,
     _point_segment_distance,
     compress_staircase,
     convert_corners_45,
@@ -486,6 +487,9 @@ class TraceOptimizer:
         # KiCad counts as connected), so whole-run rewrites must keep these on
         # the copper as well as the net's pads and vias (Issue #8269).
         self._branch_anchors: list[tuple[float, float]] = []
+        # Issue #8603: the other chains' copper on the current chain's layer
+        # (already-optimized ones as rewritten), which no rewrite may lie on.
+        self._other_copper: list[Segment] = []
         # Issue #8325: pad-only positions per net *name* (no vias), set by
         # ``set_pad_points``; the pad-entry straightening pass needs them.
         self._pad_points: dict[str, list[tuple[float, float]]] = {}
@@ -580,6 +584,9 @@ class TraceOptimizer:
         ]
 
         chain_ends = [[(s.x1, s.y1) for s in c] + [(s.x2, s.y2) for s in c] for c in chains]
+        # Current copper of every chain: the original until it is optimized,
+        # then its rewrite (Issue #8603).
+        current: list[list[Segment]] = [list(c) for c in chains]
 
         # Optimize each chain independently
         all_optimized: list[Segment] = []
@@ -595,12 +602,19 @@ class TraceOptimizer:
                 if other != index and chains[other][0].layer == chain[0].layer
                 for point in ends
             ]
+            self._other_copper = [
+                seg
+                for other, segs in enumerate(current)
+                if other != index and segs and segs[0].layer == chain[0].layer
+                for seg in segs
+            ]
 
             # Apply optimizations in order. Each pass's rewrite of this chain
             # is kept only if the chain still touches every anchor it touched
             # before -- the net's pads/vias and the other chains' endpoints --
             # so no pass can strand a T-joined branch or a mid-chain pad
-            # (Issues #8250, #8269).
+            # (Issues #8250, #8269), and only if no new leg lies on the net's
+            # own copper (Issue #8603).
             passes = [
                 (self.config.merge_collinear, self.merge_collinear),
                 (self.config.eliminate_zigzags, self.eliminate_zigzags),
@@ -613,13 +627,32 @@ class TraceOptimizer:
             for enabled, apply_pass in passes:
                 if enabled:
                     rewritten = apply_pass(result)
-                    if self._keeps_anchors(result, rewritten):
+                    if self._keeps_anchors(result, rewritten) and not self._lays_copper_twice(
+                        result, rewritten
+                    ):
                         result = rewritten
 
+            current[index] = result
             all_optimized.extend(result)
 
         self._branch_anchors = []
+        self._other_copper = []
         return all_optimized
+
+    def _lays_copper_twice(self, old: list[Segment], new: list[Segment]) -> bool:
+        """True if a leg *new* adds lies on the net's own copper (Issue #8603).
+
+        Same-net, same-layer copper laid over itself is reported by
+        ``kct check`` as ``redundant_copper_covered``.  A rewrite that folds a
+        leg back onto its own chain, or onto another chain of the net (the far
+        half of a serpentine whose apex is a sub-micron gap), is rejected.
+        Overlaps already present in *old* do not block a pass.
+        """
+        before = set(map(id, old))
+        added = [seg for seg in new if id(seg) not in before and seg not in old]
+        if not added:
+            return False
+        return _overlaps_own_copper(added, [*new, *self._other_copper])
 
     def _keeps_anchors(self, old: list[Segment], new: list[Segment]) -> bool:
         """True if *new* still covers every anchor *old* covered.
@@ -726,7 +759,7 @@ class TraceOptimizer:
         Returns:
             List with staircase patterns compressed.
         """
-        return compress_staircase(segments, self.config, self._path_is_clear)
+        return compress_staircase(segments, self.config, self._path_is_clear, self._other_copper)
 
     def convert_corners_45(self, segments: list[Segment]) -> list[Segment]:
         """Convert 90-degree corners to 45-degree chamfers.
