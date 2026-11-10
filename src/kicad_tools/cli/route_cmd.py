@@ -21778,6 +21778,17 @@ def _chain_complete_argv(
     * ``--creepage-standard``, ``--pollution-degree``, ``--material-group``,
       ``--hv-threshold`` (Issue #8674) -- the ``--voltage-map`` lookup settings.
 
+    Issue #8694 -- forwarded when set / when the operator passed them:
+    ``--strict-layers``, ``--strict-pad-clearance``, ``--strict-in-pad-clearance``,
+    ``--micro-via-in-pad-fallback``, ``--no-optimize``, ``--no-reserve-plane-layers``
+    and ``--no-auto-pour`` (booleans / opt-outs), and ``--via-clearance``,
+    ``--fine-pitch-clearance``, ``--micro-via-size``, ``--micro-via-drill``
+    (explicit values only).  ``--differential-pairs`` and ``--analog-nets`` are
+    not forwarded; :func:`_chain_coupled_routing_refusal` skips the chain when
+    they govern an open net.  ``--power-nets``, ``--stitch-power-planes`` and
+    ``--auto-fix`` are excluded because the outer run's result already covers them
+    (see the guard test).
+
     Deliberately not forwarded:
 
     * ``--auto-layers``, ``--route-engine``, ``--grid`` and the grid-engine
@@ -21836,6 +21847,14 @@ def _chain_complete_argv(
         ("--pollution-degree", "pollution_degree"),
         ("--material-group", "material_group"),
         ("--hv-threshold", "hv_threshold"),
+        # Issue #8694: clearance rules the single-attempt tail builds
+        # DesignRules from (route_cmd.py ``DesignRules(...)`` in _run_main_impl).
+        # ``args.via_clearance`` is board-resolved, the micro-via sizes carry
+        # value defaults: only an explicit value is passed on.
+        ("--via-clearance", "via_clearance"),
+        ("--fine-pitch-clearance", "fine_pitch_clearance"),
+        ("--micro-via-size", "micro_via_size"),
+        ("--micro-via-drill", "micro_via_drill"),
     ):
         value = getattr(args, attr, None)
         if value is not None and _flag_passed_explicitly(argv, (flag,)):
@@ -21849,12 +21868,47 @@ def _chain_complete_argv(
         ("--allow-offboard", "allow_offboard"),
         ("--no-plane-via-reservation", "no_plane_via_reservation"),
         ("--deterministic-budget", "deterministic_budget"),
+        # Issue #8694: boolean copper rules, forwarded when set.
+        ("--strict-layers", "strict_layers"),
+        ("--strict-pad-clearance", "strict_pad_clearance"),
+        ("--strict-in-pad-clearance", "strict_in_pad_clearance"),
+        ("--micro-via-in-pad-fallback", "micro_via_in_pad_fallback"),
+        ("--no-optimize", "no_optimize"),
     ):
         if getattr(args, attr, False):
             chain_argv.append(flag)
     if getattr(args, "reserve_pour_only_passives", True) is False:
         chain_argv.append("--no-reserve-pour-only-passives")
+    # Issue #8694: both default True; the operator's opt-outs are forwarded so
+    # the pass neither re-opens the plane layers nor re-creates pours.
+    if getattr(args, "reserve_plane_layers", True) is False:
+        chain_argv.append("--no-reserve-plane-layers")
+    if getattr(args, "auto_pour", True) is False:
+        chain_argv.append("--no-auto-pour")
     return chain_argv
+
+
+def _chain_coupled_routing_refusal(args, open_nets: list[str]) -> str | None:
+    """Why the chained pass must not run, or ``None`` (Issue #8694).
+
+    These flags are not forwarded: the lattice completion engine is not shown
+    to honour pair spacing or the boosted analog class, and the pass would run
+    them at their defaults.  A link left open on a net they govern would be
+    closed by copper that may silently break the constraint, so the chain is
+    skipped instead (fail closed, as for ``path_ampacity``).  Open nets the flags do not
+    govern chain as before.
+    """
+    from kicad_tools.router.net_class import is_differential_pair_name
+
+    if getattr(args, "differential_pairs", False):
+        pair = sorted(n for n in open_nets if is_differential_pair_name(n))
+        if pair:
+            return f"--differential-pairs governs open net(s) {', '.join(pair)}"
+    analog = {n.strip() for n in (getattr(args, "analog_nets", None) or "").split(",") if n.strip()}
+    hit = sorted(n for n in open_nets if n in analog)
+    if hit:
+        return f"--analog-nets governs open net(s) {', '.join(hit)}"
+    return None
 
 
 def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
@@ -21965,6 +22019,15 @@ def _chain_complete_pass(args, argv: list[str] | None, result: int) -> int:
     except Exception:
         return result
     if not before:
+        return result
+
+    refusal = _chain_coupled_routing_refusal(args, before)
+    if refusal is not None:
+        if not quiet:
+            print(
+                f"\n--- Chained completion pass skipped: {refusal}, and the lattice "
+                "completion pass cannot honour it; negotiated output kept ---"
+            )
         return result
 
     if not quiet:
