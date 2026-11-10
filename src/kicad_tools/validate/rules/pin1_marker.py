@@ -14,7 +14,9 @@ element that qualifies as a pin-1 indicator:
 1. It is on the silkscreen layer of the footprint's side -- the footprint's
    own ``fp_line`` / ``fp_rect`` / ``fp_circle`` / ``fp_arc`` / ``fp_poly``
    / user text, or a board-level ``gr_*`` graphic.
-2. Its stroked geometry comes within ``search_radius_mm`` of pad 1's copper.
+2. Its stroked geometry comes within ``search_radius_mm`` of pad 1's copper
+   (a floor: widened per footprint to reach the package body outline, so a
+   mark at the edge of a body overhanging pad 1 still counts).
 3. It *points at* pad 1: it is strictly closer to pad 1 than to any other
    pad (``require_asymmetry``, default on).  A body outline that runs past
    pad 1 and pad 2 alike does not identify either, so it is not counted --
@@ -359,12 +361,13 @@ class Pin1MarkerRule(DRCRule):
         body, _source = package_body_polygon(footprint)
 
         own_silk = list(self._silk_geometries(footprint, []))
-        near_board_silk = [g for g in board_silk if g.distance(pin1) <= self.search_radius_mm]
+        radius = self._effective_radius(pin1, body)
+        near_board_silk = [g for g in board_silk if g.distance(pin1) <= radius]
 
         candidates = 0
         for geom in own_silk + near_board_silk:
             d1 = geom.distance(pin1)
-            if d1 > self.search_radius_mm:
+            if d1 > radius:
                 continue
             if (
                 self.require_asymmetry
@@ -389,7 +392,7 @@ class Pin1MarkerRule(DRCRule):
         # points at that pad instead.
         if self.require_asymmetry and others is not None:
             for component in self._bent_components(own_silk):
-                if component.distance(pin1) > self.search_radius_mm:
+                if component.distance(pin1) > radius:
                     continue
                 centroid = component.centroid
                 if centroid.distance(others) <= centroid.distance(pin1) + _ASYMMETRY_MARGIN_MM:
@@ -435,6 +438,8 @@ class Pin1MarkerRule(DRCRule):
         all_pads = unary_union(pin1_geoms + other_geoms)
         body, _source = package_body_polygon(footprint)
 
+        radius = self._effective_radius(pin1, body)
+
         side = footprint_side(footprint)
         transform = _fp_transform(footprint)
         indexed: list[tuple[int, Any]] = []
@@ -448,7 +453,7 @@ class Pin1MarkerRule(DRCRule):
         accepted: set[int] = set()
         for idx, geom in indexed:
             d1 = geom.distance(pin1)
-            if d1 > self.search_radius_mm:
+            if d1 > radius:
                 continue
             if (
                 self.require_asymmetry
@@ -461,7 +466,7 @@ class Pin1MarkerRule(DRCRule):
 
         if self.require_asymmetry and others is not None:
             for component in self._bent_components([g for _, g in indexed]):
-                if component.distance(pin1) > self.search_radius_mm:
+                if component.distance(pin1) > radius:
                     continue
                 centroid = component.centroid
                 if centroid.distance(others) <= centroid.distance(pin1) + _ASYMMETRY_MARGIN_MM:
@@ -469,6 +474,18 @@ class Pin1MarkerRule(DRCRule):
                 if self._is_visible(component, all_pads, body):
                     accepted.update(i for i, g in indexed if g.intersects(component))
         return accepted
+
+    def _effective_radius(self, pin1: Any, body: Any | None) -> float:
+        """Search radius for one footprint: ``search_radius_mm`` is a floor.
+
+        Modules whose body overhangs pad 1 (AC/DC bricks, relays) put the
+        library mark at the body edge, further from the pad than the fixed
+        radius.  Widen the radius to reach the body outline (plus a small
+        margin) so such a mark is found; ordinary parts are unaffected.
+        """
+        if body is None or body.is_empty:
+            return self.search_radius_mm
+        return max(self.search_radius_mm, float(pin1.distance(body.boundary)) + 0.1)
 
     @staticmethod
     def _is_visible(geom: Any, all_pads: Any, body: Any | None) -> bool:
