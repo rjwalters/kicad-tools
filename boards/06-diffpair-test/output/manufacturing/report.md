@@ -1,8 +1,8 @@
 ---
 title: "diffpair_test_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.27.0"
-date: "Rev 1 | 2026-11-05 | jlcpcb-tier1"
+author: "kicad-tools 0.29.0"
+date: "Rev 1 | 2026-11-11 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,7 +18,7 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
-| Footprints | 36 (33 SMD, 3 THT, 0 other) |
+| Footprints | 39 (36 SMD, 3 THT, 0 other) |
 | Nets | 18 |
 | Traces | 182 segments |
 | Vias | 55 |
@@ -168,9 +168,9 @@ Four-channel LVDS link demonstrator
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~3.26 USD |
-| Components (estimated) | ~4.4 USD |
-| Assembly (estimated) | ~2.14 USD |
-| **Total (estimated)** | **~9.81 USD** |
+| Components (estimated) | ~4.43 USD |
+| Assembly (estimated) | ~2.17 USD |
+| **Total (estimated)** | **~9.86 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~49.03 USD |
+| Batch Total (estimated) | ~49.28 USD |
 

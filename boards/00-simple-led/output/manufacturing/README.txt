@@ -2,7 +2,7 @@ Manufacturing package for simple_led_routed.kicad_pcb
 
 Fabrication tier : jlcpcb
 Mode             : assembly
-Generated        : 2026-10-21T13:11:17.643863+00:00
+Generated        : 2026-11-11T19:00:00+00:00
 
 Assembly package: BOM and CPL are included.
 
@@ -38,6 +38,18 @@ Warning review (per rule)
 -------------------------
   no warnings reported
   All assembly-affecting warning counts are zero.
+
+Copper cleanup
+--------------
+  copper_cleanup: applied; exact-duplicate copper removed: 0 segment(s), 0 via(s)
+  step dedupe: applied (segments=0, vias=0)
+  step prune: applied (segments_removed=0, ends_snapped=0)
+  step optimize_traces: applied (segments_before=2, segments_after=2, corners_before=1, corners_after=1, layers=2, copper_oz=1.0)
+
+Assembly prep
+-------------
+  fiducials: applied
+  board_info: applied
 
 Accepted-risk waivers
 ---------------------

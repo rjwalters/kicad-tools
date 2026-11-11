@@ -5,6 +5,11 @@
 		(thickness 1.6)
 	)
 	(paper "A4")
+	(title_block
+		(title "Four-channel LVDS link demonstrator")
+		(date "2026-09-10")
+		(rev "C")
+	)
 	(layers
 		(0 "F.Cu" signal)
 		(1 "In1.Cu" power)

@@ -196,6 +196,7 @@ def make_pcb(out, parts):
     # 100 x 75 mm. Native KiCad library geometry is copied unchanged.
     pcb = parse_string("""(kicad_pcb (version 20260206) (generator "kicad-tools")
       (general (thickness 1.6)) (paper "A4")
+      (title_block (title "Four-channel LVDS link demonstrator") (date "2026-09-10") (rev "C"))
       (layers (0 "F.Cu" signal) (1 "In1.Cu" power) (2 "In2.Cu" power)
        (31 "B.Cu" signal) (35 "F.Paste" user) (37 "F.SilkS" user)
        (39 "F.Mask" user) (38 "B.Mask" user) (44 "Edge.Cuts" user)

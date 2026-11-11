@@ -13,6 +13,8 @@ import json
 import math
 from pathlib import Path
 
+from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
 from kicad_tools.cli.runner import (
     _restore_net_declarations,
     _run_fill_zones_via_drc,
@@ -118,6 +120,14 @@ def main():
     # resulting chords before refill and all native/process checks.
     quantize_pcb_file(path)
     moved = relocate_pad_edge_vias(path)
+    # Issue #8532 / #8759: every board carries global fiducials and a board-ID
+    # silkscreen (the title block in generate.py supplies its rev).  Added
+    # after the last copper edit and before the refill, so the planes back
+    # off the fiducial copper.
+    if run_add_fiducials(path, sides="populated") != 0:
+        raise RuntimeError("pcb add-fiducials failed")
+    if run_add_board_info(path, auto=True) != 0:
+        raise RuntimeError("pcb add-board-info failed")
     result = _run_fill_zones_via_drc(path, None, "kicad-cli")
     check_process_geometry(path)
     print(
