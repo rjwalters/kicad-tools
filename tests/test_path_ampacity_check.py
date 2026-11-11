@@ -597,6 +597,15 @@ class TestDoubledCopper:
         assert len(results.errors) == 1
         assert "parallel group" in results.errors[0].message
 
+    def test_under_width_stitched_pair_still_fails(self) -> None:
+        pcb = _doubled_ampacity_pcb(2.0, 2.0)
+        pcb.add_via(26, 50, net="NET1")
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(pcb, _design_rules_2oz())
+        messages = [e.message for e in results.errors]
+        assert not any("ambiguous" in m for m in messages)
+        assert any("parallel group" in m for m in messages)
+
     def test_single_run_same_width_still_fails(self) -> None:
         pcb = PCB.create(width=100, height=100, center=False)
         _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
