@@ -310,14 +310,17 @@ def _run(
     kept_uuids: dict[str, str] = {}
     for node in list(doc.find_all("gr_text")):
         node_layer = node.find("layer")
+        node_text = node.get_string(0)
         if (
-            node.get_string(0) in texts
+            node_text is not None
+            and node_text in texts
             and node_layer is not None
             and node_layer.get_string(0) == layer
         ):
             uuid_node = node.find("uuid")
-            if uuid_node is not None and uuid_node.get_string(0):
-                kept_uuids.setdefault(node.get_string(0), uuid_node.get_string(0))
+            old_uuid = uuid_node.get_string(0) if uuid_node is not None else None
+            if old_uuid:
+                kept_uuids.setdefault(node_text, old_uuid)
             doc.remove(node)
     pcb = _SilkscreenPCB(doc, pcb_path)
 
@@ -364,7 +367,9 @@ def _run(
     }
     if not dry_run:
         for t, x, y in placements:
-            doc.append(_build_node(t, x, y, layer, font_size, font_thickness, kept_uuids.get(t)))
+            doc.append(
+                _build_node(t, x, y, layer, font_size, font_thickness, kept_uuids.pop(t, None))
+            )
         save_path = output_path or pcb_path
         save_pcb(doc, save_path)
         result["written"] = True
