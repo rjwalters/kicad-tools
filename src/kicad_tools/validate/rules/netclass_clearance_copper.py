@@ -276,7 +276,7 @@ def check_netclass_clearance_copper(
                     severity="error",
                     message=(
                         f"{a.element_type.title()} to {b.element_type} clearance "
-                        f"{clearance:.3f}mm < netclass {cls!r} minimum {required:.3f}mm{note}"
+                        f"{clearance:.4f}mm < netclass {cls!r} minimum {required:.4f}mm{note}"
                     ),
                     location=(round(x, 3), round(y, 3)),
                     layer=layer.name,

@@ -273,3 +273,9 @@ def test_harness_kct_check_matches_cli_error_counts(tmp_path: Path, capsys) -> N
     summary = run_kct_check(pcb, manufacturer="jlcpcb", layers=None)
     assert summary.ran, summary.note
     assert summary.errors_by_rule == cli_errors
+
+
+def test_message_prints_four_decimals_so_near_misses_differ(tmp_path: Path, capsys) -> None:
+    _, report = _check(_board(tmp_path, STRAIGHT), tmp_path, capsys)
+    msg = _hits(report)[0]["message"]
+    assert "0.4500mm < netclass 'HV' minimum 0.5000mm" in msg

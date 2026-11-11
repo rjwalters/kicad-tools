@@ -517,6 +517,7 @@ def _run_drc_error_count_by_category(
     layers: int,
     copper_oz: float,
     min_clearance_mm: float | None = None,
+    project_path: Path | None = None,
 ) -> dict[str, int]:
     """Run DRC and return a dict of error counts keyed by rule id.
 
@@ -536,15 +537,28 @@ def _run_drc_error_count_by_category(
     it the referee holds the board to the ``manufacturer`` preset, which is
     stricter than kicad-cli on a board authored to a tighter rule (+251
     clearance errors where kicad-cli counted +2).
+
+    Issue #8813: ``project_path`` is the board (or ``--project``) whose sibling
+    ``.kicad_pro`` carries the net-class clearances.  It is staged beside the
+    scratch board so ``netclass_clearance_copper`` -- which ``kct check``
+    enforces -- is counted too.  ``None`` skips the check.
     """
+    import shutil
     from dataclasses import replace
 
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate import DRCChecker
+    from kicad_tools.validate.rules.netclass_clearance_copper import (
+        check_netclass_clearance_copper,
+    )
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".kicad_pcb", delete=False) as tmp:
-        tmp.write(pcb_text)
-        tmp_path = tmp.name
+    scratch_dir = tempfile.mkdtemp(prefix="kct_optref_")
+    tmp_path = str(Path(scratch_dir) / "referee.kicad_pcb")
+    Path(tmp_path).write_text(pcb_text)
+    if project_path is not None:
+        pro = Path(project_path).with_suffix(".kicad_pro")
+        if pro.is_file():
+            shutil.copy2(pro, Path(tmp_path).with_suffix(".kicad_pro"))
 
     try:
         pcb = PCB.load(tmp_path)
@@ -565,6 +579,12 @@ def _run_drc_error_count_by_category(
         # are no-ops on boards without filled zones.
         results.merge(checker.check_segment_zone_clearances())
         results.merge(checker.check_via_zone_clearances())
+        # Issue #8813: the authored net-class floor (same check, tolerance and
+        # project file as ``kct check``); a no-op without a sibling .kicad_pro.
+        if project_path is not None:
+            results.merge(
+                check_netclass_clearance_copper(Path(tmp_path), pcb, checker.design_rules)
+            )
 
         counts: dict[str, int] = {"__total__": 0}
         for v in results.errors:
@@ -574,7 +594,7 @@ def _run_drc_error_count_by_category(
             counts["__total__"] += 1
         return counts
     finally:
-        Path(tmp_path).unlink(missing_ok=True)
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
 def _pad_violations_grew(
@@ -1213,6 +1233,7 @@ def optimize_pcb(
             layers=config.drc_layers,
             copper_oz=config.drc_copper_oz,
             min_clearance_mm=config.drc_clearance_mm,
+            project_path=config.drc_project_path,
         )
         stats.drc_errors_before = baseline_counts["__total__"]
 
@@ -1297,6 +1318,7 @@ def optimize_pcb(
             layers=config.drc_layers,
             copper_oz=config.drc_copper_oz,
             min_clearance_mm=config.drc_clearance_mm,
+            project_path=config.drc_project_path,
         )
         full_errors = full_counts["__total__"]
         baseline_errors = baseline_counts["__total__"]
@@ -1335,6 +1357,7 @@ def optimize_pcb(
                     layers=config.drc_layers,
                     copper_oz=config.drc_copper_oz,
                     min_clearance_mm=config.drc_clearance_mm,
+                    project_path=config.drc_project_path,
                 )
 
                 # Issue #3138: a rollback is helpful if it lowers the total
@@ -1399,6 +1422,7 @@ def optimize_pcb(
                         layers=config.drc_layers,
                         copper_oz=config.drc_copper_oz,
                         min_clearance_mm=config.drc_clearance_mm,
+                        project_path=config.drc_project_path,
                     )
                     if trial_counts["__total__"] <= baseline_errors and not _pad_violations_grew(
                         baseline_counts, trial_counts
@@ -1453,6 +1477,7 @@ def optimize_pcb(
                             layers=config.drc_layers,
                             copper_oz=config.drc_copper_oz,
                             min_clearance_mm=config.drc_clearance_mm,
+                            project_path=config.drc_project_path,
                         )["__total__"]
                 if not any(final_segments[n] != segments_by_net[n] for n in final_segments):
                     stats.drc_failsafe_reverted = True

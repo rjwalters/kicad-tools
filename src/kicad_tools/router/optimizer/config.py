@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -79,6 +80,11 @@ class OptimizationConfig:
     Overrides the manufacturer preset's minimum clearance in the in-process
     referee so keep/reject agrees with kicad-cli under the project rules.
     ``None`` keeps the preset."""
+
+    drc_project_path: Path | None = None
+    """Board (or ``--project``) whose sibling ``.kicad_pro`` holds the net-class
+    clearances (Issue #8813).  When set, the in-process referee also counts
+    ``netclass_clearance_copper`` errors, matching ``kct check``."""
 
     drc_arbiter: Callable[[str], int | None] | None = None
     """External clearance checker used when the in-process referee rejects
