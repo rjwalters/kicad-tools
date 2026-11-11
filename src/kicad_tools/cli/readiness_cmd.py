@@ -348,9 +348,12 @@ def _run_export(
     output_dir: Path,
     assembly: bool,
     merge_lcsc_from: Path | None = None,
+    quantity: int | None = None,
+    inventory_covered: frozenset[str] | None = None,
 ) -> EngineRun:
     """Generate a generic bundle without changing the already-checked project rules."""
     from kicad_tools.export.manufacturing import ManufacturingConfig, ManufacturingPackage
+    from kicad_tools.export.preflight import PreflightConfig
 
     try:
         config = ManufacturingConfig(
@@ -359,6 +362,10 @@ def _run_export(
             include_pnp=assembly,
             emit_drc_constraints=False,
             merge_lcsc_from=merge_lcsc_from,
+            preflight=PreflightConfig(
+                order_boards=quantity or PreflightConfig.order_boards,
+                inventory_covered=inventory_covered or frozenset(),
+            ),
         )
         with stdout_to_stderr_when(True):
             result = ManufacturingPackage(
@@ -889,6 +896,13 @@ class ReadinessOptions:
     # Seed BOM whose verified LCSC numbers ``generate`` merges (Issue #8762),
     # the same merge as ``kct export --merge-lcsc-from``.
     merge_lcsc_from: Path | None = None
+    # Order size and operator-inventory coverage for the ``bom_lcsc_stock`` gate
+    # (Issue #8807).  ``None`` = flag not given: ``generate`` then uses the
+    # default (5 boards, nothing covered) and ``verify`` keeps what the bundle
+    # recorded.  Same semantics as ``kct export --boards`` /
+    # ``kct submit-jlcpcb --inventory-covered``.
+    quantity: int | None = None
+    inventory_covered: frozenset[str] | None = None
     # The ``.kct`` spec resolved from the ORIGINAL board before staging (#8727);
     # the staged candidate cannot see a spec above ``board_dir``.
     bom_spec_file: Path | None = None
@@ -1071,6 +1085,15 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
         if not merge_lcsc_from.is_file():
             return None, f"--merge-lcsc-from file not found: {merge_lcsc_from}"
 
+    quantity = getattr(args, "quantity", None)
+    if quantity is not None and quantity < 1:
+        return None, f"--quantity must be a positive integer, got {quantity}"
+    inventory_covered: frozenset[str] | None = None
+    if getattr(args, "inventory_covered", None) is not None:
+        from kicad_tools.export.preflight import parse_inventory_covered
+
+        inventory_covered = parse_inventory_covered(args.inventory_covered)
+
     ack_trace: dict[str, str] = {}
     for item in getattr(args, "ack_trace_quality", None) or []:
         rule, _, reason = item.partition("=")
@@ -1118,6 +1141,8 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
             skip_board_info=bool(getattr(args, "skip_board_info", False)),
             ack_trace_quality=ack_trace,
             merge_lcsc_from=merge_lcsc_from,
+            quantity=quantity,
+            inventory_covered=inventory_covered,
         ),
         None,
     )
@@ -2780,6 +2805,19 @@ def _write_readme(
                 lines.append(
                     f"  step {name}: {step.get('status')}" + (f" ({detail})" if detail else "")
                 )
+    if options.assembly:
+        _, stock_record, _ = _stock_evaluation(options, _recorded_stock_check(options))
+        if stock_record is not None:
+            lines.extend(["", "LCSC stock order", "----------------"])
+            lines.append(f"  order size: {stock_record['order_boards']} board(s)")
+            covered_ids = stock_record["inventory_covered"]
+            if covered_ids:
+                lines.append(
+                    "  held in operator inventory, not stock-verified: " + ", ".join(covered_ids)
+                )
+            else:
+                lines.append("  no parts declared as held in operator inventory")
+            lines.append(f"  stock check {stock_record['status']}: {stock_record['message']}")
     prep = options.assembly_prep_record
     if prep is not None:
         lines.extend(["", "Assembly prep", "-------------"])
@@ -2902,10 +2940,14 @@ def _gate_artifacts(
         options.output_dir,
         options.assembly,
     )
+    export_kwargs: dict[str, Any] = {}
     if options.merge_lcsc_from is not None:
-        run = engines.export(*export_args, merge_lcsc_from=options.merge_lcsc_from)
-    else:
-        run = engines.export(*export_args)
+        export_kwargs["merge_lcsc_from"] = options.merge_lcsc_from
+    if options.quantity is not None:
+        export_kwargs["quantity"] = options.quantity
+    if options.inventory_covered:
+        export_kwargs["inventory_covered"] = options.inventory_covered
+    run = engines.export(*export_args, **export_kwargs)
     if not run.ok:
         return CheckOutcome(
             name="artifacts",
@@ -3024,6 +3066,60 @@ def _declared_bom_exemptions(
     except Exception as exc:
         logger.warning("Spec exemption lookup failed for %s: %s", spec_file, exc)
         return {}, f"spec {spec_file} failed to load ({exc}); exemptions not applied"
+
+
+def _recorded_stock_check(options: ReadinessOptions) -> dict[str, Any] | None:
+    """The ``bom_lcsc_stock`` entry recorded in the bundle's ``manifest.json``."""
+    return next(
+        (
+            entry
+            for entry in _read_json(options.output_dir / "manifest.json").get("preflight") or []
+            if isinstance(entry, dict) and entry.get("name") == "bom_lcsc_stock"
+        ),
+        None,
+    )
+
+
+def _stock_evaluation(
+    options: ReadinessOptions, entry: dict[str, Any] | None
+) -> tuple[Any, dict[str, Any] | None, str | None]:
+    """Re-judge the recorded stock data at the effective quantity / coverage (#8807).
+
+    Returns ``(result, record, refusal)``.  ``result`` is ``None`` for a legacy
+    bundle whose entry carries no per-part ``data`` (its recorded verdict then
+    stands).  ``refusal`` is set when ``--quantity`` / ``--inventory-covered``
+    cannot be honoured because that data is missing -- never a silent pass.
+    """
+    from kicad_tools.export.preflight import PreflightConfig, evaluate_lcsc_stock
+
+    default_boards = PreflightConfig.order_boards
+    data = entry.get("data") if isinstance(entry, dict) else None
+    if not isinstance(data, dict) or not isinstance(data.get("parts"), list):
+        wants = (options.quantity not in (None, default_boards)) or bool(options.inventory_covered)
+        if wants:
+            return (
+                None,
+                None,
+                "this bundle's manifest has no per-part stock data to re-evaluate "
+                f"(older bundle); regenerate it with `kct readiness {options.board_dir} "
+                "--generate --quantity/--inventory-covered ...`",
+            )
+        return None, None, None
+    boards = options.quantity or int(data.get("order_boards") or default_boards)
+    covered = (
+        options.inventory_covered
+        if options.inventory_covered is not None
+        else frozenset(data.get("inventory_covered") or [])
+    )
+    result = evaluate_lcsc_stock(data, boards, covered, bool(data.get("strict")))
+    record = {
+        "order_boards": boards,
+        "inventory_covered": sorted(covered),
+        "status": result.status,
+        "message": result.message,
+        "details": result.details,
+    }
+    return result, record, None
 
 
 def _gate_bom(
@@ -3249,19 +3345,27 @@ def _gate_bom(
             detail=f"LCSC part check FAIL: {part_message}",
             blockers=[f"{problem}: {part_details or part_message}"],
         )
-    # Stock (issue #8121): a recorded FAIL (live shortfall, or unverified
-    # shortfall under strict preflight) blocks; absent in older bundles.
-    stock_check = next(
-        (
-            entry
-            for entry in _read_json(options.output_dir / "manifest.json").get("preflight") or []
-            if isinstance(entry, dict) and entry.get("name") == "bom_lcsc_stock"
-        ),
-        None,
-    )
-    if stock_check is not None and str(stock_check.get("status", "")).upper() == "FAIL":
+    # Stock (issue #8121, #8807): re-judge the recorded per-part observations at
+    # the effective order size / inventory coverage with the same evaluator the
+    # export used, so generate and verify word a shortfall identically.
+    stock_check = _recorded_stock_check(options)
+    stock_result, stock_record, stock_refusal = _stock_evaluation(options, stock_check)
+    if stock_refusal is not None:
+        return CheckOutcome(
+            name="bom",
+            status=FAILED,
+            detail=f"LCSC stock check cannot honour --quantity/--inventory-covered: {stock_refusal}",
+            blockers=[stock_refusal],
+        )
+    stock_status = ""
+    if stock_result is not None:
+        stock_status = stock_result.status
+        stock_message, stock_details = stock_result.message, stock_result.details
+    elif stock_check is not None:
+        stock_status = str(stock_check.get("status", "")).upper()
         stock_message = str(stock_check.get("message", "")).strip()
         stock_details = str(stock_check.get("details", "") or "").strip()
+    if stock_status == "FAIL":
         return CheckOutcome(
             name="bom",
             status=FAILED,
@@ -3303,12 +3407,19 @@ def _gate_bom(
         )
         else ""
     )
+    stock_note = (
+        f" Stock check {stock_status}: {stock_message}"
+        + (f" [{stock_details}]" if stock_details else "")
+        + "."
+        if stock_record is not None and stock_record.get("inventory_covered")
+        else ""
+    )
     return CheckOutcome(
         name="bom",
         status=PASSED,
         detail=(
             f"{len(rows)} BOM line(s) carry procurement identifiers; part check "
-            f"{part_status}: {part_message}{warn_details}; {tht_note}"
+            f"{part_status}: {part_message}{warn_details}; {tht_note}{stock_note}"
             + (
                 f" {len(exempt_seen)} declared exempt (spec {options.bom_spec_file}): "
                 + "; ".join(
@@ -3921,6 +4032,10 @@ def _run_readiness_candidate(
         tht_assembled, tht_refs = tht_refs, []
     checks.append(_gate_artifacts(options, engines, warning_counts, tht_refs, tht_assembled))
     checks.append(_gate_bom(options, engines, tht_refs, tht_assembled))
+    if options.assembly:
+        _, stock_record, _ = _stock_evaluation(options, _recorded_stock_check(options))
+        if stock_record is not None:
+            metrics["lcsc_stock_order"] = stock_record
     if engines.extra_checks is not None:
         try:
             checks.extend(engines.extra_checks(options))
@@ -4280,6 +4395,30 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "With --generate: merge verified LCSC numbers from a previous BOM CSV, "
             "as `kct export --merge-lcsc-from` does; the source is recorded in the report"
+        ),
+    )
+    parser.add_argument(
+        "--quantity",
+        dest="quantity",
+        type=int,
+        metavar="N",
+        default=None,
+        help=(
+            "Boards in the order, for the LCSC stock check (default: 5, JLCPCB's minimum PCBA "
+            "order); same semantics as `kct export --boards`. With --verify the bundle's recorded "
+            "per-part stock is re-evaluated at this size; recorded in the report and README.txt"
+        ),
+    )
+    parser.add_argument(
+        "--inventory-covered",
+        dest="inventory_covered",
+        metavar="C123,C456",
+        default=None,
+        help=(
+            "Comma-separated LCSC catalog ids held in your own fab parts inventory; they are "
+            "excluded from the stock shortfall verdict and listed as not stock-verified. Explicit "
+            "only, never inferred; same as `kct submit-jlcpcb --inventory-covered`. Recorded in the "
+            "report and README.txt"
         ),
     )
     parser.add_argument(
