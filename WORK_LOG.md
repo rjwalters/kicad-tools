@@ -14,8 +14,66 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-11
+
+- **PR #8791**: fix: resolve doubled current-path copper as a parallel group
+- **PR #8785**: fix: report wire span and inward anchor shift for ends-mode legs
+- **PR #8783**: feat: open solder mask along reinforce wire legs with tenting-off anchors
+- **PR #8775**: fix(readiness): name the original board dir in the no-spec BOM note
+- **Issue #8790** (closed): current paths: deliberately doubled copper (same run on both outer layers) is reported as an ambiguous-path error
+- **Issue #8781** (closed): pcb reinforce ends mode: unbounded clearance march can leave both end anchors at one end of a leg, still reported full
+- **Issue #8764** (closed): readiness bom: 'no .kct spec found above <dir>' names the deleted staged candidate, not the board
+- **Issue #8743** (closed): pcb reinforce: solder-mask opening along each wire run and mask-open anchors, creepage-checked (#8741 slice 2)
+
 ### 2026-11-10
 
+- **PR #8789**: test: pin --output containment path resolution and document rule in help
+- **PR #8787**: feat: write buttress-wire list sidecar from pcb reinforce
+- **PR #8786**: fix: raise ReinforceError for zero-length-only nets in ends mode
+- **PR #8784**: test: route session kicad-cli through pinned image under KCT_KICAD_DOCKER=1
+- **PR #8782**: fix: keep end anchors clear of same-net SMD pads not at the leg end
+- **PR #8778**: fix: exclude symlinked library files escaping the project from project zip
+- **PR #8777**: fix: skip prune stubs already contained in a same-net segment
+- **PR #8776**: fix(route): re-derive kept net-0 route floors after a class-map merge
+- **PR #8774**: fix(export): narrow project ZIP inventory to the board's own project files
+- **PR #8773**: docs: repo hygiene fixes and unreferenced file removals (2026-11-10)
+- **PR #8771**: fix: stop trace optimizer straightening tracks through keepout rule areas
+- **PR #8767**: feat(readiness): add --merge-lcsc-from to --generate
+- **PR #8765**: feat(boards): add fiducials and board ID to board 01, drop rule carve-out
+- **PR #8761**: fix(route): hold new copper to the wider class of preserved copper on skipped nets
+- **PR #8758**: fix: match board revision as whole token in board_id silk check
+- **PR #8757**: feat(path_ampacity): flag layer changes through undersized vias
+- **PR #8756**: feat: hint re-export when readiness bundle zip lacks project-local libraries
+- **PR #8755**: fix(router): use inverse pad rotation in current-path pad containment
+- **PR #8754**: fix(readiness): refuse --output outside the board directory before any gate
+- **PR #8751**: feat(reinforce): two end anchors per single-layer wire leg by default
+- **PR #8739**: fix: make prune clear redundant_copper_covered findings
+- **PR #8737**: fix(optimizer): keep staircase shortcuts off the net's own copper
+- **PR #8735**: fix: widen pin-1 marker search to courtyard and report effective radius
+- **PR #8733**: fix: iterate kct pcb prune to a fixed point and reword covered-copper message
+- **PR #8728**: fix(readiness): honour declared BOM exemptions and scope project-zip inventory to the board
+- **Issue #8780** (closed): pcb reinforce ends mode: net with only zero-length copper raises bare ValueError instead of a reinforce error
+- **Issue #8779** (closed): tests: KCT_KICAD_DOCKER=1 does not route test kicad-cli calls through the pinned image
+- **Issue #8772** (closed): pcb reinforce ends mode: end anchor can be drilled through a same-net SMD pad mid-leg
+- **Issue #8769** (closed): route: placement-disposition kept copper (net-0 routes) does not pick up a later --net-class-map floor
+- **Issue #8768** (closed): kct pcb prune adds a via/pad stub that redundant_copper_covered then flags (board 04, 0 -> 1)
+- **Issue #8766** (closed): readiness: pin --output containment against symlink/relative paths in tests; state the rule in --help
+- **Issue #8763** (closed): export/readiness: project-zip library sweep follows symlinks out of the project directory
+- **Issue #8762** (closed): readiness --generate has no LCSC merge source
+- **Issue #8760** (closed): route: new signal track crosses a tracks-not-allowed keep-out rule area
+- **Issue #8753** (closed): board_id_missing: short revisions match any silk text containing the letter
+- **Issue #8752** (closed): export: scope project-zip .kicad_pro/.kicad_sch inventory to PCB stem + hierarchy
+- **Issue #8750** (closed): current-paths: _physical_pad_covers tests non-axis-aligned pads mirrored
+- **Issue #8749** (closed): readiness --verify: say 're-export' when an older bundle's zip lacks project-local libraries
+- **Issue #8748** (closed): readiness: --output outside the board directory fails with a raw relative_to path error
+- **Issue #8745** (closed): path_ampacity / current-paths-audit: flag a high-current path that changes layer through an undersized via (#8741 slice 4a)
+- **Issue #8744** (closed): pcb reinforce: wire-list sidecar (net, layer, end anchors, length, gauge) (#8741 slice 3)
+- **Issue #8742** (closed): pcb reinforce: end-anchor mode (2 anchors per single-layer leg), made the default (#8741 slice 1)
+- **Issue #8734** (closed): redundant_copper_covered fires on a sub-0.03 mm same-layer loop that kct pcb prune reports nothing to remove for
+- **Issue #8731** (closed): pin1_marker_missing still fires on stock HLK-PMxx footprint after #8688
+- **Issue #8727** (closed): kct readiness --verify blocks a clean tapeout bundle: declared BOM exemption not honoured
+- **Issue #8598** (closed): Add fiducials and board ID to committed boards (01, 04, …) on the pinned KiCad toolchain
+- **Issue #8577** (closed): route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class
 - **PR #8738**: test: allow redundant_copper_covered in board 03 DRC baseline
 - **Issue #8736** (closed): test_board03_routing_baseline: committed board 03 PCB newly reports redundant_copper_covered
 - **PR #8737**: fix(optimizer): keep staircase shortcuts off the net's own copper
