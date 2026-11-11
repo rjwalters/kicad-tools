@@ -309,3 +309,57 @@ class TestSlidAnchorsAndMaskCircles:
         results = _run(pcb, specs=[spec])
         assert _subchecks(results) == ["skipped"]
         assert "unresolved" in results.violations[0].message
+
+
+class TestRecordedEndShift:
+    """Issue #8803: the sidecar carries the --max-end-shift the board was built with."""
+
+    BOUND = 12.0  # default for this 40 mm leg is 10 mm; anchor slides to x~34.7
+
+    def _slid(self, bound=BOUND):
+        pcb = _board(length=40.0)
+        pcb.add_trace((15, 51.3), (34, 51.3), width=0.2, layer="F.Cu", net="OTHER")
+        outcome = reinforce_net(
+            pcb, NET, net_class_clearances={"OTHER": 0.4}, max_end_shift_mm=bound
+        )
+        return pcb, outcome
+
+    def _wires(self, outcome, bound="keep"):
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        wires = build_wire_records(outcome, 0.0, 0.0)
+        if bound != "keep":
+            for w in wires:
+                if bound is None:
+                    w.pop("max_end_shift_mm", None)
+                else:
+                    w["max_end_shift_mm"] = bound
+        return wires
+
+    def _check(self, pcb, wires, **kw):
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires, **kw)
+        return _subchecks(rule.check(pcb, _rules()))
+
+    def test_bound_recorded_in_wire_records(self):
+        _, outcome = self._slid()
+        assert all(r["max_end_shift_mm"] == self.BOUND for r in self._wires(outcome))
+        _, default = self._slid(bound=None)
+        assert all(r["max_end_shift_mm"] is None for r in self._wires(default))
+
+    def test_recorded_bound_suppresses_end_window_finding(self):
+        pcb, outcome = self._slid()
+        # Same geometry, no recorded bound: still reported.
+        assert self._check(pcb, []) == ["a"]
+        assert self._check(pcb, self._wires(outcome)) == []
+
+    def test_recorded_bound_beats_constructor_fallback(self):
+        pcb, outcome = self._slid()
+        assert self._check(pcb, self._wires(outcome), max_end_shift_mm=1.0) == []
+
+    def test_recorded_zero_is_a_real_bound(self):
+        pcb, outcome = self._slid()
+        assert self._check(pcb, self._wires(outcome, bound=0.0)) == ["a"]
+
+    def test_legacy_sidecar_without_key_behaves_as_before(self):
+        pcb, outcome = self._slid()
+        assert self._check(pcb, self._wires(outcome, bound=None)) == ["a"]

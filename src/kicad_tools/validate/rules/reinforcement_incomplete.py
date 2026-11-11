@@ -132,6 +132,8 @@ class _Leg:
     width: float
     gauge: int
     cum: list[float] = field(default_factory=list)
+    # ``--max-end-shift`` recorded in the sidecar for this leg (None = not recorded).
+    max_end_shift_mm: float | None = None
 
     @property
     def total(self) -> float:
@@ -167,7 +169,8 @@ class ReinforcementIncompleteRule(DRCRule):
             specs: Declared current paths. ``None``/empty makes the rule a
                 clean no-op (it is active only with a current-paths file).
             wires: Records from ``<board>.reinforcement.json`` (sheet-absolute
-                coordinates). Used only as the wire-gauge source.
+                coordinates). Source of each leg's wire gauge and recorded
+                ``max_end_shift_mm`` (which overrides ``max_end_shift_mm``).
             waived_nets: Nets carrying a reinforcement-citing ampacity waiver
                 (see :func:`reinforcement_waived_nets`); their findings are
                 errors, all others warnings.
@@ -276,6 +279,28 @@ class ReinforcementIncompleteRule(DRCRule):
             )
         )
 
+    def _recorded_end_shift(self, net: str, layer: str, points: list[_Point]) -> float | None:
+        """``max_end_shift_mm`` the sidecar recorded for this exact leg, else None."""
+        ends = [self._abs(points[0]), self._abs(points[-1])]
+        for w in self.wires:
+            try:
+                if w["net"] != net or w["layer"] != layer:
+                    continue
+                raw = w.get("max_end_shift_mm")
+                if raw is None:
+                    continue
+                bound = float(raw)
+                ws = (w["leg_start"]["x"], w["leg_start"]["y"])
+                we = (w["leg_end"]["x"], w["leg_end"]["y"])
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+            if not math.isfinite(bound) or bound < 0:
+                continue
+            for a, b in ((ws, we), (we, ws)):
+                if math.dist(a, ends[0]) < 0.05 and math.dist(b, ends[1]) < 0.05:
+                    return bound
+        return None
+
     def _gauge(self, net: str, layer: str, points: list[_Point]) -> int:
         """Wire gauge from the sidecar: end-point match, else net+layer, else 16."""
         ends = [self._abs(points[0]), self._abs(points[-1])]
@@ -354,6 +379,7 @@ class ReinforcementIncompleteRule(DRCRule):
                 width = max((s.width for s in cand.run), default=0.0)
                 leg = _Leg(net, layer, pts, width, self._gauge(net, layer, pts))
                 leg.cum = rf._cumulative_arc(pts)
+                leg.max_end_shift_mm = self._recorded_end_shift(net, layer, pts)
                 legs.append(leg)
 
         net_gauge = legs[0].gauge if legs else self._gauge(net, "", [])
@@ -486,7 +512,12 @@ class ReinforcementIncompleteRule(DRCRule):
                 anchors.append(_Anchor(pos, rf._arc_of_point(pts, cum, pos), None, radius))
         anchors.sort(key=lambda a: a.arc)
 
-        shift_bound = rf.end_shift_bound(total, self.max_end_shift_mm)
+        # The bound the leg was built with (sidecar) wins over the constructor
+        # fallback, so `kct check` agrees with a custom `--max-end-shift` (#8803).
+        recorded = leg.max_end_shift_mm
+        shift_bound = rf.end_shift_bound(
+            total, recorded if recorded is not None else self.max_end_shift_mm
+        )
 
         def window(extent: float, anchor: _Anchor) -> float:
             return float(extent + end_offset + shift_bound + anchor.radius + END_WINDOW_SLACK_MM)
