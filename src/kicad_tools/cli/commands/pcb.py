@@ -989,6 +989,11 @@ def _print_reinforce_legs(outcome, origin_x: float, origin_y: float) -> None:
             print(f"      paths: {', '.join(leg.paths)}")
         if leg.reason:
             print(f"      {leg.reason}")
+        if leg.mask_status:
+            print(
+                f"      mask opening: {leg.mask_status}"
+                + (f" -- {leg.mask_reason}" if leg.mask_reason else "")
+            )
     excluded = [rs for rs in outcome.runs if rs.path_excluded_reason]
     for rs in excluded:
         print(f"    excluded copper: {rs.length_mm:.1f} mm -- {rs.path_excluded_reason}")
@@ -1053,6 +1058,11 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             "(two anchors per leg, at its ends)",
             file=sys.stderr,
         )
+    mask_opening = getattr(args, "mask_opening", None)
+    mask_width = getattr(args, "mask_width", None)
+    if mask_width is not None and mask_width <= 0:
+        print("Error: --mask-width must be positive", file=sys.stderr)
+        return 1
     layer = getattr(args, "layer", None)
     all_runs = getattr(args, "all_runs", False)
     min_run_length = getattr(args, "min_run_length", None)
@@ -1157,6 +1167,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             board_rules=board_rules,
             anchor_mode=anchor_mode,
             end_offset_mm=end_offset,
+            mask_opening=mask_opening,
+            mask_width_mm=mask_width,
         )
     except ReinforceError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1234,6 +1246,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "status": leg.status,
                 "reason": leg.reason,
                 "paths": leg.paths,
+                "mask_status": leg.mask_status,
+                "mask_reason": leg.mask_reason,
                 "polyline": [
                     [round(x + origin_x, 4), round(y + origin_y, 4)] for x, y in leg.polyline
                 ],
@@ -1243,6 +1257,31 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         "unresolved_paths": [
             {"path": u.path, "status": u.status, "reason": u.reason}
             for u in outcome.unresolved_paths
+        ],
+        # Issue #8743: solder-mask openings (additive).
+        "mask_opening": outcome.mask_opening,
+        "mask_width_mm": outcome.mask_width_mm,
+        "openings": [
+            {
+                "layer": o.layer,
+                "start": [round(o.start[0] + origin_x, 4), round(o.start[1] + origin_y, 4)],
+                "end": [round(o.end[0] + origin_x, 4), round(o.end[1] + origin_y, 4)],
+                "width_mm": round(o.width_mm, 4),
+                "existing": o.existing,
+            }
+            for o in outcome.openings
+        ],
+        "refused_openings": [
+            {
+                "copper_layer": r.copper_layer,
+                "start": [round(r.start[0] + origin_x, 4), round(r.start[1] + origin_y, 4)],
+                "end": [round(r.end[0] + origin_x, 4), round(r.end[1] + origin_y, 4)],
+                "rule": r.rule,
+                "required_mm": round(r.required_mm, 4),
+                "actual_mm": round(r.actual_mm, 4),
+                "obstacle_net": r.obstacle_net,
+            }
+            for r in outcome.refused_openings
         ],
     }
 
@@ -1334,10 +1373,27 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "  NOTE: anchors are same-net vias -- refill zone pours "
                 "afterward (e.g. `kicad-cli pcb drc --refill-zones`)."
             )
-            print(
-                "  NOTE: until #8743 the anchors inherit the board's via tenting and "
-                "no solder-mask opening is emitted along the run."
-            )
+            if outcome.mask_opening:
+                new = sum(1 for o in outcome.openings if not o.existing)
+                print(
+                    f"  Mask openings:   {len(outcome.openings)} ({new} new); "
+                    f"{len(outcome.refused_openings)} leg(s) refused; anchors tenting off"
+                )
+                for o in outcome.openings:
+                    print(
+                        f"    {o.layer} ({o.start[0] + origin_x:.2f}, {o.start[1] + origin_y:.2f})"
+                        f" -> ({o.end[0] + origin_x:.2f}, {o.end[1] + origin_y:.2f})"
+                        f" width {o.width_mm:.3f} mm" + (" [already present]" if o.existing else "")
+                    )
+                for ro in outcome.refused_openings:
+                    print(
+                        f"    opening refused on {ro.copper_layer} [{ro.rule}: need "
+                        f"{ro.required_mm:.3f} mm, have {ro.actual_mm:.3f} mm"
+                        + (f", vs {ro.obstacle_net}" if ro.obstacle_net else "")
+                        + "]"
+                    )
+            else:
+                print("  NOTE: mask openings are off; anchors inherit the board's via tenting.")
 
     # Save unless dry-run and at least one anchor was placed.
     if not dry_run and outcome.placed_count:
