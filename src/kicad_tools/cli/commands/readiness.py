@@ -120,6 +120,14 @@ def run_readiness_command(args) -> int:
     if merge_lcsc_from:
         sub_argv.extend(["--merge-lcsc-from", str(merge_lcsc_from)])
 
+    quantity = getattr(args, "readiness_quantity", None)
+    if quantity is not None:
+        sub_argv.extend(["--quantity", str(quantity)])
+
+    inventory_covered = getattr(args, "readiness_inventory_covered", None)
+    if inventory_covered is not None:
+        sub_argv.extend(["--inventory-covered", inventory_covered])
+
     checked_at = getattr(args, "readiness_checked_at", None)
     if checked_at:
         sub_argv.extend(["--checked-at", checked_at])
