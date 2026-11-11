@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -82,8 +83,21 @@ def stamp_child_uuids(pcb, refs) -> int:
     return count
 
 
+_FID_REF_RE = re.compile(r"^FID\d+$")
+
+
 def _is_fiducial(fp) -> bool:
-    return str(getattr(fp, "name", "")).startswith("Fiducial:")
+    """True when ``fp`` is a fiducial, whatever library it comes from.
+
+    Any of: library item name (after the last ``:``) starts with ``Fiducial``;
+    reference matches ``FID<digits>``; tags contain the word ``fiducial``.
+    """
+    name = str(getattr(fp, "name", "") or "")
+    if name.rsplit(":", 1)[-1].startswith("Fiducial"):
+        return True
+    if _FID_REF_RE.match(str(getattr(fp, "reference", "") or "")):
+        return True
+    return "fiducial" in str(getattr(fp, "tags", "") or "").lower()
 
 
 def _build_obstacles(pcb, side: str, keepout: float):

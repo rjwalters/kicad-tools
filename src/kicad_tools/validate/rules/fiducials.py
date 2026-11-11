@@ -3,7 +3,9 @@
 Pick-and-place machines register the board against global fiducials.  A
 board that passes every electrical and fabrication gate can still be
 unassemblable by machine when a populated side carries fewer than three of
-them.  This rule counts the stock ``Fiducial:*`` footprints on each
+them.  This rule counts fiducial footprints (library item name starting
+with ``Fiducial`` in any library, a ``FID<n>`` reference, or a ``fiducial``
+tag; see ``_is_fiducial``) on each
 *populated* side (a side with at least one non-``board_only``, BOM-included
 footprint) and warns when there are fewer than :data:`MIN_GLOBAL_FIDUCIALS`.
 
