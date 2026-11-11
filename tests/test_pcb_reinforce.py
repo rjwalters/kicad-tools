@@ -3044,6 +3044,129 @@ class TestReinforceClearCLI:
         assert run_pcb_command(_reinforce_args(path, clear=True, replace=True)) == 1
 
 
+# --------------------------------------------------------------------------
+# Solder-mask opening + tenting-off anchors (#8743)
+# --------------------------------------------------------------------------
+
+
+def _mask_lines(pcb: PCB, layer: str):
+    return [g for g in pcb.graphic_lines if g.layer == layer]
+
+
+class TestMaskOpening:
+    def test_straight_run_opens_full_span_on_own_side(self, tmp_path):
+        pcb = _straight_run_pcb(length=100.0)
+        result = reinforce_net(pcb, "FUSED_LINE")
+        (leg,) = result.legs
+        assert leg.status == "full" and leg.mask_status == "opened"
+        xs = sorted(a.x for a in result.placed)
+        lines = _mask_lines(pcb, "F.Mask")
+        assert len(lines) == 1 and not _mask_lines(pcb, "B.Mask")
+        line = lines[0]
+        assert sorted([line.start[0], line.end[0]]) == pytest.approx(xs, abs=1e-6)
+        assert line.start[1] == pytest.approx(50.0) and line.end[1] == pytest.approx(50.0)
+        assert line.width == pytest.approx(2.0)  # trace width, no margin
+        # Survives save/load.
+        path = tmp_path / "b.kicad_pcb"
+        pcb.save(path)
+        assert len(_mask_lines(PCB.load(path), "F.Mask")) == 1
+
+    def test_mask_width_override(self):
+        pcb = _straight_run_pcb()
+        reinforce_net(pcb, "FUSED_LINE", mask_width_mm=1.3)
+        (line,) = _mask_lines(pcb, "F.Mask")
+        assert line.width == pytest.approx(1.3)
+
+    def test_back_layer_leg_gives_b_mask(self):
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20, 50), (120, 50), width=2.0, layer="B.Cu", net="FUSED_LINE")
+        result = reinforce_net(pcb, "FUSED_LINE")
+        assert result.legs[0].mask_status == "opened"
+        assert len(_mask_lines(pcb, "B.Mask")) == 1
+        assert not _mask_lines(pcb, "F.Mask")
+
+    def test_anchors_tenting_off_even_with_board_tenting_on(self):
+        pcb = _straight_run_pcb()
+        pcb.setup.tenting_front = True
+        pcb.setup.tenting_back = True
+        reinforce_net(pcb, "FUSED_LINE")
+        anchors = [v for v in pcb.vias if v.net_name == "FUSED_LINE"]
+        assert len(anchors) == 2
+        for v in anchors:
+            assert (v.tenting_front, v.tenting_back) == ("no", "no")
+
+    def test_rerun_is_idempotent(self, tmp_path):
+        pcb = _straight_run_pcb()
+        reinforce_net(pcb, "FUSED_LINE")
+        path = tmp_path / "b.kicad_pcb"
+        pcb.save(path)
+        again = PCB.load(path)
+        result = reinforce_net(again, "FUSED_LINE")
+        assert len(_mask_lines(again, "F.Mask")) == 1
+        assert result.openings and all(o.existing for o in result.openings)
+
+    def test_dry_run_writes_nothing_but_lists_openings(self):
+        pcb = _straight_run_pcb()
+        vias = len(pcb.vias)
+        result = reinforce_net(pcb, "FUSED_LINE", dry_run=True)
+        assert len(result.openings) == 1
+        assert result.openings[0].layer == "F.Mask"
+        assert not pcb.graphic_lines or not _mask_lines(pcb, "F.Mask")
+        assert len(pcb.vias) == vias
+
+    def test_off_in_spaced_mode_and_with_flag(self):
+        spaced = _straight_run_pcb()
+        res = reinforce_net(spaced, "FUSED_LINE", anchor_mode="spaced")
+        assert not res.openings and not _mask_lines(spaced, "F.Mask")
+        assert all(v.tenting_front is None for v in spaced.vias)
+        off = _straight_run_pcb()
+        reinforce_net(off, "FUSED_LINE", mask_opening=False)
+        assert not _mask_lines(off, "F.Mask")
+        assert all(v.tenting_front is None for v in off.vias)
+
+    def test_voltage_map_refuses_opening_near_foreign_copper(self):
+        from kicad_tools.router.pairwise_clearance import build_pairwise_clearance_table
+
+        table = build_pairwise_clearance_table(
+            {"FUSED_LINE": 150.0, "OTHER": 3.3}, dru=0.0, hv_threshold=30.0
+        )
+        required = table.required_clearance("FUSED_LINE", "OTHER")
+        pcb = _straight_run_pcb()
+        # Mid-run foreign track: anchors (near the ends) are clear, the
+        # exposed 2 mm run (edge at y=51) is 0.44 mm from its edge.
+        pcb.add_trace((60, 52.54), (70, 52.54), width=0.2, layer="F.Cu", net="OTHER")
+        result = reinforce_net(pcb, "FUSED_LINE", pairwise_clearance=table)
+        assert result.placed_count == 2
+        assert not result.openings and not _mask_lines(pcb, "F.Mask")
+        (ref,) = result.refused_openings
+        assert ref.rule == "mask_opening_voltage_map_pairwise"
+        assert ref.required_mm == pytest.approx(required)
+        assert ref.actual_mm < required
+        assert ref.obstacle_net == "OTHER"
+        assert result.legs[0].mask_status == "refused"
+
+    def test_cli_json_lists_openings_and_dry_run_writes_nothing(self, tmp_path, capsys):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _straight_run_pcb().save(pcb_path)
+        rc = run_pcb_command(_reinforce_args(pcb_path, format="json", dry_run=True, mask_width=1.3))
+        assert rc == 0
+        data = json.loads(capsys.readouterr().out)
+        (op,) = data["openings"]
+        assert op["layer"] == "F.Mask" and op["width_mm"] == pytest.approx(1.3)
+        assert data["legs"][0]["mask_status"] == "opened"
+        assert not _mask_lines(PCB.load(pcb_path), "F.Mask")
+
+    def test_cli_no_mask_opening(self, tmp_path):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _straight_run_pcb().save(pcb_path)
+        assert run_pcb_command(_reinforce_args(pcb_path, mask_opening=False)) == 0
+        assert not _mask_lines(PCB.load(pcb_path), "F.Mask")
+
+
 class TestWireSpanReport:
     """Issue #8781: ``full`` must not hide a wire much shorter than its leg."""
 
