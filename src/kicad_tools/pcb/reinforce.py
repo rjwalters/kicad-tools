@@ -127,6 +127,14 @@ DEFAULT_END_OFFSET_MM = 1.0
 END_NUDGE_MAX_MM = 2.0
 END_NUDGE_STEPS = 8
 
+# ``ends`` mode: an end anchor that had to move more than this far inward
+# along the leg (to get ``end_offset_mm`` of straight-line clearance from the
+# end copper) makes the leg's ``reason`` say so (Issue #8781). 5x the default
+# end offset: a bend just after a pad shifts an anchor by a few mm (the
+# bent-exit fixtures move <= ~2 mm), while a leg running alongside its own end
+# copper moves it by tens of mm.
+_ANCHOR_SHIFT_NOTE_MM = 5.0
+
 # Leg kinds and statuses reported on :class:`LegSummary` (Issue #8742).
 LEG_KIND_RUN = "run"
 LEG_KIND_TRUNK = "trunk"
@@ -229,8 +237,13 @@ class LegSummary:
     #: multi-junction topology, or copper on a layer this call does not
     #: process).
     status: str = LEG_UNANCHORED
-    #: Why the leg is not ``full`` (empty when it is).
+    #: Why the leg is not ``full``; for a ``full`` leg, non-empty only when
+    #: an end anchor moved far inward (the wire is much shorter than the leg).
     reason: str = ""
+    #: Arc length (mm) between the two placed end anchors, i.e. the span the
+    #: wire covers (0.0 unless both anchors were placed). Later slices
+    #: (#8743, #8744) read this rather than recomputing it.
+    wire_span_mm: float = 0.0
     #: Widest track width (mm) on the leg.
     width_mm: float = 0.0
     #: Names of the declared current paths covering this leg (empty without
@@ -1916,6 +1929,22 @@ def _reinforce_ends(
                         result.placed.append(PlacedAnchor(x=a.x, y=a.y))
                     if len(leg.anchors) == 2:
                         leg.status = LEG_FULL
+                        # Two anchors imply a plan_pair result, so both are set.
+                        assert t0 is not None and t1 is not None
+                        leg.wire_span_mm = t1 - t0
+                        shifts = [
+                            (name, d)
+                            for name, d in (("start", t0 - t0_arc), ("far", t1_arc - t1))
+                            if d > _ANCHOR_SHIFT_NOTE_MM
+                        ]
+                        if shifts:
+                            moved = "; ".join(
+                                f"{name} anchor moved {d:.1f} mm inward" for name, d in shifts
+                            )
+                            leg.reason = (
+                                f"wire spans {leg.wire_span_mm:.1f} of {total:.1f} mm: {moved} "
+                                "to stay clear of the end copper"
+                            )
                     elif leg.anchors:
                         leg.status = LEG_PARTIAL
                         leg.reason = (
