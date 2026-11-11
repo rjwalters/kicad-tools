@@ -1,8 +1,8 @@
 ---
 title: "charlieplex_3x3_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.23.0"
-date: "Rev 1 | 2026-10-19 | jlcpcb"
+author: "kicad-tools 0.29.0"
+date: "Rev 1 | 2026-11-11 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,9 +18,9 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 2 copper (F.Cu, B.Cu) |
-| Footprints | 19 (16 SMD, 3 THT, 0 other) |
+| Footprints | 22 (19 SMD, 3 THT, 0 other) |
 | Nets | 12 |
-| Traces | 456 segments |
+| Traces | 207 segments |
 | Vias | 28 |
 | Board Size | 50.0 x 55.0 mm |
 
@@ -109,7 +109,7 @@ ATtiny85 Charlieplex LED Grid
 | Errors | 0 |
 | Errors: kct (`--mfr jlcpcb` rules) | 0 |
 | Errors: kicad-cli (geometric) | 0 |
-| Warnings | 0 |
+| Warnings | 4 |
 | Blocking | 0 |
 
 **Status**: PASS
@@ -118,17 +118,21 @@ ATtiny85 Charlieplex LED Grid
 
 | Violation Type | Count |
 |----------------|-------|
+| redundant_copper_detour | 2 |
+| redundant_copper_covered | 2 |
 | silk_geometry_unmodeled | 1 |
+
 
 
 \newpage
 
 ## Manufacturing Readiness
 
-**Verdict**: READY
+**Verdict**: WARNING
 
 ### Action Items
 
+- **[OPTIONAL]** Review 4 DRC warnings
 - **[OPTIONAL]** Analog net: LINE_A — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_B — audio signal; keep short, away from digital/switching nets
 - **[OPTIONAL]** Analog net: LINE_C — audio signal; keep short, away from digital/switching nets
@@ -153,9 +157,9 @@ ATtiny85 Charlieplex LED Grid
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~0.95 USD |
-| Components (estimated) | ~0.78 USD |
-| Assembly (estimated) | ~2.04 USD |
-| **Total (estimated)** | **~3.77 USD** |
+| Components (estimated) | ~0.81 USD |
+| Assembly (estimated) | ~2.06 USD |
+| **Total (estimated)** | **~3.82 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~18.86 USD |
+| Batch Total (estimated) | ~19.11 USD |
 
