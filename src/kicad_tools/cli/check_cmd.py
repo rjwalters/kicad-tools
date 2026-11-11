@@ -62,6 +62,7 @@ from kicad_tools.manufacturers.resolve import (  # noqa: F401  (re-exported; sha
     _discover_fab_profile_sidecar,
     _resolve_effective_check_mfr,
 )
+from kicad_tools.pcb.reinforcement_sidecar import load_wires_if_present
 from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     current_paths_sidecar_candidates,
@@ -72,6 +73,7 @@ from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
 from kicad_tools.validate.coverage import coverage_to_dict
+from kicad_tools.validate.rules.reinforcement_incomplete import reinforcement_waived_nets
 from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
 
 if TYPE_CHECKING:
@@ -2404,6 +2406,12 @@ def main(argv: list[str] | None = None) -> int:
             # Issue #4980/#5124: declared branch-specific current-path
             # intent (--current-paths sidecar, auto-discovered).
             current_path_specs=current_path_specs,
+            # Issue #8746: gauge source + reinforcement-citing ampacity waivers
+            # for reinforcement_incomplete.
+            reinforcement_wires=load_wires_if_present(pcb_path),
+            reinforcement_waived_nets=reinforcement_waived_nets(
+                general_waivers.entries if general_waivers is not None else ()
+            ),
             # Issue #7206: spec-declared currents with no target_ampacity
             # make ampacity coverage ``unknown`` instead of a vacuous skip.
             declared_spec_currents=declared_spec_currents,
@@ -3210,6 +3218,7 @@ def build_check_rule_set(
         courtyard_waivers=courtyard_waivers,
         strict_connectivity=True,
         current_path_specs=current_path_specs,
+        reinforcement_wires=load_wires_if_present(project_pcb_path),
         declared_spec_currents=resolve_declared_currents_for_pcb(project_pcb_path),
     )
     checker.design_rules, override_msg = resolve_pcb_fabrication_overrides(
@@ -3227,6 +3236,8 @@ def build_check_rule_set(
             general_waivers = load_waivers(gw_path)
         except ValueError as exc:
             notes.append(f"ignoring malformed waivers sidecar {gw_path}: {exc}")
+    if general_waivers is not None:
+        checker.reinforcement_waived_nets = reinforcement_waived_nets(general_waivers.entries)
 
     return CheckRuleSet(
         checker=checker,
@@ -3509,6 +3520,7 @@ def run_selected_checks(
     check_methods = {
         "ampacity": checker.check_ampacity,
         "path_ampacity": checker.check_path_ampacity,
+        "reinforcement_incomplete": checker.check_reinforcement_incomplete,
         "clearance": checker.check_clearances,
         "physical_copper_gap": checker.check_physical_copper_gap,
         "connectivity": checker.check_connectivity,

@@ -107,6 +107,17 @@ def load_wires(path: Path) -> list[dict[str, Any]]:
     return wires
 
 
+def load_wires_if_present(board: Path) -> list[dict[str, Any]]:
+    """Wires of the board's sidecar; empty when absent or unreadable (#8746)."""
+    path = sidecar_path(board)
+    if not path.is_file():
+        return []
+    try:
+        return load_wires(path)
+    except (OSError, ValueError):
+        return []
+
+
 def write_sidecar(board: Path, new_wires: list[dict[str, Any]]) -> Path:
     """Merge ``new_wires`` into the board's sidecar and write it deterministically."""
     path = sidecar_path(board)

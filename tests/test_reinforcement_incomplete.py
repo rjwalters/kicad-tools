@@ -1,0 +1,242 @@
+"""Tests for the ``reinforcement_incomplete`` DRC rule (Issue #8746).
+
+Fixtures are built with the real ``reinforce_net`` (slices 1-3), so the rule is
+checked against what the placer actually writes, then mutated one sub-check at
+a time.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from kicad_tools.manufacturers import DesignRules
+from kicad_tools.pcb.reinforce import reinforce_net
+from kicad_tools.router.current_paths import CurrentPathSpec, PathEndpoint
+from kicad_tools.schema.pcb import PCB
+from kicad_tools.validate.rules.reinforcement_incomplete import (
+    ReinforcementIncompleteRule,
+    reinforcement_waived_nets,
+)
+from kicad_tools.validate.rules.waivers import Waiver
+from tests.test_pcb_reinforce import _add_th_pad_footprint, _straight_run_pcb
+
+NET = "FUSED_LINE"
+
+
+def _rules() -> DesignRules:
+    return DesignRules(
+        min_trace_width_mm=0.127,
+        min_clearance_mm=0.127,
+        min_via_drill_mm=0.2,
+        min_via_diameter_mm=0.45,
+        min_annular_ring_mm=0.13,
+    )
+
+
+def _spec(eligible: bool = True) -> CurrentPathSpec:
+    return CurrentPathSpec(
+        name="FORCE",
+        net_name=NET,
+        source=PathEndpoint("J1", "1"),
+        sink=PathEndpoint("J2", "1"),
+        continuous_a=10.0,
+        reinforcement_eligible=eligible,
+    )
+
+
+def _board(length: float = 100.0) -> PCB:
+    pcb = _straight_run_pcb(length=length)
+    _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=NET, drill=1.0, size=2.0)
+    _add_th_pad_footprint(pcb, ref="J2", x=20.0 + length, y=50.0, net=NET, drill=1.0, size=2.0)
+    return pcb
+
+
+def _run(pcb: PCB, *, waived=(), eligible: bool = True, specs=None):
+    rule = ReinforcementIncompleteRule(
+        specs=[_spec(eligible)] if specs is None else specs, waived_nets=waived
+    )
+    return rule.check(pcb, _rules())
+
+
+def _subchecks(results) -> list[str]:
+    return sorted(v.items[1].split("@")[0] for v in results.violations)
+
+
+def _reinforced(**kw) -> PCB:
+    pcb = _board()
+    reinforce_net(pcb, NET, **kw)
+    return pcb
+
+
+def _anchors(pcb: PCB):
+    return sorted((v for v in pcb.vias if v.net_name == NET), key=lambda v: v.position[0])
+
+
+class TestCompleteBoard:
+    def test_ends_mode_yields_zero_findings(self):
+        assert _subchecks(_run(_reinforced())) == []
+
+    def test_ends_mode_after_save_load(self, tmp_path: Path):
+        pcb = _reinforced()
+        path = tmp_path / "b.kicad_pcb"
+        pcb.save(path)
+        assert _subchecks(_run(PCB.load(path))) == []
+
+    def test_back_layer_leg_is_complete(self):
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20, 50), (120, 50), width=2.0, layer="B.Cu", net=NET)
+        _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=NET, drill=1.0, size=2.0)
+        _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=NET, drill=1.0, size=2.0)
+        reinforce_net(pcb, NET)
+        assert _subchecks(_run(pcb)) == []
+
+
+class TestInactive:
+    def test_no_specs_is_a_noop(self):
+        assert _run(_board(), specs=[]).violations == []
+
+    def test_ineligible_path_is_a_noop(self):
+        assert _run(_board(), eligible=False).violations == []
+
+    def test_unreinforced_eligible_path_warns_without_waiver(self):
+        results = _run(_board())
+        assert _subchecks(results) == ["a", "b"]
+        assert {v.severity for v in results.violations} == {"warning"}
+
+    def test_waiver_citing_reinforcement_makes_errors(self):
+        results = _run(_board(), waived={NET})
+        assert {v.severity for v in results.violations} == {"error"}
+
+
+class TestSpacedMode:
+    def test_spaced_fails_anchors_mask_and_stray(self):
+        pcb = _board()
+        reinforce_net(pcb, NET, anchor_mode="spaced", spacing_mm=15.0)
+        results = _run(pcb)
+        kinds = _subchecks(results)
+        assert "a" in kinds and "b" in kinds and "stray" in kinds
+
+
+class TestSingleMutations:
+    def test_removing_an_end_anchor_fires_only_anchor_check(self):
+        pcb = _reinforced()
+        first = _anchors(pcb)[0]
+        pcb.vias.remove(first)
+        results = _run(pcb)
+        assert _subchecks(results) == ["a"]
+        assert "found 1 anchor" in results.violations[0].message
+        assert NET in results.violations[0].message and "F.Cu" in results.violations[0].message
+
+    def test_extra_mid_run_anchor_is_count_and_stray(self):
+        pcb = _reinforced()
+        a = _anchors(pcb)[0]
+        pcb.add_via(
+            70.0,
+            50.0,
+            size=a.size,
+            drill=a.drill,
+            layers=("F.Cu", "B.Cu"),
+            net=NET,
+            tenting=("no", "no"),
+        )
+        assert _subchecks(_run(pcb)) == ["a", "stray"]
+
+    def test_removing_mask_graphic_fires_only_mask_check(self):
+        pcb = _reinforced()
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "F.Mask"]
+        assert _subchecks(_run(pcb)) == ["b"]
+
+    def test_gap_in_mask_opening_fires(self):
+        pcb = _reinforced()
+        (line,) = [g for g in pcb.graphic_lines if g.layer == "F.Mask"]
+        a, b = sorted([line.start[0], line.end[0]])
+        mid = (a + b) / 2
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g is not line]
+        from kicad_tools.schema.pcb import GraphicLine
+
+        y = line.start[1]
+        pcb.graphic_lines.append(GraphicLine((a, y), (mid - 1, y), "F.Mask", 2.0))
+        pcb.graphic_lines.append(GraphicLine((mid + 1, y), (b, y), "F.Mask", 2.0))
+        results = _run(pcb)
+        assert _subchecks(results) == ["b"]
+
+    def test_split_but_touching_mask_pieces_are_continuous(self):
+        pcb = _reinforced()
+        (line,) = [g for g in pcb.graphic_lines if g.layer == "F.Mask"]
+        a, b = sorted([line.start[0], line.end[0]])
+        mid = (a + b) / 2
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g is not line]
+        from kicad_tools.schema.pcb import GraphicLine
+
+        y = line.start[1]
+        pcb.graphic_lines.append(GraphicLine((a, y), (mid, y), "F.Mask", 2.0))
+        pcb.graphic_lines.append(GraphicLine((mid, y), (b, y), "F.Mask", 2.0))
+        assert _subchecks(_run(pcb)) == []
+
+    def test_tented_anchor_fires_only_ring_check(self):
+        pcb = _reinforced()
+        _anchors(pcb)[1].tenting_back = "yes"
+        results = _run(pcb)
+        assert _subchecks(results) == ["c"]
+        assert "back" in results.violations[0].message
+
+    def test_small_via_layer_change_fires_only_d(self):
+        pcb = PCB.create(width=200, height=120, center=False)
+        _add_th_pad_footprint(pcb, ref="J1", x=20, y=50, net=NET, drill=1.0, size=2.0)
+        _add_th_pad_footprint(pcb, ref="J2", x=120, y=50, net=NET, drill=1.0, size=2.0)
+        pcb.add_trace((20, 50), (70, 50), width=3.0, layer="F.Cu", net=NET)
+        pcb.add_via(70.0, 50.0, size=0.8, drill=0.4, layers=("F.Cu", "B.Cu"), net=NET)
+        pcb.add_trace((70, 50), (120, 50), width=3.0, layer="B.Cu", net=NET)
+        reinforce_net(pcb, NET, current_paths=[_spec()])
+        results = _run(pcb)
+        assert "d" in _subchecks(results)
+        d = [v for v in results.violations if v.items[1].startswith("d@")]
+        assert len(d) == 1 and "0.400" in d[0].message
+        # The layer-change via is not mistaken for an anchor.
+        assert "stray" not in _subchecks(results)
+
+    def test_findings_carry_location_and_layer(self):
+        pcb = _reinforced()
+        pcb.vias.remove(_anchors(pcb)[0])
+        (v,) = _run(pcb).violations
+        assert v.location is not None and v.layer == "F.Cu" and v.nets == (NET,)
+
+
+class TestWaiverMatching:
+    @staticmethod
+    def _w(rule: str, reason: str, nets=(NET,), key=None) -> Waiver:
+        return Waiver(
+            rule=rule,
+            items=frozenset(),
+            nets=frozenset(nets),
+            reason=reason,
+            issue="x#1",
+            key=key,
+        )
+
+    @pytest.mark.parametrize("reason", ["wire carries current", "Buttress", "REINFORCED run"])
+    def test_matching_reasons(self, reason):
+        assert reinforcement_waived_nets([self._w("path_ampacity", reason)]) == {NET}
+
+    def test_non_matching_reason_or_rule(self):
+        assert not reinforcement_waived_nets([self._w("ampacity", "by design")])
+        assert not reinforcement_waived_nets([self._w("clearance", "wire")])
+
+    def test_keyed_entry_net_extracted(self):
+        w = self._w("ampacity", "wire", nets=(), key="ampacity|a|VBUS,GND|F.Cu")
+        assert reinforcement_waived_nets([w]) == {"VBUS", "GND"}
+
+
+class TestRegistration:
+    def test_checker_method_and_category(self):
+        from kicad_tools.cli.check_categories import CHECK_CATEGORIES
+        from kicad_tools.validate import DRCChecker
+
+        assert "reinforcement_incomplete" in CHECK_CATEGORIES
+        assert "check_reinforcement_incomplete" in DRCChecker.CHECK_ALL_METHODS
+        checker = DRCChecker(_reinforced(), current_path_specs=[_spec()])
+        assert checker.check_reinforcement_incomplete().violations == []
+        bare = DRCChecker(_board())
+        assert bare.check_reinforcement_incomplete().violations == []

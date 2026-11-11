@@ -49,6 +49,7 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
     {
         "ampacity",
         "path_ampacity",
+        "reinforcement_incomplete",
         "clearance",
         "physical_copper_gap",
         "connectivity",
@@ -206,6 +207,11 @@ def precheck(
         return skipped(category, "no_declared_targets")
     if category == "path_ampacity" and not getattr(checker, "current_path_specs", None):
         return skipped(category, "no_declared_current_paths")
+    if category == "reinforcement_incomplete" and not any(
+        getattr(s, "reinforcement_eligible", False)
+        for s in getattr(checker, "current_path_specs", None) or []
+    ):
+        return skipped(category, "no_reinforcement_eligible_paths")
     if (
         category == "physical_copper_gap"
         and getattr(checker, "physical_copper_gap_mm", None) is None
