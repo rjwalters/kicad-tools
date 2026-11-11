@@ -24,7 +24,9 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -46,6 +48,9 @@ class PreflightResult:
     status: Literal["OK", "WARN", "FAIL"]
     message: str
     details: str = ""
+    # Optional machine-readable record (Issue #8807): ``bom_lcsc_stock`` stores
+    # its per-part observations so a later ``--verify`` can re-evaluate them.
+    data: dict | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
@@ -56,6 +61,8 @@ class PreflightResult:
         }
         if self.details:
             d["details"] = self.details
+        if self.data is not None:
+            d["data"] = self.data
         return d
 
 
@@ -352,6 +359,134 @@ class PreflightConfig:
     # assigned LCSC part needs ``placements per board x order_boards`` in
     # stock.  Defaults to JLCPCB's minimum PCBA order.
     order_boards: int = 5
+
+    # LCSC catalog ids the operator holds in their own parts inventory
+    # (Issue #8807).  Upper-case; excluded from the stock shortfall verdict and
+    # listed as "held in operator inventory, not stock-verified".  Explicit
+    # only: never inferred.
+    inventory_covered: frozenset[str] = frozenset()
+
+
+def parse_inventory_covered(raw: str | Iterable[str] | None) -> frozenset[str]:
+    """Parse ``--inventory-covered`` ids: comma-separated, upper-cased, blanks dropped."""
+    if raw is None:
+        return frozenset()
+    parts = (
+        raw.split(",") if isinstance(raw, str) else [p for chunk in raw for p in chunk.split(",")]
+    )
+    return frozenset(p.strip().upper() for p in parts if p.strip())
+
+
+def _describe_stock_record(rec: dict, boards: int) -> str:
+    needed = int(rec["per_board"]) * boards
+    if rec.get("verified"):
+        when = "live"
+    else:
+        age = rec.get("age_days")
+        when = f"unverified {rec.get('source', 'unknown')}" + (
+            f", {age}d old" if age is not None else ""
+        )
+    return f"needs {needed}, stock {rec['stock']} ({when})"
+
+
+def evaluate_lcsc_stock(
+    data: dict, boards: int, covered: frozenset[str], strict: bool
+) -> PreflightResult:
+    """Judge recorded per-part stock observations (Issue #8807).
+
+    The one verdict function behind both ``kct export``/``readiness --generate``
+    (via ``_check_bom_lcsc_stock``) and ``readiness --verify`` (which re-runs it
+    on the manifest's recorded ``data``), so a shortfall reads identically in
+    both.  ``data`` holds ``parts`` (resolved LCSC ids with ``refs``,
+    ``per_board``, ``stock``, ``verified``, ``source``, ``age_days``) and
+    ``unresolved`` (ids in neither the cache nor the catalog).
+    """
+    name = "bom_lcsc_stock"
+    boards = max(1, int(boards))
+    parts = sorted(data.get("parts", []), key=lambda r: r["lcsc"])
+    unresolved = sorted(data.get("unresolved", []))
+    covered = frozenset(c.upper() for c in covered)
+    in_bom = {r["lcsc"] for r in parts} | set(unresolved)
+
+    live_short: list[str] = []
+    soft_short: list[str] = []
+    held: list[str] = []
+    not_short: list[str] = []
+    for rec in parts:
+        is_short = rec["stock"] < int(rec["per_board"]) * boards
+        if rec["lcsc"] in covered:
+            if is_short:
+                held.append(rec["lcsc"])
+            else:
+                not_short.append(rec["lcsc"])
+            continue
+        if not is_short:
+            continue
+        refs = sorted(rec["refs"])
+        shown = ",".join(refs[:3]) + ("..." if len(refs) > 3 else "")
+        entry = f"{shown} -> {rec['lcsc']}: {_describe_stock_record(rec, boards)}"
+        (live_short if rec.get("verified") else soft_short).append(entry)
+    held.extend(u for u in unresolved if u in covered)
+    unused = sorted(covered - in_bom)
+
+    def _fmt(entries: list[str]) -> str:
+        suffix = f" (and {len(entries) - 5} more)" if len(entries) > 5 else ""
+        return "; ".join(entries[:5]) + suffix
+
+    notes: list[str] = []
+    if held:
+        notes.append("held in operator inventory, not stock-verified: " + ", ".join(sorted(held)))
+    if not_short:
+        notes.append(
+            "inventory-covered but not short (stale --inventory-covered entry): "
+            + ", ".join(sorted(not_short))
+        )
+    if unused:
+        notes.append("inventory-covered but not in the BOM: " + ", ".join(unused))
+    note_text = "; ".join(notes)
+    stale = bool(not_short or unused)
+
+    def _result(
+        status: Literal["OK", "WARN", "FAIL"], message: str, details: str
+    ) -> PreflightResult:
+        if note_text:
+            details = f"{details}; {note_text}" if details else note_text
+        return PreflightResult(
+            name=name, status=status, message=message, details=details, data=data
+        )
+
+    order = f"{boards} board(s)"
+    if live_short:
+        return _result(
+            "FAIL",
+            f"{len(live_short)} LCSC part(s) lack live stock for {order}"
+            + (f"; {len(soft_short)} more short on unverified stock" if soft_short else ""),
+            _fmt(live_short + soft_short),
+        )
+    if soft_short:
+        return _result(
+            "FAIL" if strict else "WARN",
+            f"{len(soft_short)} LCSC part(s) show insufficient stock for {order} "
+            f"on unverified data (stale cache/offline catalog)"
+            + (" (strict preflight)" if strict else ""),
+            _fmt(soft_short),
+        )
+    checked = len(parts)
+    uncovered_unresolved = [u for u in unresolved if u not in covered]
+    if checked == 0 and uncovered_unresolved:
+        return _result(
+            "FAIL" if strict else "WARN",
+            f"Stock not verified: {len(uncovered_unresolved)} assigned LCSC number(s) found in "
+            f"neither the parts cache nor the offline catalog"
+            + (" (strict preflight)" if strict else ""),
+            ", ".join(uncovered_unresolved[:10]),
+        )
+    return _result(
+        "WARN" if stale else "OK",
+        f"{checked} LCSC part(s) have recorded stock for {order}"
+        + (f"; {len(held)} held in operator inventory" if held else ""),
+        "",
+    )
 
 
 class PreflightChecker:
@@ -1641,7 +1776,7 @@ class PreflightChecker:
 
                 catalog = JlcpartsCatalog(Path(cache.db_path).parent / CATALOG_FILENAME)
 
-        from .lcsc_value_check import stock_shortfall, verify_lcsc_assignment
+        from .lcsc_value_check import verify_lcsc_assignment
 
         exemptions = self._spec_exemptions()
         refs_by_lcsc: dict[str, list[str]] = {}
@@ -1655,71 +1790,55 @@ class PreflightChecker:
             # An exempt ref with a real, known part still ships it: check its stock.
             refs_by_lcsc.setdefault(item.lcsc, []).append(item.reference)
 
-        if not refs_by_lcsc:
+        if not refs_by_lcsc and not self.config.inventory_covered:
             return PreflightResult(
-                name=name, status="OK", message="No assigned LCSC parts to check stock for"
+                name=name,
+                status="OK",
+                message="No assigned LCSC parts to check stock for",
+                data={
+                    "order_boards": boards,
+                    "inventory_covered": [],
+                    "strict": bool(self.config.strict_report_source),
+                    "parts": [],
+                    "unresolved": [],
+                },
             )
 
-        live_short: list[str] = []
-        soft_short: list[str] = []
-        checked = 0
-        unresolved = 0
+        records: list[dict] = []
+        unresolved: list[str] = []
         for lcsc, refs in sorted(refs_by_lcsc.items()):
             verdict = verify_lcsc_assignment(cache, catalog, lcsc, "", refs[0])
             if verdict.part is None:
-                unresolved += 1  # not in any source: also reported by bom_lcsc_values
+                unresolved.append(lcsc)  # not in any source: also reported by bom_lcsc_values
                 continue
-            checked += 1
-            short = stock_shortfall(verdict.part, len(refs), boards)
-            if short is None:
-                continue
-            shown_refs = ",".join(sorted(refs)[:3]) + ("..." if len(refs) > 3 else "")
-            entry = f"{shown_refs} -> {lcsc}: {short.describe()}"
-            (live_short if short.verified else soft_short).append(entry)
-
-        def _fmt(entries: list[str]) -> str:
-            suffix = f" (and {len(entries) - 5} more)" if len(entries) > 5 else ""
-            return "; ".join(entries[:5]) + suffix
-
-        order = f"{boards} board(s)"
-        if live_short:
-            return PreflightResult(
-                name=name,
-                status="FAIL",
-                message=(
-                    f"{len(live_short)} LCSC part(s) lack live stock for {order}"
-                    + (f"; {len(soft_short)} more short on unverified stock" if soft_short else "")
-                ),
-                details=_fmt(live_short + soft_short),
+            part = verdict.part
+            age_days = None
+            if part.fetched_at is not None:
+                now = datetime.now(tz=part.fetched_at.tzinfo)
+                age_days = max(0, (now - part.fetched_at).days)
+            records.append(
+                {
+                    "lcsc": lcsc,
+                    "refs": sorted(refs),
+                    "per_board": len(refs),
+                    "stock": part.stock,
+                    "verified": bool(part.stock_verified),
+                    "source": part.stock_source,
+                    "age_days": age_days,
+                }
             )
-        if soft_short:
-            strict = self.config.strict_report_source
-            return PreflightResult(
-                name=name,
-                status="FAIL" if strict else "WARN",
-                message=(
-                    f"{len(soft_short)} LCSC part(s) show insufficient stock for {order} "
-                    f"on unverified data (stale cache/offline catalog)"
-                    + (" (strict preflight)" if strict else "")
-                ),
-                details=_fmt(soft_short),
-            )
-        if checked == 0:
-            strict = self.config.strict_report_source
-            return PreflightResult(
-                name=name,
-                status="FAIL" if strict else "WARN",
-                message=(
-                    f"Stock not verified: {unresolved} assigned LCSC number(s) found in "
-                    f"neither the parts cache nor the offline catalog"
-                    + (" (strict preflight)" if strict else "")
-                ),
-                details=", ".join(sorted(refs_by_lcsc)[:10]),
-            )
-        return PreflightResult(
-            name=name,
-            status="OK",
-            message=f"{checked} LCSC part(s) have recorded stock for {order}",
+        data = {
+            "order_boards": boards,
+            "inventory_covered": sorted(self.config.inventory_covered),
+            "strict": bool(self.config.strict_report_source),
+            "parts": records,
+            "unresolved": unresolved,
+        }
+        return evaluate_lcsc_stock(
+            data,
+            boards,
+            frozenset(c.upper() for c in self.config.inventory_covered),
+            bool(self.config.strict_report_source),
         )
 
     def _check_bom_footprint_match(self) -> PreflightResult:

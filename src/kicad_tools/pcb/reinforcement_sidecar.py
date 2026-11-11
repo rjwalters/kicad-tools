@@ -63,6 +63,8 @@ def build_wire_records(outcome: Any, origin_x: float, origin_y: float) -> list[d
                 "length_mm": round(leg.length_mm, 4),
                 "straight_line_mm": straight,
                 "wire_gauge_awg": outcome.wire_gauge_awg,
+                # Additive (#8803): the --max-end-shift used; None = default.
+                "max_end_shift_mm": getattr(outcome, "max_end_shift_mm", None),
                 "bare_diameter_mm": bare,
                 # Filled by #8743 (solder-mask opening along the run).
                 "mask_opening": None,

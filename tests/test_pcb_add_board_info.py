@@ -153,6 +153,56 @@ def test_rerun_is_idempotent(tmp_path, kw):
     assert len(stamps) == 1
 
 
+@pytest.mark.parametrize("kw", [{"auto": True}, {"at": (120.0, 115.0)}])
+def test_rerun_keeps_the_stamp_uuid(tmp_path, kw):
+    """Issue #8759: a re-stamp keeps the replaced stamp's UUID, so re-running
+    (``kct readiness --generate`` does on every run) leaves the board
+    byte-identical instead of minting a fresh UUID each time."""
+    p = _write(tmp_path)
+    assert _run(p, **kw) == 0
+    first = p.read_bytes()
+    for _ in range(2):
+        assert _run(p, **kw) == 0
+        assert p.read_bytes() == first
+
+
+@pytest.mark.parametrize("kw", [{"auto": True}, {"at": (120.0, 115.0)}])
+def test_restamp_keeps_a_non_derived_uuid_even_when_moved(tmp_path, kw):
+    """Issue #8759: the kept UUID is the *old* stamp's, not a re-derived one.
+
+    A stamp written before this change carries a random uuid4; re-stamping at a
+    different position must still keep it (uuid5 re-derivation would change it)."""
+    import re
+
+    p = _write(tmp_path)
+    assert _run(p, at=(110.0, 112.0)) == 0
+    seeded = "deadbeef-0000-4000-8000-00000000abcd"
+    txt = p.read_text()
+    new_txt, n = re.subn(
+        r'(\(gr_text "Widget B 2026-11-06".*?\(uuid ")[^"]+(")',
+        rf"\g<1>{seeded}\g<2>",
+        txt,
+        flags=re.S,
+    )
+    assert n == 1
+    p.write_text(new_txt)
+    assert _run(p, **kw) == 0
+    out = p.read_text()
+    assert seeded in out
+    assert out.count("Widget B 2026-11-06") == 1
+
+
+def test_fresh_stamps_on_identical_boards_agree(tmp_path):
+    """Issue #8759: a new stamp's UUID is content-keyed, not random."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    pa, pb = _write(a), _write(b)
+    assert _run(pa, auto=True) == 0
+    assert _run(pb, auto=True) == 0
+    assert pa.read_bytes() == pb.read_bytes()
+
+
 def test_explicit_at_warns_when_not_clear(tmp_path, capsys):
     p = _write(tmp_path)
     assert _run(p, at=(103.0, 127.0), output_format="json") == 0

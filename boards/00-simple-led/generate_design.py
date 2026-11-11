@@ -322,6 +322,11 @@ def create_led_pcb(output_dir: Path) -> Path:
     (legacy_teardrops no)
   )
   (paper "A4")
+  (title_block
+    (title "Simple LED")
+    (date "2025-01")
+    (rev "A")
+  )
   (layers
     (0 "F.Cu" signal)
     (31 "B.Cu" signal)
@@ -821,6 +826,21 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
     # pad with margin (geometry derived from the actual pad positions in the
     # written PCB; see ``_rewrite_led_anode_route``).
     _rewrite_led_anode_route(output_path, net_name="LED_ANODE")
+
+    # Step 6.5: Issue #8532 / #8759 -- every board carries global fiducials
+    # and a board-ID silkscreen (default-on ``fiducials_missing`` /
+    # ``board_id_missing`` rules).  Added after the final trace edit and
+    # before the pours are created and filled, so the fill backs off the
+    # fiducial copper.  The board-ID template reads ``rev`` from the header's
+    # title block (``generate_header``); the PCB title is the short "Simple
+    # LED" because the schematic's full title does not fit a 25 mm board.
+    from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+    from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+    if run_add_fiducials(output_path, sides="populated") != 0:
+        raise RuntimeError("pcb add-fiducials failed")
+    if run_add_board_info(output_path, auto=True) != 0:
+        raise RuntimeError("pcb add-board-info failed")
 
     # Step 7: Create + fill copper pours for power/ground nets.
     #

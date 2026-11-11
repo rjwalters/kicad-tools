@@ -1,19 +1,25 @@
 {
   "file": "output/simple_led_routed.kicad_pcb",
   "manufacturer": "jlcpcb",
-  "pcb_sha256": "ae165509b324c2191aa5c46c5423c9025b5bd630f89b30063a2644ceeccac46d",
+  "pcb_sha256": "57d51f0532438e9563f97fa20df9e4a0b1f4f20591330e1612417fc1076b9272",
   "layers": 2,
   "summary": {
     "errors": 0,
     "warnings": 0,
     "infos": 1,
     "waived": 0,
-    "rules_checked": 66,
+    "rules_checked": 71,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
       "track_dangling": 1,
       "via_dangling": 1,
+      "pour_slot": 1,
+      "redundant_copper_duplicate": 1,
+      "redundant_copper_fragments": 1,
+      "redundant_copper_detour": 1,
+      "redundant_copper_via_offcentre": 1,
+      "redundant_copper_covered": 1,
       "doc_drift_stale_pin": 1,
       "doc_drift_unresolvable_pin": 1,
       "isolated_copper": 1,
@@ -26,6 +32,7 @@
       "netclass_annular_ring": 1,
       "sch_field_offset": 1,
       "sch_field_overlap": 1,
+      "sch_wire_through_symbol": 1,
       "spec_conformance_dimensions": 1,
       "spec_conformance_layers": 1,
       "spec_conformance_min_trace": 1,
@@ -35,13 +42,15 @@
     },
     "passed": true,
     "stale_waivers": 0,
-    "coverage_checked": 35,
-    "coverage_skipped": 5,
+    "orphan_waivers": 0,
+    "coverage_checked": 39,
+    "coverage_skipped": 6,
     "coverage_unknown": [
       "model_coverage",
       "spec_conformance"
     ],
-    "coverage_blocking_unknown": []
+    "coverage_blocking_unknown": [],
+    "attach_zone_exemption": "not_applicable"
   },
   "violations": [
     {
@@ -63,14 +72,35 @@
       "status": "info",
       "waived": false,
       "key": "connector_edge_distance|J1||F.Cu",
-      "evidence_hash": "ev2:e474f9a88cdb95e5"
+      "evidence_hash": "ev3:e474f9a88cdb95e5"
     }
   ],
   "mask_copper_assessments": [],
+  "schema_version": 1,
+  "findings": [
+    {
+      "schema_version": 1,
+      "rule_id": "connector_edge_distance",
+      "severity": "info",
+      "message": "J1 (Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical): 3.23mm from nearest board edge",
+      "refs": [
+        "J1"
+      ],
+      "pads": [],
+      "nets": [],
+      "point": [
+        141.0,
+        87.5
+      ],
+      "bbox": null,
+      "layer": "F.Cu",
+      "waived": false
+    }
+  ],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "66 rules checked, 0 error(s), 0 warning(s)"
+      "detail": "71 rules checked, 0 error(s), 0 warning(s)"
     },
     "erc": {
       "status": "PASSED",
@@ -112,6 +142,12 @@
       "state": "checked",
       "reason": null,
       "blocking": true
+    },
+    "board_id": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
     },
     "clearance": {
       "status": "checked",
@@ -191,6 +227,12 @@
       "reason": null,
       "blocking": true
     },
+    "fiducials": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
     "impedance": {
       "status": "checked",
       "state": "checked",
@@ -268,6 +310,24 @@
       "state": "checked",
       "reason": null,
       "blocking": false
+    },
+    "pour_slot": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "redundant_copper": {
+      "status": "checked",
+      "state": "checked",
+      "reason": null,
+      "blocking": false
+    },
+    "reinforcement_incomplete": {
+      "status": "skipped:no_reinforcement_eligible_paths",
+      "state": "skipped",
+      "reason": "no_reinforcement_eligible_paths",
+      "blocking": true
     },
     "routing_policy": {
       "status": "skipped:no_declared_policies",

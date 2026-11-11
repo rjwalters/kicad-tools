@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-11
 
+- **PR #8800**: fix(reinforce): slide refused end anchors inward; align reinforcement_incomplete
+- **PR #8799**: fix: resolve stitched doubled copper as chained parallel groups
+- **Issue #8798** (closed): current paths: doubled copper with interior stitching vias (and a two-branch ring) is still ambiguous after #8791
+- **Issue #8797** (closed): pcb reinforce (ends mode): a refused end anchor is not slid inward, so legs end up partial; reinforcement_incomplete double-reports slid anchors and ignores mask-graphic openings
 - **PR #8795**: chore(loom): resync installed Loom to v0.19.1287
 - **PR #8792**: feat(check): add reinforcement_incomplete rule for buttress-wire legs
 - **PR #8788**: feat: add --clear/--replace to kct pcb reinforce

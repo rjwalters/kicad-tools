@@ -1627,7 +1627,11 @@ def _group_qualifies(branches: list[list[Segment]]) -> bool:
 
 
 def _reduce_parallel_groups(
-    graph: _CopperGraph, start: _Node, goal: _Node, arrays: Sequence[_ViaArray] = ()
+    graph: _CopperGraph,
+    start: _Node,
+    goal: _Node,
+    arrays: Sequence[_ViaArray] = (),
+    blockers: list[list[Segment]] | None = None,
 ) -> list[ParallelGroup] | None:
     """Clear a cycle by contracting simple parallel groups (issue #8790).
 
@@ -1636,7 +1640,9 @@ def _reduce_parallel_groups(
     :func:`_group_qualifies`); non-load degree-2 junctions are series-merged.
     Returns the groups used when the component reduces to a tree, ``None``
     otherwise (a loop through another load, a mesh, same-layer detours), so the
-    caller keeps today's ambiguity and witness.
+    caller keeps today's ambiguity and witness.  When ``blockers`` is given, the
+    branches of the first same-junction-pair group failing
+    :func:`_group_qualifies` are appended to it (issue #8804).
     """
     roots = {node: next(iter(a.nodes)) for a in arrays for node in a.nodes}
     contracted = {edge for a in arrays for edge in a.edges}
@@ -1683,6 +1689,8 @@ def _reduce_parallel_groups(
                 continue
             branches = [m.segments for m in members]
             if not _group_qualifies(branches):
+                if blockers is not None and not blockers:
+                    blockers.extend(list(b) for b in branches)
                 continue
             groups.append(ParallelGroup(tuple(tuple(b) for b in branches)))
             merged = _SPEdge(
@@ -1720,6 +1728,29 @@ def _describe_witness(witness: dict[str, object]) -> str:
         return f" [witness: segment {start}->{end} on {witness['layer']}]"
     position = tuple(cast("list[float]", witness["position"]))
     return f" [witness: via barrel at {position}]"
+
+
+def _blocking_branches_witness(blockers: list[list[Segment]]) -> list[dict[str, object]]:
+    return [
+        {
+            "layer": b[0].layer,
+            "start": [b[0].start[0], b[0].start[1]],
+            "end": [b[-1].end[0], b[-1].end[1]],
+        }
+        for b in blockers
+    ]
+
+
+def _describe_blockers(witness: dict[str, object]) -> str:
+    branches = cast("list[dict[str, object]]", witness.get("blocking_branches") or [])
+    if not branches:
+        return ""
+    parts = [
+        f"{tuple(cast('list[float]', b['start']))}->{tuple(cast('list[float]', b['end']))}"
+        f" on {b['layer']}"
+        for b in branches
+    ]
+    return f" [blocking branches: {'; '.join(parts)}]"
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
@@ -2011,9 +2042,12 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                 )
     parallel_groups: list[ParallelGroup] = []
     if _component_has_cycle(adjacency, start, arrays):
-        parallel_groups = _reduce_parallel_groups(adjacency, start, goal, arrays) or []
+        blockers: list[list[Segment]] = []
+        parallel_groups = _reduce_parallel_groups(adjacency, start, goal, arrays, blockers) or []
     if not parallel_groups and _component_has_cycle(adjacency, start, arrays):
         witness = _component_cycle_witness(adjacency, start, arrays)
+        if witness and blockers:
+            witness["blocking_branches"] = _blocking_branches_witness(blockers)
         return PathResolution(
             spec=spec,
             status=STATUS_AMBIGUOUS,
@@ -2022,6 +2056,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                 "loop/parallel return path reachable from them -- current split "
                 "between branches cannot be determined from a single resolved path"
                 + _describe_witness(witness)
+                + _describe_blockers(witness)
             ),
             source=source,
             sink=sink,

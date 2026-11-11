@@ -9,76 +9,76 @@
       "size": 1109
     },
     "assembly-back.pdf": {
-      "sha256": "38b7d086560f84f465f653ccd33e14b4a43b3e7a89ffcea6bcbea697a34dc761",
-      "size": 28827
+      "sha256": "1a416a61ebeee47c5376bc1991e168b30c5c327b1f8761310c05f85de74bf5b5",
+      "size": 30383
     },
     "assembly-front.pdf": {
-      "sha256": "ec1e3d36467549b81cbf279a3949c1a845df7820e9a61b950562399277bb6e6d",
-      "size": 49407
+      "sha256": "f62e9f6784fefac335dc0b8a428417444bed8851242f9fc567a17f6fd9a0c68f",
+      "size": 58199
     },
     "bom_jlcpcb.csv": {
       "sha256": "6892235c1d9c6887f5487921c5e1e49017c7f5b0c357227ac30788e069ce951f",
       "size": 746
     },
     "check-report.json": {
-      "sha256": "e762d0a9a1f5a8e5ecbdf86baf84477b323f209a9b39f5bcea3ed53766bec071",
-      "size": 22439
+      "sha256": "879f9c63608a5b24005ccfc70857b4fa08fcae91152e3400c4577757b40a4616",
+      "size": 23097
     },
     "cpl_jlcpcb.csv": {
       "sha256": "cf68a29f553dbfc0332a67c018be523dd09f8a2017d441ba69e8cb17d310b86e",
       "size": 2750
     },
     "design-source.zip": {
-      "sha256": "b1a0f408066b5c786275855077c8bb3ca04ebfbcd0bc1425bd92a4fc71202d94",
-      "size": 14284
+      "sha256": "c5ea31408c6656a6aa904a144b8d153f9148ba6895f8f0113a378805b431cdbd",
+      "size": 14535
     },
     "fill-consistency.json": {
       "sha256": "6aea658a7d30a148c08b041c382b38c562024696eda159f25addb85c3d45b944",
       "size": 37
     },
     "gerbers/gerbers.zip": {
-      "sha256": "40555439ead55e8122d8e18cec6cc8ca48877578fb7215a7ddece43ee81101cd",
-      "size": 37357
+      "sha256": "e305bf87b0591e25b22585485121b97d5707baefeb5d7c42f18f1ce725f965a7",
+      "size": 40894
     },
     "images/assembly.png": {
-      "sha256": "8aa9b85eea8de9efb8420099cf855df2e73598c27c64e96decd937446441953b",
-      "size": 289294
+      "sha256": "fe6cfb574e10d942a7c6076cc3a6e6ea3c78ffa5efd4e4170adbf15f9f1201dd",
+      "size": 357762
     },
     "images/layer_B_Cu.png": {
-      "sha256": "02733bea368f3db45021e7e83b47333e0a2848c453623fbe77edd51bc6066685",
-      "size": 135040
+      "sha256": "9a0cbd3a9d22079f82ffea9d5ac26aa719dfc8346982a591abb23decbb85dca1",
+      "size": 171644
     },
     "images/layer_F_Cu.png": {
-      "sha256": "b755c007ae9ff79f09c0236b8c1e56fe973a4879eccb2357219315caa221898d",
-      "size": 184127
+      "sha256": "89d695d3bee0b49d18283d6e19559232eecb701d5c524ded2db13465c2ebf5bd",
+      "size": 221046
     },
     "images/layer_In1_Cu.png": {
-      "sha256": "ce823df9908ef08af80a07bfbca621621f63843c14bca175d3c1a9cd03860ab1",
-      "size": 117272
+      "sha256": "d2b1f8f83cc3fbfa2ba8ac723203a12b715b4dbf824743e3b79bbc2025f41c46",
+      "size": 118738
     },
     "images/layer_In2_Cu.png": {
-      "sha256": "463f2eedcaa7a4768c767eaabd3a6ec72f6713327f76d3a489ff343dfb4a3ff1",
-      "size": 147203
+      "sha256": "d567b780e6e07b81f8d117b4c456ba78d37896a5ee8719b56bd3dac4554a0abc",
+      "size": 148941
     },
     "images/pcb_back.png": {
-      "sha256": "fea720cf8516d3945eaac9b24bb71347c088905eaf94afb54f24edcee6133cc7",
-      "size": 137385
+      "sha256": "a5930e7dc2a1b4538d085561e91946b37c5d8c1ed24fa5943697ccda14a03221",
+      "size": 174121
     },
     "images/pcb_copper.png": {
-      "sha256": "e9b5f2c4ac9b3dfdcff8e05c0f9ee6f093e0e49308eebbcbb923420ec387c470",
-      "size": 202045
+      "sha256": "e3d9c3792a88ecf6da1b49f0e7bf0c753eee78ca19f306800832a657a7db3a6b",
+      "size": 238978
     },
     "images/pcb_front.png": {
-      "sha256": "67723cb8e450ebe02b32135651f9af2e44a38b768802cbb835fc829ec5c29fc5",
-      "size": 279260
+      "sha256": "6624d63452b06204f47c4b2fbe68918738ce7bccab48db7503ad6fd64e145083",
+      "size": 351788
     },
     "images/schematic_diffpair_test.png": {
-      "sha256": "c58aa562015b680c006b59d3828c5b74fdddb0f9793e900c186e94b08e03d7de",
-      "size": 262609
+      "sha256": "381d569a517aea1108d9d98e833d9a068b222bd3478c5a17dfd143bc455c135e",
+      "size": 262646
     },
     "kicad_project.zip": {
-      "sha256": "e7fe3e98686eec61fe7c430b37a9e568ad80fc599627cf47ddcad2b4d046d134",
-      "size": 74458
+      "sha256": "23f4f06fdd9420b06be50e0a497324e96c54a4f9cf1d57639d41ca8d83e608e1",
+      "size": 76082
     },
     "lvs.json": {
       "sha256": "8a44e465f8db5c6f95b19b46257bd87290819ef27e8b68a85cbf490bd0f47a68",
@@ -97,15 +97,15 @@
       "size": 8620
     },
     "report.md": {
-      "sha256": "784cf1921d0cedb7dcde8a30a80c43807c90d096789b6e8d7ac2d80416990964",
-      "size": 3316
+      "sha256": "1aec35db4d7b12aeeec493ebc438119b25e05181e6f2e0aa767bf66f03b6adbf",
+      "size": 3317
     },
     "report.pdf": {
-      "sha256": "32b7b11d0d5670591c0b6d1b224c7f0bb88c15f71b5376f4eb250dbe9df51c28",
-      "size": 1939688
+      "sha256": "74faa0b03e7f21fea01581bc17e48afb58ea39cf811adf088a9d491f43fbeddb",
+      "size": 2237999
     },
     "schematic.pdf": {
-      "sha256": "072fa86f57bfa38219b098c551d67e394b5ca0cd7d6e9378c23de3489c6786f8",
+      "sha256": "af3937ca6f9797d2bed5e09b73993be25ef3c77405d93a2b6293cd5915e41ff3",
       "size": 133124
     }
   },

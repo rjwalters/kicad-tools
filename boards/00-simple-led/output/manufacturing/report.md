@@ -1,8 +1,8 @@
 ---
 title: "simple_led_routed"
 subtitle: "Design Report"
-author: "kicad-tools 0.24.0"
-date: "Rev 1 | 2026-10-21 | jlcpcb"
+author: "kicad-tools 0.29.0"
+date: "Rev 1 | 2026-11-11 | jlcpcb"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -18,7 +18,7 @@ header-includes:
 | Property | Value |
 |----------|-------|
 | Layers | 2 copper (F.Cu, B.Cu) |
-| Footprints | 3 (1 SMD, 2 THT, 0 other) |
+| Footprints | 6 (4 SMD, 2 THT, 0 other) |
 | Nets | 3 |
 | Traces | 2 segments |
 | Vias | 0 |
@@ -119,6 +119,7 @@ Minimal LED circuit
 
 
 
+
 \newpage
 
 ## Manufacturing Readiness
@@ -154,9 +155,9 @@ Minimal LED circuit
 | Metric | Per Board (estimated) |
 |--------|-------|
 | PCB Fabrication | ~0.5 USD |
-| Components (estimated) | ~0.12 USD |
-| Assembly (estimated) | ~1.92 USD |
-| **Total (estimated)** | **~2.55 USD** |
+| Components (estimated) | ~0.15 USD |
+| Assembly (estimated) | ~1.94 USD |
+| **Total (estimated)** | **~2.6 USD** |
 | Batch Quantity | 5 |
-| Batch Total (estimated) | ~12.73 USD |
+| Batch Total (estimated) | ~12.98 USD |
 

@@ -80,8 +80,11 @@ class FakeEngines:
         stale_waivers: int = 0,
         lcsc_check: dict | None = None,
         omit_lcsc_check: bool = False,
+        stock_check: dict | None = None,
     ) -> None:
         self.board = board
+        self.stock_check = stock_check
+        self.export_kwargs: dict = {}
         # The bundle preflight's ``bom_lcsc_values`` entry the bom gate reads
         # (issue #7166); ``omit_lcsc_check`` models a manifest without one.
         self.lcsc_check = (
@@ -220,8 +223,11 @@ class FakeEngines:
         output_dir: Path,
         assembly: bool,
         merge_lcsc_from: Path | None = None,
+        quantity: int | None = None,
+        inventory_covered: frozenset[str] | None = None,
     ) -> EngineRun:
         self.calls.append("export")
+        self.export_kwargs = {"quantity": quantity, "inventory_covered": inventory_covered}
         self.merge_lcsc_from = merge_lcsc_from
         self.pcb_bytes_at_export = pcb.read_bytes()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -263,6 +269,8 @@ class FakeEngines:
         manifest: dict = {"version": "1.0", "manufacturer": mfr, "files": {}}
         if self.lcsc_check is not None:
             manifest["preflight"] = [self.lcsc_check]
+            if self.stock_check is not None:
+                manifest["preflight"].append(self.stock_check)
         (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         return EngineRun(ok=True)
 
@@ -2328,12 +2336,60 @@ def test_output_inside_board_dir_still_runs(tmp_path, capsys):
     fake = FakeEngines(board)
 
     readiness_cmd.main(
-        [str(board), "--mfr", "jlcpcb", "--generate", "--output", str(board / "out2")],
+        [
+            str(board),
+            "--mfr",
+            "jlcpcb",
+            "--generate",
+            "--output",
+            str(board / "output" / "manufacturing"),
+        ],
         engines=fake.bundle(),
     )
 
     assert "--output must be inside" not in capsys.readouterr().err
     assert fake.calls  # gates ran
+
+
+def test_output_not_named_manufacturing_is_refused_early(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+    bad = board / "manufacturing_v32"
+
+    code = readiness_cmd.main(
+        [str(board), "--mfr", "jlcpcb", "--generate", "--output", str(bad)],
+        engines=fake.bundle(),
+    )
+
+    assert code == 2
+    assert "named 'manufacturing'" in capsys.readouterr().err
+    assert not bad.exists()
+    assert fake.calls == []
+
+
+def test_output_not_named_manufacturing_json_error(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+
+    code = readiness_cmd.main(
+        [
+            str(board),
+            "--mfr",
+            "jlcpcb",
+            "--generate",
+            "--format",
+            "json",
+            "--output",
+            str(board / "manufacturing_v32") + "/",
+        ],
+        engines=fake.bundle(),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["success"] is False
+    assert "named 'manufacturing'" in payload["error"]
+    assert fake.calls == []
 
 
 def _run_output(board: Path, output: str, fake: FakeEngines, board_arg: Path | None = None) -> int:
@@ -2365,7 +2421,7 @@ def test_output_real_path_accepted_when_board_given_via_symlink(tmp_path, capsys
     board_link = tmp_path / "board-link"
     board_link.symlink_to(board, target_is_directory=True)
 
-    _run_output(board, str(board / "out2"), fake, board_arg=board_link)
+    _run_output(board, str(board / "output" / "manufacturing"), fake, board_arg=board_link)
 
     assert "--output must be inside" not in capsys.readouterr().err
     assert fake.calls  # gates ran
@@ -2383,7 +2439,7 @@ def test_output_relative_path_resolves_against_cwd(tmp_path, capsys, monkeypatch
     assert fake.calls == []
 
     fake_ok = FakeEngines(board)
-    _run_output(board, "out2", fake_ok)
+    _run_output(board, "output/manufacturing", fake_ok)
     assert "--output must be inside" not in capsys.readouterr().err
     assert fake_ok.calls
 

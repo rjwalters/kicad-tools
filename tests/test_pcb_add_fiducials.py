@@ -2,7 +2,9 @@
 
 import json
 
-from kicad_tools.cli.pcb_add_fiducials import _collinear, run_add_fiducials
+import pytest
+
+from kicad_tools.cli.pcb_add_fiducials import _collinear, _is_fiducial, run_add_fiducials
 from kicad_tools.schema.pcb import PCB
 
 
@@ -176,3 +178,41 @@ def test_nonzero_origin_avoids_track(tmp_path):
         x, y = f.position
         dx = max(3 - x, 0, x - 12)
         assert (dx**2 + (y - 3) ** 2) ** 0.5 >= 2.0
+
+
+class _FP:
+    def __init__(self, name="", reference="", tags=""):
+        self.name, self.reference, self.tags = name, reference, tags
+
+
+@pytest.mark.parametrize(
+    "fp,expected",
+    [
+        (_FP("Fiducial:Fiducial_1mm_Mask2mm"), True),
+        (_FP("projlib:Fiducial_1mm_Mask2mm_Clear3mm", "FID1"), True),
+        (_FP("Fiducial_NoColon"), True),
+        (_FP("projlib:Mark", "FID12"), True),
+        (_FP("projlib:Mark", "U1", "Global FiDuCial mark"), True),
+        (_FP("Resistor_SMD:R_0603", "R1", "resistor"), False),
+        (_FP("Resistor_SMD:R_0603", "R1"), False),
+        (_FP("lib:NotAFiducialPrefix", "C1"), False),
+    ],
+)
+def test_is_fiducial_predicate(fp, expected):
+    assert _is_fiducial(fp) is expected
+
+
+def test_project_library_fiducials_are_idempotent(tmp_path):
+    fids = "".join(
+        f"""(footprint "projlib:Fiducial_1mm_Mask2mm_Clear3mm"
+    (layer "F.Cu") (uuid "fid-{i}") (at {x} {y})
+    (property "Reference" "FID{i}" (at 0 0 0) (layer "F.SilkS"))
+    (property "Value" "Fiducial" (at 0 0 0) (layer "F.Fab"))
+    (pad "" smd circle (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask")))
+  """
+        for i, (x, y) in enumerate([(5, 5), (55, 5), (30, 35)], start=1)
+    )
+    path = _write(tmp_path, _board(extra=fids))
+    before = len(_fids(path))
+    run_add_fiducials(path, sides="front")
+    assert len(_fids(path)) == before
