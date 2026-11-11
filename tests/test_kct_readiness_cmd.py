@@ -2328,12 +2328,60 @@ def test_output_inside_board_dir_still_runs(tmp_path, capsys):
     fake = FakeEngines(board)
 
     readiness_cmd.main(
-        [str(board), "--mfr", "jlcpcb", "--generate", "--output", str(board / "out2")],
+        [
+            str(board),
+            "--mfr",
+            "jlcpcb",
+            "--generate",
+            "--output",
+            str(board / "output" / "manufacturing"),
+        ],
         engines=fake.bundle(),
     )
 
     assert "--output must be inside" not in capsys.readouterr().err
     assert fake.calls  # gates ran
+
+
+def test_output_not_named_manufacturing_is_refused_early(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+    bad = board / "manufacturing_v32"
+
+    code = readiness_cmd.main(
+        [str(board), "--mfr", "jlcpcb", "--generate", "--output", str(bad)],
+        engines=fake.bundle(),
+    )
+
+    assert code == 2
+    assert "named 'manufacturing'" in capsys.readouterr().err
+    assert not bad.exists()
+    assert fake.calls == []
+
+
+def test_output_not_named_manufacturing_json_error(tmp_path, capsys):
+    board = make_board(tmp_path)
+    fake = FakeEngines(board)
+
+    code = readiness_cmd.main(
+        [
+            str(board),
+            "--mfr",
+            "jlcpcb",
+            "--generate",
+            "--format",
+            "json",
+            "--output",
+            str(board / "manufacturing_v32") + "/",
+        ],
+        engines=fake.bundle(),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["success"] is False
+    assert "named 'manufacturing'" in payload["error"]
+    assert fake.calls == []
 
 
 def _run_output(board: Path, output: str, fake: FakeEngines, board_arg: Path | None = None) -> int:
@@ -2365,7 +2413,7 @@ def test_output_real_path_accepted_when_board_given_via_symlink(tmp_path, capsys
     board_link = tmp_path / "board-link"
     board_link.symlink_to(board, target_is_directory=True)
 
-    _run_output(board, str(board / "out2"), fake, board_arg=board_link)
+    _run_output(board, str(board / "output" / "manufacturing"), fake, board_arg=board_link)
 
     assert "--output must be inside" not in capsys.readouterr().err
     assert fake.calls  # gates ran
@@ -2383,7 +2431,7 @@ def test_output_relative_path_resolves_against_cwd(tmp_path, capsys, monkeypatch
     assert fake.calls == []
 
     fake_ok = FakeEngines(board)
-    _run_output(board, "out2", fake_ok)
+    _run_output(board, "output/manufacturing", fake_ok)
     assert "--output must be inside" not in capsys.readouterr().err
     assert fake_ok.calls
 

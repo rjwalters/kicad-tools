@@ -1019,6 +1019,11 @@ def resolve_options(args: argparse.Namespace) -> tuple[ReadinessOptions | None, 
     output_dir = Path(args.output).resolve() if args.output else pcb.parent / "manufacturing"
     if args.output and not output_dir.is_relative_to(board_dir.resolve()):
         return None, f"--output must be inside the board directory {board_dir}; got {output_dir}"
+    if args.output and output_dir.name != "manufacturing":
+        return None, (
+            "--output must be a directory named 'manufacturing' (the readiness gate "
+            f"and tapeout-sign-off locate the bundle by that name); got {output_dir}"
+        )
     evidence_dir = board_dir / "output" / _EVIDENCE_DIRNAME
     if not (board_dir / "output").is_dir():
         evidence_dir = board_dir / _EVIDENCE_DIRNAME
@@ -4099,7 +4104,7 @@ def add_readiness_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Manufacturing bundle directory (default: <pcb-dir>/manufacturing/); "
-            "must be inside the board directory"
+            "must be inside the board directory and named 'manufacturing'"
         ),
     )
     parser.add_argument(
