@@ -3044,6 +3044,33 @@ class TestReinforceClearCLI:
         assert run_pcb_command(_reinforce_args(path, clear=True, replace=True)) == 1
 
 
+class TestWireSpanReport:
+    """Issue #8781: ``full`` must not hide a wire much shorter than its leg."""
+
+    @staticmethod
+    def _bus_leg_pcb(parallel_y: float) -> PCB:
+        pcb = PCB.create(width=300, height=200, center=False)
+        pcb.add_trace((20.0, 100.0), (300.0 - 20.0, 100.0), width=2.0, layer="F.Cu", net="N")
+        pts = [(30.05, 100.0), (30.05, parallel_y), (250.0, parallel_y), (250.0, 140.0)]
+        for a, b in zip(pts[:-1], pts[1:], strict=True):
+            pcb.add_trace(a, b, width=2.0, layer="F.Cu", net="N")
+        return pcb
+
+    def test_parallel_leg_reports_short_span(self):
+        result = reinforce_net(self._bus_leg_pcb(102.5), "N", all_runs=True, dry_run=True)
+        legs = [leg for leg in result.legs if leg.status == "full" and leg.reason]
+        assert legs, [(leg.status, leg.reason) for leg in result.legs]
+        leg = legs[0]
+        assert 0.0 < leg.wire_span_mm < leg.length_mm / 2
+        assert "wire spans" in leg.reason
+
+    def test_normal_leg_has_span_and_empty_reason(self):
+        result = reinforce_net(_straight_run_pcb(), "FUSED_LINE", dry_run=True)
+        (leg,) = result.legs
+        assert leg.status == "full" and leg.reason == ""
+        assert leg.wire_span_mm == pytest.approx(abs(leg.anchors[1].x - leg.anchors[0].x), abs=0.5)
+
+
 class TestEndAnchorSameNetPadNotAtLegEnd:
     """Issue #8772: a same-net SMD pad that is not the copper the leg ends on
     (mid-leg, or the end pad of an adjacent leg of a Y) is still end copper

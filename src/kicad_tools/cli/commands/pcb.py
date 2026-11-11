@@ -977,7 +977,13 @@ def _print_reinforce_legs(outcome, origin_x: float, origin_y: float) -> None:
         anchors = ", ".join(f"({a.x + origin_x:.2f}, {a.y + origin_y:.2f})" for a in leg.anchors)
         print(
             f"    leg {i} [{leg.kind}] {leg.layer} {leg.length_mm:.1f} mm -- "
-            f"{len(leg.anchors)}/2 anchored [{leg.status}]" + (f" at {anchors}" if anchors else "")
+            f"{len(leg.anchors)}/2 anchored [{leg.status}]"
+            + (
+                f", wire spans {leg.wire_span_mm:.1f} of {leg.length_mm:.1f} mm"
+                if leg.wire_span_mm
+                else ""
+            )
+            + (f" at {anchors}" if anchors else "")
         )
         if leg.paths:
             print(f"      paths: {', '.join(leg.paths)}")
@@ -1320,6 +1326,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "kind": leg.kind,
                 "length_mm": round(leg.length_mm, 4),
                 "width_mm": round(leg.width_mm, 4),
+                "wire_span_mm": round(leg.wire_span_mm, 4),
                 "anchors": [
                     {"x": round(a.x + origin_x, 4), "y": round(a.y + origin_y, 4)}
                     for a in leg.anchors
