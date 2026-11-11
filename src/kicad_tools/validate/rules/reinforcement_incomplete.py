@@ -159,6 +159,7 @@ class ReinforcementIncompleteRule(DRCRule):
         wires: Sequence[dict[str, Any]] | None = None,
         waived_nets: Iterable[str] | None = None,
         end_offset_mm: float | None = None,
+        max_end_shift_mm: float | None = None,
     ) -> None:
         """Initialize the rule.
 
@@ -172,11 +173,15 @@ class ReinforcementIncompleteRule(DRCRule):
                 errors, all others warnings.
             end_offset_mm: End offset; defaults to
                 :data:`kicad_tools.pcb.reinforce.DEFAULT_END_OFFSET_MM`.
+            max_end_shift_mm: The ``kct pcb reinforce --max-end-shift`` the
+                board was reinforced with; ``None`` = the placer's default
+                bound (:func:`kicad_tools.pcb.reinforce.end_shift_bound`).
         """
         self.specs = list(specs) if specs else []
         self.wires = list(wires) if wires else []
         self.waived_nets = frozenset(waived_nets or ())
         self.end_offset_mm = end_offset_mm
+        self.max_end_shift_mm = max_end_shift_mm
 
     # ------------------------------------------------------------------ API
 
@@ -188,7 +193,30 @@ class ReinforcementIncompleteRule(DRCRule):
         from kicad_tools.pcb import reinforce as rf
         from kicad_tools.router.current_paths import reinforcement_path_resolutions
 
-        eligible = reinforcement_path_resolutions(pcb, self.specs).eligible
+        partition = reinforcement_path_resolutions(pcb, self.specs)
+        eligible = partition.eligible
+        # Declared reinforcement-eligible paths that did not resolve produce no
+        # legs to check; say so instead of staying silent (Issue #8797).
+        for res in partition.unresolved:
+            if not res.spec.reinforcement_eligible:
+                continue
+            net = res.spec.net_name
+            results.add(
+                DRCViolation(
+                    rule_id=self.rule_id,
+                    severity="warning",
+                    message=(
+                        f"Reinforcement not checked [skipped] net {net!r}: current path "
+                        f"{res.spec.name!r} is {res.status}"
+                        + (f" ({res.reason})" if res.reason else "")
+                        + "; its anchors and mask openings were not verified"
+                    ),
+                    location=(0.0, 0.0),
+                    layer="",
+                    items=(net, f"skipped@{res.spec.name}"),
+                    nets=(net,),
+                )
+            )
         if not eligible:
             return results
 
@@ -458,14 +486,36 @@ class ReinforcementIncompleteRule(DRCRule):
                 anchors.append(_Anchor(pos, rf._arc_of_point(pts, cum, pos), None, radius))
         anchors.sort(key=lambda a: a.arc)
 
-        def window(extent: float, anchor: _Anchor) -> float:
-            return float(
-                extent + end_offset + rf.END_NUDGE_MAX_MM + anchor.radius + END_WINDOW_SLACK_MM
-            )
+        shift_bound = rf.end_shift_bound(total, self.max_end_shift_mm)
 
+        def window(extent: float, anchor: _Anchor) -> float:
+            return float(extent + end_offset + shift_bound + anchor.radius + END_WINDOW_SLACK_MM)
+
+        # A same-net via that also lands a track on another copper layer, away
+        # from both leg ends, is a layer-change via of the net, not an anchor.
+        layer_change = [
+            a
+            for a in anchors
+            if a.via is not None
+            and self._joins_other_layer(pcb, a.via, leg.layer)
+            and a.arc > window(extents[0], a)
+            and total - a.arc > window(extents[1], a)
+        ]
+        for a in layer_change:
+            if a.via is not None:
+                claimed.add(id(a.via))
+        anchors = [a for a in anchors if a not in layer_change]
         near_start = [a for a in anchors if a.arc <= window(extents[0], a)]
         near_end = [a for a in anchors if total - a.arc <= window(extents[1], a)]
-        for a in near_start + near_end:
+        # With exactly two anchors the (a) window check below reports each
+        # one, so a slid anchor is never ALSO reported as a stray (Issue
+        # #8797). With another count a mid-leg extra stays a stray too.
+        claimable = (
+            anchors
+            if len(anchors) == 2
+            else near_start + [a for a in near_end if a not in near_start]
+        )
+        for a in claimable:
             if a.via is not None:
                 claimed.add(id(a.via))
 
@@ -545,7 +595,7 @@ class ReinforcementIncompleteRule(DRCRule):
             tented = [
                 s
                 for s, name in (("F", "front"), ("B", "back"))
-                if via_is_tented(a.via, pcb.setup, s)
+                if via_is_tented(a.via, pcb.setup, s) and not self._ring_mask_open(pcb, a, s)
             ]
             if tented:
                 self._emit(
@@ -561,6 +611,35 @@ class ReinforcementIncompleteRule(DRCRule):
                 )
 
     # ------------------------------------------------------------ geometry
+
+    def _ring_mask_open(self, pcb: PCB, anchor: _Anchor, side: str) -> bool:
+        """True when a mask-layer circle graphic covers the anchor's ring.
+
+        The gerber mask is open there whatever the via's ``tenting`` attribute
+        says (Issue #8797).
+        """
+        layer = "F.Mask" if side == "F" else "B.Mask"
+        for g in pcb.graphics:
+            if g.graphic_type != "circle" or g.layer != layer or g.center is None:
+                continue
+            centre = (g.center[0] - self._ox, g.center[1] - self._oy)
+            if math.dist(centre, anchor.pos) > MASK_TOLERANCE_MM:
+                continue
+            radius = math.dist(g.center, g.end) + g.stroke_width / 2.0
+            if radius >= anchor.radius - MASK_TOLERANCE_MM:
+                return True
+        return False
+
+    @staticmethod
+    def _joins_other_layer(pcb: PCB, via: Via, layer: str) -> bool:
+        """True when a same-net track on another layer ends at ``via``."""
+        r = via.size / 2.0
+        for seg in pcb.segments:
+            if seg.net_number != via.net_number or seg.layer == layer:
+                continue
+            if min(math.dist(seg.start, via.position), math.dist(seg.end, via.position)) <= r:
+                return True
+        return False
 
     @staticmethod
     def _net_number_of(holes: dict[str, list]) -> int:

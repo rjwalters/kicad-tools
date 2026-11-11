@@ -7370,6 +7370,7 @@ class PCB:
         dry_run: bool = False,
         anchor_mode: str = "ends",
         end_offset_mm: float = 1.0,
+        max_end_shift_mm: float | None = None,
     ) -> object:
         """Emit same-net PTH buttress-wire anchors along a routed net.
 
@@ -7398,6 +7399,9 @@ class PCB:
             anchor_mode: ``"ends"`` (default) or ``"spaced"``.
             end_offset_mm: ``ends`` mode clearance (mm) from each end
                 anchor's pad edge to the same-net pad/via/trunk copper.
+            max_end_shift_mm: ``ends`` mode: how far (mm) a refused end
+                position is searched inward along the leg; ``None`` = a
+                quarter of the leg (at least 2 mm).
 
         Returns:
             A ``kicad_tools.pcb.reinforce.ReinforceResult``.
@@ -7416,6 +7420,7 @@ class PCB:
             dry_run=dry_run,
             anchor_mode=anchor_mode,
             end_offset_mm=end_offset_mm,
+            max_end_shift_mm=max_end_shift_mm,
         )
 
     def dedupe_copper(self) -> dict[str, int]:
