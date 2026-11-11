@@ -411,6 +411,18 @@ def main() -> int:
 
         print(f"   Copper cleanup: {cleanup_copper(routed_path)}")
 
+        # Step 5.6 (#8532 / #8759): global fiducials and a board-ID silkscreen
+        # (the default-on ``fiducials_missing`` / ``board_id_missing`` rules).
+        # Board 02 has no pours, so nothing needs refilling afterwards; the
+        # board-ID template reads ``rev`` from the PCB's title block.
+        from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+        from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+        if run_add_fiducials(routed_path, sides="populated") != 0:
+            raise RuntimeError("pcb add-fiducials failed")
+        if run_add_board_info(routed_path, auto=True) != 0:
+            raise RuntimeError("pcb add-board-info failed")
+
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)
 
