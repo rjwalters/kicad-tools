@@ -990,6 +990,7 @@ Examples:
         # blind to its pad exemptions; let kicad-cli arbitrate when the
         # in-process count rejects every changed net.
         rules_base = Path(args.project) if args.project else pcb_path
+        config.drc_project_path = rules_base
         if rules_base.with_suffix(".kicad_dru").exists():
             config.drc_arbiter = _make_kicad_cli_arbiter(rules_base)
 
