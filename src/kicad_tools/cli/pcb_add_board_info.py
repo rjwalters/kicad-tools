@@ -71,6 +71,15 @@ def resolve_fields(template: str, pcb, pcb_path: Path) -> str:
     return _FIELD_RE.sub(sub, template)
 
 
+#: Namespace for content-keyed stamp UUIDs (Issue #8759).
+_STAMP_NAMESPACE = uuid_module.uuid5(uuid_module.NAMESPACE_URL, "kicad-tools:pcb-add-board-info")
+
+
+def _stamp_uuid(text: str, x: float, y: float, layer: str) -> str:
+    """Content-keyed UUID for a new stamp, so two identical builds agree (Issue #8759)."""
+    return str(uuid_module.uuid5(_STAMP_NAMESPACE, f"{layer}|{text}|{x:.4f}|{y:.4f}"))
+
+
 def _build_node(
     text: str,
     x: float,
@@ -89,7 +98,7 @@ def _build_node(
         layer=layer,
         font_size=size,
         font_thickness=thickness,
-        uuid_str=uuid_str or str(uuid_module.uuid4()),
+        uuid_str=uuid_str or _stamp_uuid(text, x, y, layer),
     )
     if layer.startswith("B."):
         from kicad_tools.sexp.parser import SExp

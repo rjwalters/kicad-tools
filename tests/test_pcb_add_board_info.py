@@ -166,6 +166,17 @@ def test_rerun_keeps_the_stamp_uuid(tmp_path, kw):
         assert p.read_bytes() == first
 
 
+def test_fresh_stamps_on_identical_boards_agree(tmp_path):
+    """Issue #8759: a new stamp's UUID is content-keyed, not random."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    pa, pb = _write(a), _write(b)
+    assert _run(pa, auto=True) == 0
+    assert _run(pb, auto=True) == 0
+    assert pa.read_bytes() == pb.read_bytes()
+
+
 def test_explicit_at_warns_when_not_clear(tmp_path, capsys):
     p = _write(tmp_path)
     assert _run(p, at=(103.0, 127.0), output_format="json") == 0
