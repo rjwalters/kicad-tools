@@ -16,6 +16,19 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-11
 
+- **PR #8814**: fix(optimize): count netclass_clearance_copper in the --drc-aware referee
+- **PR #8812**: feat(readiness): add --quantity and --inventory-covered to the bom stock gate
+- **PR #8811**: fix(readiness): refuse --output not named manufacturing before running gates
+- **PR #8810**: fix: recognise project-library fiducials by name, FID reference or tag
+- **PR #8809**: feat(router): name blocking branch pair when a same-layer ring stays ambiguous
+- **PR #8808**: fix(check): honour recorded --max-end-shift in reinforcement_incomplete end window
+- **PR #8802**: feat(boards): add fiducials and board ID to boards 00 and 06
+- **Issue #8813** (closed): optimize-traces --drc-aware keeps an edit that kct check then rejects at the class floor (0.150 mm < 0.150 mm)
+- **Issue #8807** (closed): kct readiness: no way to declare parts held in the fab's parts inventory; bom stock gate is fixed at 5 boards
+- **Issue #8806** (closed): kct readiness: --output accepts any directory, but READY is only reachable when the bundle directory is named 'manufacturing'
+- **Issue #8805** (closed): fiducials_missing: only stock 'Fiducial:*' footprints count, so a project-library fiducial reads as 0 (and readiness would add three more)
+- **Issue #8804** (closed): path_ampacity: name the blocking branch pair when a same-layer ring keeps a path ambiguous
+- **Issue #8803** (closed): reinforcement_incomplete: plumb a custom --max-end-shift into kct check
 - **PR #8800**: fix(reinforce): slide refused end anchors inward; align reinforcement_incomplete
 - **PR #8799**: fix: resolve stitched doubled copper as chained parallel groups
 - **Issue #8798** (closed): current paths: doubled copper with interior stitching vias (and a two-branch ring) is still ambiguous after #8791
