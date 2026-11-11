@@ -1220,6 +1220,10 @@ class TestParallelGroups:
         r = resolve_current_path(pcb, _j_spec())
         assert r.status == "ambiguous"
         assert r.witness
+        branches = r.witness["blocking_branches"]
+        assert {b["layer"] for b in branches} == {"F.Cu", "B.Cu"}
+        assert len(branches) == 2
+        assert "blocking branches" in r.reason
 
     def test_loop_through_third_pad_stays_ambiguous(self) -> None:
         from kicad_tools.schema.pcb import PCB
