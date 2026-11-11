@@ -71,7 +71,15 @@ def resolve_fields(template: str, pcb, pcb_path: Path) -> str:
     return _FIELD_RE.sub(sub, template)
 
 
-def _build_node(text: str, x: float, y: float, layer: str, size: float, thickness: float):
+def _build_node(
+    text: str,
+    x: float,
+    y: float,
+    layer: str,
+    size: float,
+    thickness: float,
+    uuid_str: str | None = None,
+):
     from kicad_tools.sexp.builders import gr_text_node
 
     node = gr_text_node(
@@ -81,7 +89,7 @@ def _build_node(text: str, x: float, y: float, layer: str, size: float, thicknes
         layer=layer,
         font_size=size,
         font_thickness=thickness,
-        uuid_str=str(uuid_module.uuid4()),
+        uuid_str=uuid_str or str(uuid_module.uuid4()),
     )
     if layer.startswith("B."):
         from kicad_tools.sexp.parser import SExp
@@ -286,7 +294,11 @@ def _run(
 
     # Idempotence: drop any earlier stamp with the same text on this layer, then
     # rebuild the PCB view so the old stamp is neither duplicated nor an obstacle.
+    # The replacement keeps the dropped stamp's UUID (Issue #8759): ``kct
+    # readiness --generate`` re-stamps on every run, and a fresh UUID each time
+    # meant the saved board never reached a byte fixed point.
     doc = parse_file(pcb_path)
+    kept_uuids: dict[str, str] = {}
     for node in list(doc.find_all("gr_text")):
         node_layer = node.find("layer")
         if (
@@ -294,6 +306,9 @@ def _run(
             and node_layer is not None
             and node_layer.get_string(0) == layer
         ):
+            uuid_node = node.find("uuid")
+            if uuid_node is not None and uuid_node.get_string(0):
+                kept_uuids.setdefault(node.get_string(0), uuid_node.get_string(0))
             doc.remove(node)
     pcb = _SilkscreenPCB(doc, pcb_path)
 
@@ -340,7 +355,9 @@ def _run(
     }
     if not dry_run:
         for t, x, y in placements:
-            doc.append(_build_node(t, x, y, layer, font_size, font_thickness))
+            doc.append(
+                _build_node(t, x, y, layer, font_size, font_thickness, kept_uuids.get(t))
+            )
         save_path = output_path or pcb_path
         save_pcb(doc, save_path)
         result["written"] = True

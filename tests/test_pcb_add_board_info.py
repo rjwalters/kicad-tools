@@ -153,6 +153,19 @@ def test_rerun_is_idempotent(tmp_path, kw):
     assert len(stamps) == 1
 
 
+@pytest.mark.parametrize("kw", [{"auto": True}, {"at": (120.0, 115.0)}])
+def test_rerun_keeps_the_stamp_uuid(tmp_path, kw):
+    """Issue #8759: a re-stamp keeps the replaced stamp's UUID, so re-running
+    (``kct readiness --generate`` does on every run) leaves the board
+    byte-identical instead of minting a fresh UUID each time."""
+    p = _write(tmp_path)
+    assert _run(p, **kw) == 0
+    first = p.read_bytes()
+    for _ in range(2):
+        assert _run(p, **kw) == 0
+        assert p.read_bytes() == first
+
+
 def test_explicit_at_warns_when_not_clear(tmp_path, capsys):
     p = _write(tmp_path)
     assert _run(p, at=(103.0, 127.0), output_format="json") == 0
