@@ -16,6 +16,11 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-11
 
+- **PR #8795**: chore(loom): resync installed Loom to v0.19.1287
+- **PR #8792**: feat(check): add reinforcement_incomplete rule for buttress-wire legs
+- **PR #8788**: feat: add --clear/--replace to kct pcb reinforce
+- **Issue #8747** (closed): pcb reinforce: --clear / --replace to remove or migrate spaced-mode anchors (#8741 slice 5)
+- **Issue #8746** (closed): check: reinforcement_incomplete rule (two end anchors, continuous mask opening, stray anchors) (#8741 slice 4b)
 - **PR #8791**: fix: resolve doubled current-path copper as a parallel group
 - **PR #8785**: fix: report wire span and inward anchor shift for ends-mode legs
 - **PR #8783**: feat: open solder mask along reinforce wire legs with tenting-off anchors
