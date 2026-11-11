@@ -2539,8 +2539,14 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_reinforce.add_argument("pcb", help="Path to .kicad_pcb file")
     pcb_reinforce.add_argument(
         "--net",
-        required=True,
-        help="Net name to reinforce (must have routed copper)",
+        help="Net name to reinforce (must have routed copper; required unless --list-wires)",
+    )
+    pcb_reinforce.add_argument(
+        "--list-wires",
+        dest="list_wires",
+        action="store_true",
+        help="Read-only: print the wire list from BOARD's .reinforcement.json sidecar "
+        "(#8744) and exit; --net filters it. Honours --format json.",
     )
     pcb_reinforce.add_argument(
         "--wire-gauge",
@@ -7306,7 +7312,10 @@ def _add_readiness_parser(subparsers) -> None:
         dest="readiness_output",
         metavar="DIR",
         default=None,
-        help="Manufacturing bundle directory (default: <pcb-dir>/manufacturing/)",
+        help=(
+            "Manufacturing bundle directory (default: <pcb-dir>/manufacturing/); "
+            "must be inside the board directory"
+        ),
     )
     rd_parser.add_argument(
         "--sch",
@@ -7513,6 +7522,16 @@ def _add_readiness_parser(subparsers) -> None:
         help=(
             "Skip the exact-duplicate copper cleanup (pcb dedupe) that otherwise runs "
             "before the checks; the skip is recorded in the report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--merge-lcsc-from",
+        dest="readiness_merge_lcsc_from",
+        metavar="PATH",
+        default=None,
+        help=(
+            "With --generate: merge verified LCSC numbers from a previous BOM CSV, "
+            "as `kct export --merge-lcsc-from` does; the source is recorded in the report"
         ),
     )
     rd_parser.add_argument(

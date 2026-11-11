@@ -132,6 +132,10 @@ def refresh_router_class_floors(router: Any) -> bool:
     ``max(designer floor, current class floor)`` -- the value the loader
     gives a neutralised pad.
 
+    Issue #8769: the kept copper of those nets (``placement_neutral_routes``,
+    rekeyed to net 0 by the loader) carries the same item-level floor on
+    ``Route.authored_clearance``; it is re-derived the same way.
+
     Returns ``True`` when the floors changed.
     """
     rules = getattr(router, "rules", None)
@@ -154,6 +158,7 @@ def refresh_router_class_floors(router: Any) -> bool:
         if net_id:
             floors[net_id] = max(floors.get(net_id, 0.0), value)
     pads_changed = _refresh_neutral_pad_floors(router, rules, class_by_name)
+    pads_changed = _refresh_neutral_route_floors(router, rules, class_by_name) or pads_changed
     if floors == rules.net_clearance_floors:
         return pads_changed
     rules.net_clearance_floors = floors
@@ -216,4 +221,53 @@ def _refresh_neutral_pad_floors(
             grid._authored_item_floors = True
         grid._authored_index_cache = None
         grid._authored_pad_floor_version = getattr(grid, "_authored_pad_floor_version", 0) + 1
+    return changed
+
+
+def _refresh_neutral_route_floors(
+    router: Any, rules: DesignRules, class_by_name: Mapping[str, float]
+) -> bool:
+    """Re-derive the item floor of every neutralised (net 0) kept route (#8769).
+
+    The loader rekeys placement-preserved copper to net 0 and blanks its
+    ``net_name`` (:attr:`Router.placement_neutral_routes`), so the name is read
+    from its twin in ``placement_preserved_routes`` -- both are appended in the
+    same loader branch, hence index-paired.  The value is ``max(designer floor,
+    class floor)``, as for pads.
+
+    Bumps ``grid._authored_route_floor_version`` and drops the Python index
+    cache when a route changed; the native stored-route sync keys on the
+    version, because it is otherwise incremental by route count.
+
+    Returns ``True`` when any route floor changed.
+    """
+    neutral = tuple(getattr(router, "placement_neutral_routes", None) or ())
+    preserved = tuple(getattr(router, "placement_preserved_routes", None) or ())
+    if not neutral or len(neutral) != len(preserved):
+        return False
+    designer = (
+        rules.designer_clearance_floors_by_name
+        if rules.designer_clearance_floors is not None
+        else None
+    )
+    changed = False
+    for route, twin in zip(neutral, preserved, strict=True):
+        name = getattr(twin, "net_name", "") or ""
+        if not name:
+            continue
+        current = float(getattr(route, "authored_clearance", 0.0) or 0.0)
+        target = class_by_name.get(name, 0.0)
+        if designer is not None:
+            target = max(target, float(designer.get(name, 0.0) or 0.0))
+        else:
+            target = max(target, current)
+        if abs(target - current) > _EPS:
+            route.authored_clearance = target
+            changed = True
+    grid = getattr(router, "grid", None)
+    if changed and grid is not None:
+        if any(float(getattr(r, "authored_clearance", 0.0) or 0.0) > 0.0 for r in neutral):
+            grid._authored_item_floors = True
+        grid._authored_index_cache = None
+        grid._authored_route_floor_version = getattr(grid, "_authored_route_floor_version", 0) + 1
     return changed

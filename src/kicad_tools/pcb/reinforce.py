@@ -1760,6 +1760,11 @@ def _reinforce_ends(
             continue
         by_layer.setdefault(s.layer, []).append(s)
 
+    if not by_layer:
+        # Only zero-length (or no) segments: nothing to walk. Fail like the
+        # later guard instead of crashing in ``max()`` below (Issue #8780).
+        raise ReinforceError(f"net {net_name!r} produced no walkable polyline")
+
     original_ids: dict[int, int] = {}
     candidates: list[_LegCandidate] = []
     excluded_runs: list[list[Segment]] = []

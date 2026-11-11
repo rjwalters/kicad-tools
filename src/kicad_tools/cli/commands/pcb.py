@@ -1067,6 +1067,32 @@ def _finish_reinforce_clear(
     return 0
 
 
+def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int:
+    """``pcb reinforce --list-wires``: print the sidecar's wires (#8744)."""
+    from kicad_tools.pcb.reinforcement_sidecar import (
+        format_wire_list,
+        load_wires,
+        sidecar_path,
+    )
+
+    path = sidecar_path(pcb_path)
+    if not path.is_file():
+        print(f"Error: no reinforcement sidecar at {path}", file=sys.stderr)
+        return 1
+    try:
+        wires = load_wires(path)
+    except (OSError, ValueError) as e:
+        print(f"Error reading {path}: {e}", file=sys.stderr)
+        return 1
+    if net_name:
+        wires = [w for w in wires if w.get("net") == net_name]
+    if getattr(args, "format", "text") == "json":
+        print(json.dumps({"sidecar": str(path), "wires": wires}, indent=2))
+    else:
+        print(format_wire_list(wires))
+    return 0
+
+
 def _run_reinforce_command(args, pcb_path: Path) -> int:
     """Handle the 'pcb reinforce' command (Unit A of #4218; issues #4220, #8742).
 
@@ -1082,6 +1108,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     from kicad_tools.schema.pcb import PCB
 
     net_name = getattr(args, "net", None)
+    if getattr(args, "list_wires", False):
+        return _run_reinforce_list_wires(args, pcb_path, net_name)
     if not net_name:
         print("Error: --net is required", file=sys.stderr)
         return 1
@@ -1318,6 +1346,24 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             clear_outcome.refused, origin_x, origin_y, reason=True
         )
 
+    # Issue #8744: wire list sidecar (ends mode only; never on a dry run).
+    from kicad_tools.pcb.reinforcement_sidecar import build_wire_records, write_sidecar
+
+    wire_records = build_wire_records(outcome, origin_x, origin_y)
+    result["wires"] = wire_records
+    result["wire_sidecar"] = None
+    if not dry_run and wire_records:
+        try:
+            result["wire_sidecar"] = str(write_sidecar(output_path, wire_records))
+        except (OSError, ValueError) as e:
+            print(f"Error writing reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+    elif not dry_run and outcome.anchor_mode == "spaced":
+        print(
+            "Note: spaced mode has no per-wire legs; no reinforcement sidecar written",
+            file=sys.stderr,
+        )
+
     for u in outcome.unresolved_paths:
         print(
             f"Warning: declared current path {u.path!r} on net {outcome.net_name!r} is "
@@ -1383,6 +1429,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             print(
                 f"    refused at ({r.x + origin_x:.2f}, {r.y + origin_y:.2f}): {r.reason}{detail}"
             )
+        if result["wire_sidecar"]:
+            print(f"  Wire list:      {result['wire_sidecar']} ({len(wire_records)} wire(s))")
         if not dry_run and (
             outcome.placed_count or (clear_outcome is not None and clear_outcome.removed_count)
         ):

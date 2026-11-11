@@ -98,6 +98,14 @@ class TestBoard01PartialRouteFastFail:
         module = _load_board01_module()
         self._stub_pipeline_prefix(module, monkeypatch, tmp_path)
         monkeypatch.setattr(module, "route_pcb", lambda *a, **k: True)
+        # Issue #8598: main() imports these inside the function; route_pcb is
+        # stubbed so no routed board exists for them to edit.
+        monkeypatch.setattr(
+            "kicad_tools.cli.pcb_add_fiducials.run_add_fiducials", lambda *a, **k: 0
+        )
+        monkeypatch.setattr(
+            "kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **k: 0
+        )
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
 
         lvs_called: list[bool] = []
