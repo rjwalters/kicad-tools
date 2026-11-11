@@ -23,37 +23,25 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
+- **#8741**: pcb reinforce: anchors are spaced mid-run, no wire-end anchors, no solder-mask opening; nothing checks that a reinforced run is buildable
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step
+_None._
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-- **#8577**: route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class (fails kicad-cli DRC)
-- **#8603**: Board 07: classify and eliminate remaining redundant_copper warnings at source (part of #8399)
-- **#8727**: kct readiness --verify blocks a clean tapeout bundle: declared BOM exemption not honoured, sibling board versions demanded in kicad_project.zip (so tapeout-sign-off and submit-jlcpcb are unreachable)
-- **#8730**: redundant_copper_covered says 'removable with kct pcb prune' but prune leaves T-joint cases; splitting the longer segment exposes spurs
-- **#8731**: pin1_marker_missing still fires on stock HLK-PMxx footprint after #8688
-- **#8734**: redundant_copper_covered fires on a sub-0.03 mm same-layer loop that kct pcb prune reports nothing to remove for; fails readiness warning_review
-- **#8736**: test_board03_routing_baseline: committed board 03 PCB newly reports redundant_copper_covered
+_None._
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8597**: feat(check): flag missing fiducials and board ID; add them in readiness generate
-- **#8728**: fix(readiness): honour declared BOM exemptions and scope project-zip inventory to the board
-- **#8733**: fix: iterate kct pcb prune to a fixed point and reword covered-copper message
-- **#8735**: fix: widen pin-1 marker search to courtyard and report effective radius
-- **#8737**: fix(optimizer): keep staircase shortcuts off the net's own copper
-- **#8738**: test: allow redundant_copper_covered in board 03 DRC baseline
-- **#8739**: fix: make prune clear redundant_copper_covered findings
+_None._
 
 ## Approved (Awaiting Merge)
 
@@ -72,17 +60,12 @@ Issues carrying `loom:curated`.
 - **#8425**: Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B *(curated)*
 - **#8434**: Changelog Fragment Check re-runs on every label change; Loom role label churn keeps it queued *(curated)*
 - **#8486**: route perf: nets proven sealed are re-searched at full budget and re-rescued every iteration (43% of search time, rescue 0/15 for ~1,475 s each pass) *(curated)*
-- **#8532**: check rules fiducials_missing/board_id_missing and default tapeout/readiness step *(curated)*
-- **#8577**: route: new copper keeps only its own class clearance from preserved copper of a wider-clearance class (fails kicad-cli DRC) *(curated)*
+- **#8530**: Fiducials + board-identification silkscreen should be automatic: add-fiducials / add-board-info commands, a check rule, and a default tapeout step *(curated)*
 - **#8603**: Board 07: classify and eliminate remaining redundant_copper warnings at source (part of #8399) *(curated)*
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
-- **#8727**: kct readiness --verify blocks a clean tapeout bundle: declared BOM exemption not honoured, sibling board versions demanded in kicad_project.zip (so tapeout-sign-off and submit-jlcpcb are unreachable) *(curated)*
-- **#8730**: redundant_copper_covered says 'removable with kct pcb prune' but prune leaves T-joint cases; splitting the longer segment exposes spurs *(curated)*
-- **#8731**: pin1_marker_missing still fires on stock HLK-PMxx footprint after #8688 *(curated)*
-- **#8734**: redundant_copper_covered fires on a sub-0.03 mm same-layer loop that kct pcb prune reports nothing to remove for; fails readiness warning_review *(curated)*
-- **#8736**: test_board03_routing_baseline: committed board 03 PCB newly reports redundant_copper_covered *(curated)*
+- **#8759**: Add fiducials and board ID to committed boards 00, 02, 03, 05, 06, 07 *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -101,11 +84,11 @@ _None._
 | Operator merge-risk holds | 1 |
 | Very important | 0 |
 | Important | 1 |
-| Ready (`loom:issue`) | 1 |
-| In Progress (`loom:building`) | 7 |
-| PRs awaiting review | 7 |
+| Ready (`loom:issue`) | 0 |
+| In Progress (`loom:building`) | 0 |
+| PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 18 |
+| Curated | 13 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
