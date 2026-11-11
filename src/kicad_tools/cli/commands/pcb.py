@@ -1188,6 +1188,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     anchor_mode = getattr(args, "anchor_mode", None) or "ends"
     end_offset = getattr(args, "end_offset", None)
     end_offset = 1.0 if end_offset is None else end_offset
+    max_end_shift = getattr(args, "max_end_shift", None)
     spacing_arg = getattr(args, "spacing", None)
     spacing = 15.0 if spacing_arg is None else spacing_arg
     if anchor_mode == "ends" and spacing_arg is not None:
@@ -1325,6 +1326,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             board_rules=board_rules,
             anchor_mode=anchor_mode,
             end_offset_mm=end_offset,
+            max_end_shift_mm=max_end_shift,
             mask_opening=mask_opening,
             mask_width_mm=mask_width,
         )
@@ -1397,8 +1399,13 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "length_mm": round(leg.length_mm, 4),
                 "width_mm": round(leg.width_mm, 4),
                 "wire_span_mm": round(leg.wire_span_mm, 4),
+                "uncovered_mm": round(leg.uncovered_mm, 4),
                 "anchors": [
-                    {"x": round(a.x + origin_x, 4), "y": round(a.y + origin_y, 4)}
+                    {
+                        "x": round(a.x + origin_x, 4),
+                        "y": round(a.y + origin_y, 4),
+                        "shift_mm": round(a.shift_mm, 4),
+                    }
                     for a in leg.anchors
                 ],
                 "status": leg.status,

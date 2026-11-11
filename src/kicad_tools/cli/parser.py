@@ -2581,6 +2581,18 @@ def _add_pcb_parser(subparsers) -> None:
         "offset is reported too_short and gets none.",
     )
     pcb_reinforce.add_argument(
+        "--max-end-shift",
+        dest="max_end_shift",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="ends mode: how far inward along the leg (mm) a refused end anchor "
+        "position is searched for the first position that passes the clearance "
+        "rules (default: a quarter of the leg's length, at least 2 mm). The "
+        "report names each anchor's shift and the uncovered length; a leg is "
+        "reported partial only after this search fails.",
+    )
+    pcb_reinforce.add_argument(
         "--mask-opening",
         dest="mask_opening",
         action=argparse.BooleanOptionalAction,
