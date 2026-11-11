@@ -192,7 +192,9 @@ class ReinforcementIncompleteRule(DRCRule):
         if not eligible:
             return results
 
-        self._ox, self._oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+        origin: tuple[float, float] = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+        self._ox: float = origin[0]
+        self._oy: float = origin[1]
         end_offset = (
             self.end_offset_mm if self.end_offset_mm is not None else rf.DEFAULT_END_OFFSET_MM
         )
@@ -302,7 +304,7 @@ class ReinforcementIncompleteRule(DRCRule):
 
         # --- layer-change vias belong to the path, not to the anchors ------
         change_vias: list[_Point] = []
-        changes = {}
+        changes: dict[tuple[float, float], Any] = {}
         for res in resolutions:
             for change in res.layer_changes:
                 changes.setdefault(
@@ -457,7 +459,9 @@ class ReinforcementIncompleteRule(DRCRule):
         anchors.sort(key=lambda a: a.arc)
 
         def window(extent: float, anchor: _Anchor) -> float:
-            return extent + end_offset + rf.END_NUDGE_MAX_MM + anchor.radius + END_WINDOW_SLACK_MM
+            return float(
+                extent + end_offset + rf.END_NUDGE_MAX_MM + anchor.radius + END_WINDOW_SLACK_MM
+            )
 
         near_start = [a for a in anchors if a.arc <= window(extents[0], a)]
         near_end = [a for a in anchors if total - a.arc <= window(extents[1], a)]
@@ -561,9 +565,9 @@ class ReinforcementIncompleteRule(DRCRule):
     @staticmethod
     def _net_number_of(holes: dict[str, list]) -> int:
         for v, _ in holes["vias"]:
-            return v.net_number
+            return int(v.net_number)
         for pad, _, _ in holes["pads"]:
-            return pad.net_number
+            return int(pad.net_number)
         return -1
 
     @staticmethod
