@@ -893,6 +893,9 @@ class ReadinessOptions:
     # the staged candidate cannot see a spec above ``board_dir``.
     bom_spec_file: Path | None = None
     bom_spec_error: str | None = None
+    # The ORIGINAL board directory the spec lookup started from (#8764); the
+    # staged candidate's ``board_dir`` is a temp dir deleted when the run ends.
+    bom_spec_searched: Path | None = None
 
     @property
     def root(self) -> Path:
@@ -3003,7 +3006,10 @@ def _declared_bom_exemptions(
         return {}, options.bom_spec_error
     spec_file = options.bom_spec_file
     if spec_file is None:
-        return {}, f"no .kct spec found above {options.board_dir}; exemptions not applied"
+        return {}, (
+            f"no .kct spec found above {options.bom_spec_searched or options.board_dir}; "
+            "exemptions not applied"
+        )
     try:
         from kicad_tools.export.bom_spec_overlay import declared_exemptions
         from kicad_tools.spec.parser import load_spec
@@ -3684,6 +3690,7 @@ def run_readiness(options: ReadinessOptions, engines: Engines | None = None) -> 
     original = options.board_dir.resolve()
     project_root = options.root
     spec_file: Path | None = None
+    options = replace(options, bom_spec_searched=original)
     try:
         from kicad_tools.export.bom_spec_overlay import find_spec_file
 
