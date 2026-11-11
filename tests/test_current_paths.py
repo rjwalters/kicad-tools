@@ -1192,9 +1192,16 @@ class TestParallelGroups:
         r = resolve_current_path(_doubled_pcb(widths=(2.0, 1.0)), _j_spec())
         assert r.status == "resolved"
 
-    def test_end_stitched_full_copy_resolves(self) -> None:
+    def test_interior_stitched_full_copy_resolves(self) -> None:
         r = resolve_current_path(_doubled_pcb(vias=(24,)), _j_spec())
-        assert r.status == "ambiguous"  # interior rung = ladder, not a simple group
+        assert r.status == "resolved"  # ladder: one group per span, series-merged
+        assert len(r.parallel_groups) == 2
+
+    def test_two_interior_stitching_vias_resolve_and_name_groups(self) -> None:
+        r = resolve_current_path(_doubled_pcb(vias=(24, 28)), _j_spec())
+        assert r.status == "resolved"
+        assert len(r.parallel_groups) == 3
+        assert all("parallel group" in g.describe() for g in r.parallel_groups)
 
     def test_shorter_stitched_copy_resolves(self) -> None:
         pcb = _doubled_pcb(vias=(24, 28), second_xs=[24, 28])

@@ -1671,10 +1671,6 @@ def _reduce_parallel_groups(
             return None
         edges.append(_SPEdge(ru, rv, [edge.segment]))
     keep = {find(roots.get(n, n)) for n in (start, goal, *graph.pads.values())}
-    # A via junction is where branches may END; a doubled run stitched by
-    # interior rungs is a ladder, not a simple group, and stays ambiguous.
-    barrel_junctions = {find(u) for u, _, edge in raw.values() if edge.segment is None}
-
     groups: list[ParallelGroup] = []
     changed = True
     while changed:
@@ -1699,7 +1695,7 @@ def _reduce_parallel_groups(
             incident.setdefault(e.u, []).append(e)
             incident.setdefault(e.v, []).append(e)
         for node, inc in incident.items():
-            if node in keep or node in barrel_junctions or len(inc) != 2 or inc[0] is inc[1]:
+            if node in keep or len(inc) != 2 or inc[0] is inc[1]:
                 continue
             a, b = inc
             ends = [x for e in (a, b) for x in (e.u, e.v) if x != node]
@@ -1709,9 +1705,6 @@ def _reduce_parallel_groups(
             edges = [e for e in edges if e is not a and e is not b] + [merged]
             changed = True
             break
-    for junction in barrel_junctions:
-        if sum(e.grouped for e in edges if junction in (e.u, e.v)) > 1:
-            return None
     nodes = {n for e in edges for n in (e.u, e.v)}
     if edges and len(edges) > len(nodes) - 1:
         return None

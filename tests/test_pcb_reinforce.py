@@ -1918,7 +1918,13 @@ class TestEndAnchorTooShortAndRefusal:
         dy = 0.3 + _ANCHOR_PAD / 2 + 0.1
         # Walls the whole inward nudge window of the start anchor only.
         pcb.add_trace((15, 50 + dy), (30, 50 + dy), width=0.2, layer="F.Cu", net="OTHER")
-        result = reinforce_net(pcb, "FUSED_LINE", net_class_clearances={"OTHER": 0.4}, dry_run=True)
+        result = reinforce_net(
+            pcb,
+            "FUSED_LINE",
+            net_class_clearances={"OTHER": 0.4},
+            max_end_shift_mm=2.0,
+            dry_run=True,
+        )
         (leg,) = result.legs
         assert leg.status == "partial"
         assert len(leg.anchors) == 1 and leg.anchors[0].x > 100.0
@@ -2607,7 +2613,9 @@ class TestEndAnchorReviewMutations:
             pcb.add_trace(a, b, width=0.5, layer="F.Cu", net="N")
         dy = 0.3 + _ANCHOR_PAD / 2 + 0.1
         pcb.add_trace((22.0, 50 - dy), (24.5, 50 - dy), width=0.2, layer="F.Cu", net="OTHER")
-        result = reinforce_net(pcb, "N", net_class_clearances={"OTHER": 0.4}, dry_run=True)
+        result = reinforce_net(
+            pcb, "N", net_class_clearances={"OTHER": 0.4}, max_end_shift_mm=2.0, dry_run=True
+        )
         pad = _pad_poly("rect", (2.0, 2.0), 0.0, (20.0, 50.0))
         for a in result.placed:
             assert _anchor_gaps(a, pad)[0] >= 1.0 - 1e-3
@@ -3343,3 +3351,42 @@ class TestEndAnchorSameNetPadNotAtLegEnd:
             _pad_poly("rect", (2.0, 6.0), 45.0, (46.0, 100.0)),
         ]
         self._assert_clear(result, pads)
+
+
+class TestMaxEndShiftSlide:
+    """Issue #8797: a refused end candidate slides inward past the old 2 mm cap."""
+
+    def _blocked(self):
+        pcb = _straight_run_pcb(length=100.0)
+        dy = 0.3 + _ANCHOR_PAD / 2 + 0.1
+        # Walls the first ~10 mm of the leg's start end on the same layer.
+        pcb.add_trace((15, 50 + dy), (30, 50 + dy), width=0.2, layer="F.Cu", net="OTHER")
+        return pcb
+
+    def test_anchor_slides_to_first_clear_position_and_reports_shift(self):
+        result = reinforce_net(
+            self._blocked(), "FUSED_LINE", net_class_clearances={"OTHER": 0.4}, dry_run=True
+        )
+        (leg,) = result.legs
+        assert leg.status == "full"
+        assert leg.anchors[0].shift_mm > 2.0
+        assert leg.anchors[0].x > 30.0
+        assert leg.anchors[1].shift_mm == pytest.approx(0.0)
+        assert leg.uncovered_mm == pytest.approx(leg.length_mm - leg.wire_span_mm)
+        assert "slid" in leg.reason and "uncovered" in leg.reason
+
+    def test_zero_bound_keeps_leg_partial(self):
+        result = reinforce_net(
+            self._blocked(),
+            "FUSED_LINE",
+            net_class_clearances={"OTHER": 0.4},
+            max_end_shift_mm=0.0,
+            dry_run=True,
+        )
+        (leg,) = result.legs
+        assert leg.status == "partial"
+        assert "--max-end-shift" in leg.reason
+
+    def test_negative_bound_rejected(self):
+        with pytest.raises(ReinforceError, match="max_end_shift_mm"):
+            reinforce_net(_straight_run_pcb(), "FUSED_LINE", max_end_shift_mm=-1.0)

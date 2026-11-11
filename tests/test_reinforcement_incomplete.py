@@ -82,7 +82,9 @@ class TestCompleteBoard:
         pcb = _reinforced()
         path = tmp_path / "b.kicad_pcb"
         pcb.save(path)
-        assert _subchecks(_run(PCB.load(path))) == []
+        # The helper footprints do not round-trip, so the declared path no
+        # longer resolves: that is reported, not silently skipped (#8797).
+        assert _subchecks(_run(PCB.load(path))) == ["skipped"]
 
     def test_back_layer_leg_is_complete(self):
         pcb = PCB.create(width=200, height=100, center=False)
@@ -240,3 +242,70 @@ class TestRegistration:
         assert checker.check_reinforcement_incomplete().violations == []
         bare = DRCChecker(_board())
         assert bare.check_reinforcement_incomplete().violations == []
+
+
+class TestSlidAnchorsAndMaskCircles:
+    """Issue #8797."""
+
+    def _slid(self):
+        pcb = _board()
+        dy = 0.3 + 1.0
+        pcb.add_trace((15, 50 + dy), (30, 50 + dy), width=0.2, layer="F.Cu", net="OTHER")
+        reinforce_net(pcb, NET, net_class_clearances={"OTHER": 0.4})
+        return pcb
+
+    def test_slid_anchor_yields_no_finding(self):
+        pcb = self._slid()
+        assert min(v.position[0] for v in _anchors(pcb)) > 30.0
+        assert _subchecks(_run(pcb)) == []
+
+    def test_slid_anchor_beyond_window_is_single_finding(self):
+        pcb = self._slid()
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], max_end_shift_mm=1.0)
+        results = rule.check(pcb, _rules())
+        assert _subchecks(results) == ["a"]
+
+    def test_tented_via_with_mask_circles_is_not_reported(self):
+        from kicad_tools.schema.pcb import BoardGraphic
+
+        pcb = _reinforced()
+        for v in _anchors(pcb):
+            v.tenting_front = v.tenting_back = "yes"
+        assert "c" in _subchecks(_run(pcb))
+        for v in _anchors(pcb):
+            for layer in ("F.Mask", "B.Mask"):
+                pcb.graphics.append(
+                    BoardGraphic(
+                        graphic_type="circle",
+                        layer=layer,
+                        stroke_width=0.0,
+                        center=v.position,
+                        end=(v.position[0] + v.size / 2.0, v.position[1]),
+                        fill="yes",
+                    )
+                )
+        assert "c" not in _subchecks(_run(pcb))
+
+    def test_mid_leg_layer_change_via_is_not_a_third_anchor(self):
+        pcb = _reinforced()
+        a = _anchors(pcb)[0]
+        pcb.add_via(
+            70.0,
+            50.0,
+            size=a.size,
+            drill=a.drill,
+            layers=("F.Cu", "B.Cu"),
+            net=NET,
+            tenting=("no", "no"),
+        )
+        pcb.add_trace((70.0, 50.0), (70.0, 80.0), width=0.5, layer="B.Cu", net=NET)
+        assert _subchecks(_run(pcb)) == []
+
+    def test_unresolved_path_is_reported_not_silent(self):
+        pcb = _reinforced()
+        import dataclasses
+
+        spec = dataclasses.replace(_spec(True), source=PathEndpoint("NOPE", "1"))
+        results = _run(pcb, specs=[spec])
+        assert _subchecks(results) == ["skipped"]
+        assert "unresolved" in results.violations[0].message

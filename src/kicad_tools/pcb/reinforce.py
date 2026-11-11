@@ -128,6 +128,31 @@ DEFAULT_END_OFFSET_MM = 1.0
 END_NUDGE_MAX_MM = 2.0
 END_NUDGE_STEPS = 8
 
+# Issue #8797: how far inward a refused end candidate may be searched. The
+# default bound is a fraction of the leg's length (never less than
+# ``END_NUDGE_MAX_MM``) so a near-miss refusal (one candidate 0.009 mm short
+# of a clearance) slides the hole to the first clear position instead of
+# leaving the leg ``partial``. ``--max-end-shift`` / ``max_end_shift_mm``
+# overrides it in mm. The checker (``reinforcement_incomplete``) uses the same
+# function for its end window, so a slid anchor is never reported as stray.
+END_SHIFT_LEG_FRACTION = 0.25
+
+
+def end_shift_bound(leg_length_mm: float, max_end_shift_mm: float | None = None) -> float:
+    """Inward search bound (mm) for one end anchor of a leg ``leg_length_mm`` long."""
+    if max_end_shift_mm is not None:
+        return max_end_shift_mm
+    return max(END_NUDGE_MAX_MM, END_SHIFT_LEG_FRACTION * leg_length_mm)
+
+
+def _end_shift_offsets(bound_mm: float) -> list[float]:
+    """Inward offsets (mm) tried for one end, at the nudge step, up to the bound."""
+    step = END_NUDGE_MAX_MM / END_NUDGE_STEPS if END_NUDGE_STEPS > 0 else 0.0
+    if step <= 0 or bound_mm <= 0:
+        return [0.0]
+    return [k * step for k in range(int(bound_mm / step + 1e-9) + 1)]
+
+
 # ``ends`` mode: an end anchor that had to move more than this far inward
 # along the leg (to get ``end_offset_mm`` of straight-line clearance from the
 # end copper) makes the leg's ``reason`` say so (Issue #8781). 5x the default
@@ -223,6 +248,9 @@ class PlacedAnchor:
 
     x: float
     y: float
+    #: ``ends`` mode: how far (mm) inward along the leg this anchor was slid
+    #: past its first candidate position because that was refused (Issue #8797).
+    shift_mm: float = 0.0
 
 
 @dataclass
@@ -263,6 +291,9 @@ class LegSummary:
     #: wire covers (0.0 unless both anchors were placed). Later slices
     #: (#8743, #8744) read this rather than recomputing it.
     wire_span_mm: float = 0.0
+    #: Leg length (mm) the wire does not span: ``length_mm - wire_span_mm`` for
+    #: a ``full`` leg (0.0 otherwise; Issue #8797).
+    uncovered_mm: float = 0.0
     #: Widest track width (mm) on the leg.
     width_mm: float = 0.0
     #: Names of the declared current paths covering this leg (empty without
@@ -374,6 +405,9 @@ class ReinforceResult:
     anchor_mode: str = DEFAULT_ANCHOR_MODE
     #: ``ends`` mode end offset (mm); reported in ``spaced`` mode too.
     end_offset_mm: float = DEFAULT_END_OFFSET_MM
+    #: ``ends`` mode: the inward-search bound override (mm), ``None`` = default
+    #: fraction of the leg (Issue #8797).
+    max_end_shift_mm: float | None = None
     #: Segments chained into the primary anchored (longest anchored) run,
     #: after the tier-3 collinear merge.
     run_segment_count: int = 0
@@ -1143,6 +1177,7 @@ def reinforce_net(
     board_rules: BoardClearanceRules | None = None,
     anchor_mode: str = DEFAULT_ANCHOR_MODE,
     end_offset_mm: float = DEFAULT_END_OFFSET_MM,
+    max_end_shift_mm: float | None = None,
     mask_opening: bool | None = None,
     mask_width_mm: float | None = None,
 ) -> ReinforceResult:
@@ -1244,6 +1279,10 @@ def reinforce_net(
         )
     if end_offset_mm < 0 or not math.isfinite(end_offset_mm):
         raise ReinforceError(f"end_offset_mm must be >= 0, got {end_offset_mm}")
+    if max_end_shift_mm is not None and (
+        max_end_shift_mm < 0 or not math.isfinite(max_end_shift_mm)
+    ):
+        raise ReinforceError(f"max_end_shift_mm must be >= 0, got {max_end_shift_mm}")
     if mask_width_mm is not None and (mask_width_mm <= 0 or not math.isfinite(mask_width_mm)):
         raise ReinforceError(f"mask_width_mm must be positive, got {mask_width_mm}")
     if mask_opening is None:
@@ -1279,6 +1318,7 @@ def reinforce_net(
         spacing_mm=spacing_mm,
         anchor_mode=anchor_mode,
         end_offset_mm=end_offset_mm,
+        max_end_shift_mm=max_end_shift_mm,
         mask_opening=bool(mask_opening) and anchor_mode == ANCHOR_MODE_ENDS,
         mask_width_mm=mask_width_mm,
     )
@@ -2128,8 +2168,7 @@ def _reinforce_ends(
     features = _same_net_end_features(pcb, target_net_number, anchor_drill, anchor_pad)
     dedup_floor = max(anchor_pad, anchor_drill + rules.min_hole_to_hole_mm)
     placed_positions: list[tuple[float, float]] = []
-    step = END_NUDGE_MAX_MM / END_NUDGE_STEPS if END_NUDGE_STEPS > 0 else 0.0
-    nudges = [k * step for k in range(END_NUDGE_STEPS + 1)] if step > 0 else [0.0]
+    arc_of: dict[tuple[float, float], float] = {}
 
     def violation_at(p: tuple[float, float]) -> _Violation | None:
         """Rule check of one anchor candidate; ``None`` when it may be placed.
@@ -2169,6 +2208,7 @@ def _reinforce_ends(
         * neither set, two refusals -- both ends refused by rules.
         """
         total = cum[-1]
+        nudges = _end_shift_offsets(end_shift_bound(total, result.max_end_shift_mm))
 
         def side(base: float, sign: float):
             out = []
@@ -2179,6 +2219,7 @@ def _reinforce_ends(
                 pos = _point_at_arc(points, cum, t)
                 if clear(pos):
                     out.append((t, pos))
+                    arc_of[pos] = t
             return out
 
         starts, ends = side(t0, 1.0), side(t1, -1.0)
@@ -2357,19 +2398,42 @@ def _reinforce_ends(
                         leg.status = LEG_FULL
                         # Two anchors imply a plan_pair result, so both are set.
                         assert t0 is not None and t1 is not None
-                        leg.wire_span_mm = t1 - t0
+                        # Placed arcs, not the pre-search ``t0``/``t1``: a refused
+                        # end candidate slides the anchor inward (Issue #8797).
+                        a0 = arc_of.get(pair[0], t0)
+                        a1 = arc_of.get(pair[1], t1)
+                        leg.anchors[0].shift_mm = max(0.0, a0 - t0)
+                        leg.anchors[1].shift_mm = max(0.0, t1 - a1)
+                        leg.wire_span_mm = a1 - a0
+                        leg.uncovered_mm = max(0.0, total - leg.wire_span_mm)
                         shifts = [
                             (name, d)
-                            for name, d in (("start", t0 - t0_arc), ("far", t1_arc - t1))
+                            for name, d in (("start", a0 - t0_arc), ("far", t1_arc - a1))
                             if d > _ANCHOR_SHIFT_NOTE_MM
                         ]
+                        slid = [
+                            (name, a.shift_mm)
+                            for name, a in (("start", leg.anchors[0]), ("far", leg.anchors[1]))
+                            if a.shift_mm > 1e-6
+                        ]
+                        parts: list[str] = []
                         if shifts:
                             moved = "; ".join(
                                 f"{name} anchor moved {d:.1f} mm inward" for name, d in shifts
                             )
+                            parts.append(f"{moved} to stay clear of the end copper")
+                        if slid:
+                            parts.append(
+                                "; ".join(
+                                    f"{name} anchor slid {d:.2f} mm inward past a refused "
+                                    "end position"
+                                    for name, d in slid
+                                )
+                            )
+                        if parts:
                             leg.reason = (
-                                f"wire spans {leg.wire_span_mm:.1f} of {total:.1f} mm: {moved} "
-                                "to stay clear of the end copper"
+                                f"wire spans {leg.wire_span_mm:.1f} of {total:.1f} mm "
+                                f"({leg.uncovered_mm:.1f} mm uncovered): " + "; ".join(parts)
                             )
                         if result.mask_opening:
                             _plan_mask_opening(
@@ -2377,9 +2441,11 @@ def _reinforce_ends(
                             )
                     elif leg.anchors:
                         leg.status = LEG_PARTIAL
+                        bound = end_shift_bound(total, result.max_end_shift_mm)
                         leg.reason = (
                             "1 of 2 end anchors refused by a clearance/hole-to-hole rule "
-                            "(see refused)"
+                            f"at every position within {bound:.1f} mm of the end "
+                            "(see refused; raise --max-end-shift to search further)"
                         )
                     else:
                         leg.status = LEG_UNANCHORED

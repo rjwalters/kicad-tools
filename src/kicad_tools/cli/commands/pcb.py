@@ -1188,6 +1188,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     anchor_mode = getattr(args, "anchor_mode", None) or "ends"
     end_offset = getattr(args, "end_offset", None)
     end_offset = 1.0 if end_offset is None else end_offset
+    max_end_shift = getattr(args, "max_end_shift", None)
     spacing_arg = getattr(args, "spacing", None)
     spacing = 15.0 if spacing_arg is None else spacing_arg
     if anchor_mode == "ends" and spacing_arg is not None:
@@ -1325,6 +1326,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             board_rules=board_rules,
             anchor_mode=anchor_mode,
             end_offset_mm=end_offset,
+            max_end_shift_mm=max_end_shift,
             mask_opening=mask_opening,
             mask_width_mm=mask_width,
         )
@@ -1397,8 +1399,13 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "length_mm": round(leg.length_mm, 4),
                 "width_mm": round(leg.width_mm, 4),
                 "wire_span_mm": round(leg.wire_span_mm, 4),
+                "uncovered_mm": round(leg.uncovered_mm, 4),
                 "anchors": [
-                    {"x": round(a.x + origin_x, 4), "y": round(a.y + origin_y, 4)}
+                    {
+                        "x": round(a.x + origin_x, 4),
+                        "y": round(a.y + origin_y, 4),
+                        "shift_mm": round(a.shift_mm, 4),
+                    }
                     for a in leg.anchors
                 ],
                 "status": leg.status,
@@ -1623,6 +1630,18 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
 
     audit = audit_current_paths(pcb, specs)
     output_format = getattr(args, "format", "text")
+    # Report sheet coordinates, the frame ``kct check`` uses (#8798).
+    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+
+    def _sheet(point) -> list[float]:
+        return [point[0] + origin_x, point[1] + origin_y]
+
+    def _sheet_witness(witness: dict[str, Any]) -> dict[str, Any]:
+        out = dict(witness)
+        for key in ("start", "end", "position"):
+            if key in out:
+                out[key] = _sheet(out[key])
+        return out
 
     result: dict[str, Any] = {
         "input": str(pcb_path),
@@ -1652,12 +1671,12 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 "reinforcement_eligible": r.spec.reinforcement_eligible,
                 "status": r.status,
                 "reason": r.reason,
-                "witness": r.witness,
+                "witness": _sheet_witness(r.witness),
                 "segment_count": len(r.segments),
                 "length_mm": round(r.length_mm, 4),
                 "layer_changes": [
                     {
-                        "position": list(c.position),
+                        "position": _sheet(c.position),
                         "from_layer": c.from_layer,
                         "to_layer": c.to_layer,
                         "via_count": c.count,
@@ -1665,7 +1684,7 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                         "pad_diameter_mm": c.pad_diameter,
                         "capacity_a": round(c.current_capacity_a(), 4),
                         "vias": [
-                            {"position": list(v[0]), "drill_mm": v[1], "pad_diameter_mm": v[2]}
+                            {"position": _sheet(v[0]), "drill_mm": v[1], "pad_diameter_mm": v[2]}
                             for v in c.vias
                         ],
                     }
@@ -1724,9 +1743,10 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 if thermal.assumption:
                     print(f"      assumption: {thermal.assumption}")
                 for c in r.layer_changes:
+                    cx, cy = _sheet(c.position)
                     print(
                         f"      layer change {c.from_layer}->{c.to_layer} at "
-                        f"({c.position[0]:.3f}, {c.position[1]:.3f}): {c.count} via(s), "
+                        f"({cx:.3f}, {cy:.3f}): {c.count} via(s), "
                         f"drill {c.drill:.3f} mm, capacity {c.current_capacity_a():.2f} A"
                     )
                 if r.spec.pulsed_a is not None and r.spec.pulse_duration_s is None:
