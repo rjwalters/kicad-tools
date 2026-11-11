@@ -1018,6 +1018,48 @@ def _print_clear_lines(clear_outcome, origin_x: float, origin_y: float, dry_run:
         print(
             f"    kept anchor at ({r.x + origin_x:.2f}, {r.y + origin_y:.2f}): refused -- {r.reason}"
         )
+    if clear_outcome.openings_removed:
+        print(f"  Mask openings cleared: {len(clear_outcome.openings_removed)} ({verb})")
+        for o in clear_outcome.openings_removed:
+            print(
+                f"    {o.layer} opening ({o.start[0] + origin_x:.2f}, {o.start[1] + origin_y:.2f})"
+                f" -> ({o.end[0] + origin_x:.2f}, {o.end[1] + origin_y:.2f})"
+            )
+
+
+def _load_sidecar_wires(pcb_path: Path) -> list | None:
+    """The board's wire-list sidecar records, or None when absent/unreadable (#8747)."""
+    from kicad_tools.pcb.reinforcement_sidecar import load_wires, sidecar_path
+
+    path = sidecar_path(pcb_path)
+    if not path.is_file():
+        return None
+    try:
+        return load_wires(path)
+    except (OSError, ValueError) as e:
+        print(f"Warning: ignoring unreadable {path}: {e}", file=sys.stderr)
+        return None
+
+
+def _drop_cleared_wires(output_path: Path, clear_outcome, origin_x: float, origin_y: float) -> int:
+    """Remove the sidecar wire records whose anchors were cleared (#8747)."""
+    from kicad_tools.pcb.reinforcement_sidecar import drop_wires, sidecar_path
+
+    removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
+    if not removed:
+        return 0
+    return drop_wires(sidecar_path(output_path), clear_outcome.net_name, removed)
+
+
+def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
+    return [
+        {
+            "layer": o.layer,
+            "start": [round(o.start[0] + origin_x, 4), round(o.start[1] + origin_y, 4)],
+            "end": [round(o.end[0] + origin_x, 4), round(o.end[1] + origin_y, 4)],
+        }
+        for o in openings
+    ]
 
 
 def _finish_reinforce_clear(
@@ -1043,6 +1085,10 @@ def _finish_reinforce_clear(
                     "cleared": _clear_entries(clear_outcome.removed, origin_x, origin_y),
                     "clear_refused": _clear_entries(
                         clear_outcome.refused, origin_x, origin_y, reason=True
+                    ),
+                    "identified_by": clear_outcome.identified_by,
+                    "mask_openings_cleared": _opening_entries(
+                        clear_outcome.openings_removed, origin_x, origin_y
                     ),
                 },
                 indent=2,
@@ -1075,6 +1121,13 @@ def _finish_reinforce_clear(
         except Exception as e:
             print(f"Error saving PCB: {e}", file=sys.stderr)
             return 1
+        try:
+            dropped = _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
+        except (OSError, ValueError) as e:
+            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+        if dropped and output_format == "text":
+            print(f"  Sidecar:  dropped {dropped} wire record(s)")
     return 0
 
 
@@ -1242,7 +1295,12 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     clear_outcome = None
     if clear_only or replace:
         try:
-            clear_outcome = clear_anchors(pcb, net_name, wire_gauge_awg=wire_gauge)
+            clear_outcome = clear_anchors(
+                pcb,
+                net_name,
+                wire_gauge_awg=wire_gauge,
+                sidecar_wires=_load_sidecar_wires(pcb_path),
+            )
         except ReinforceError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
@@ -1391,6 +1449,16 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         result["clear_refused"] = _clear_entries(
             clear_outcome.refused, origin_x, origin_y, reason=True
         )
+        result["identified_by"] = clear_outcome.identified_by
+        result["mask_openings_cleared"] = _opening_entries(
+            clear_outcome.openings_removed, origin_x, origin_y
+        )
+        if not dry_run:
+            try:
+                _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
+            except (OSError, ValueError) as e:
+                print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+                return 1
 
     # Issue #8744: wire list sidecar (ends mode only; never on a dry run).
     from kicad_tools.pcb.reinforcement_sidecar import build_wire_records, write_sidecar
