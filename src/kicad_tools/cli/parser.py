@@ -7569,6 +7569,30 @@ def _add_readiness_parser(subparsers) -> None:
         ),
     )
     rd_parser.add_argument(
+        "--quantity",
+        dest="readiness_quantity",
+        type=int,
+        metavar="N",
+        default=None,
+        help=(
+            "Boards in the order, for the LCSC stock check (default: 5, JLCPCB's minimum PCBA "
+            "order); same semantics as `kct export --boards`. With --verify the bundle's recorded "
+            "per-part stock is re-evaluated at this size; recorded in the report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
+        "--inventory-covered",
+        dest="readiness_inventory_covered",
+        metavar="C123,C456",
+        default=None,
+        help=(
+            "Comma-separated LCSC catalog ids held in your own fab parts inventory; they are "
+            "excluded from the stock shortfall verdict and listed as not stock-verified. Explicit "
+            "only, never inferred; same as `kct submit-jlcpcb --inventory-covered`. Recorded in the "
+            "report and README.txt"
+        ),
+    )
+    rd_parser.add_argument(
         "--checked-at",
         dest="readiness_checked_at",
         metavar="ISO",

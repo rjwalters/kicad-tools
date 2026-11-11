@@ -80,8 +80,11 @@ class FakeEngines:
         stale_waivers: int = 0,
         lcsc_check: dict | None = None,
         omit_lcsc_check: bool = False,
+        stock_check: dict | None = None,
     ) -> None:
         self.board = board
+        self.stock_check = stock_check
+        self.export_kwargs: dict = {}
         # The bundle preflight's ``bom_lcsc_values`` entry the bom gate reads
         # (issue #7166); ``omit_lcsc_check`` models a manifest without one.
         self.lcsc_check = (
@@ -220,8 +223,11 @@ class FakeEngines:
         output_dir: Path,
         assembly: bool,
         merge_lcsc_from: Path | None = None,
+        quantity: int | None = None,
+        inventory_covered: frozenset[str] | None = None,
     ) -> EngineRun:
         self.calls.append("export")
+        self.export_kwargs = {"quantity": quantity, "inventory_covered": inventory_covered}
         self.merge_lcsc_from = merge_lcsc_from
         self.pcb_bytes_at_export = pcb.read_bytes()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -263,6 +269,8 @@ class FakeEngines:
         manifest: dict = {"version": "1.0", "manufacturer": mfr, "files": {}}
         if self.lcsc_check is not None:
             manifest["preflight"] = [self.lcsc_check]
+            if self.stock_check is not None:
+                manifest["preflight"].append(self.stock_check)
         (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
         return EngineRun(ok=True)
 
