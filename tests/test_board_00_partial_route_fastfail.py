@@ -214,7 +214,7 @@ class TestBoard00RoutePcbNetCount:
         monkeypatch.setattr(
             "kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **k: 0
         )
-        monkeypatch.setattr(auto_pour,"auto_pour_if_missing", lambda *a, **k: (2, ["VCC", "GND"]))
+        monkeypatch.setattr(auto_pour, "auto_pour_if_missing", lambda *a, **k: (2, ["VCC", "GND"]))
         monkeypatch.setattr(route_cmd, "_fill_zones_after_route", lambda *a, **k: None)
         return fake
 

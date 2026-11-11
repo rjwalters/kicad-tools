@@ -364,9 +364,7 @@ def _run(
     }
     if not dry_run:
         for t, x, y in placements:
-            doc.append(
-                _build_node(t, x, y, layer, font_size, font_thickness, kept_uuids.get(t))
-            )
+            doc.append(_build_node(t, x, y, layer, font_size, font_thickness, kept_uuids.get(t)))
         save_path = output_path or pcb_path
         save_pcb(doc, save_path)
         result["written"] = True
