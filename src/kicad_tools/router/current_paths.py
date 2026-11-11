@@ -779,6 +779,31 @@ STATUS_AMBIGUOUS = "ambiguous"
 
 
 @dataclass(frozen=True)
+class ParallelGroup:
+    """Deliberately doubled copper between two junctions (issue #8790).
+
+    Attributes:
+        branches: One tuple of segments per branch. Each branch lies on a
+            single copper layer, branches sit on pairwise distinct layers, and
+            they follow the same route, so they share current as one wider
+            conductor whose capacity is judged on the summed cross-section.
+    """
+
+    branches: tuple[tuple[Segment, ...], ...]
+
+    @property
+    def segments(self) -> tuple[Segment, ...]:
+        return tuple(seg for branch in self.branches for seg in branch)
+
+    def describe(self) -> str:
+        parts = [
+            f"{branch[0].layer} {min(seg.width for seg in branch):.3f}mm"
+            for branch in self.branches
+        ]
+        return "parallel group " + " + ".join(parts)
+
+
+@dataclass(frozen=True)
 class LayerChange:
     """One layer change on a resolved path, with the vias that carry it.
 
@@ -904,6 +929,9 @@ class PathResolution:
     #: proves the cycle, as ``{"kind": "segment"|"via", "layer", "start",
     #: "end"}`` / ``{"kind": "via", "position"}``. Empty otherwise.
     witness: dict[str, object] = field(default_factory=dict)
+    #: Doubled-copper groups the resolution relied on to clear a cycle
+    #: (issue #8790). Their segments are part of ``segments``.
+    parallel_groups: tuple[ParallelGroup, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -1566,6 +1594,130 @@ def _component_cycle_witness(
     return {}
 
 
+@dataclass(eq=False)
+class _SPEdge:
+    """Edge of the series-parallel reduction used by :func:`_reduce_parallel_groups`."""
+
+    u: _Node
+    v: _Node
+    segments: list[Segment]
+    grouped: bool = False
+
+
+def _group_qualifies(branches: list[list[Segment]]) -> bool:
+    """A simple parallel group: one layer per branch, distinct layers, same route."""
+    if any(not b or len({s.layer for s in b}) != 1 for b in branches):
+        return False
+    if len({b[0].layer for b in branches}) != len(branches):
+        return False
+    tol = min(s.width for b in branches for s in b) / 2.0
+    # Branches span the same two junctions, so each must lie on every other.
+    for branch in branches:
+        for other in branches:
+            if other is branch:
+                continue
+            for seg in branch:
+                for point in (seg.start, seg.end):
+                    if all(
+                        point_to_segment_distance(*point, *ref.start, *ref.end) > tol
+                        for ref in other
+                    ):
+                        return False
+    return True
+
+
+def _reduce_parallel_groups(
+    graph: _CopperGraph, start: _Node, goal: _Node, arrays: Sequence[_ViaArray] = ()
+) -> list[ParallelGroup] | None:
+    """Clear a cycle by contracting simple parallel groups (issue #8790).
+
+    Via barrels are zero-resistance and contracted; edges joining the same two
+    junctions are merged when they form a qualifying group (see
+    :func:`_group_qualifies`); non-load degree-2 junctions are series-merged.
+    Returns the groups used when the component reduces to a tree, ``None``
+    otherwise (a loop through another load, a mesh, same-layer detours), so the
+    caller keeps today's ambiguity and witness.
+    """
+    roots = {node: next(iter(a.nodes)) for a in arrays for node in a.nodes}
+    contracted = {edge for a in arrays for edge in a.edges}
+    parent: dict[_Node, _Node] = {}
+
+    def find(n: _Node) -> _Node:
+        parent.setdefault(n, n)
+        while parent[n] != n:
+            parent[n] = parent[parent[n]]
+            n = parent[n]
+        return n
+
+    raw: dict[int, tuple[_Node, _Node, _GraphEdge]] = {}
+    seen, stack = {start}, [start]
+    while stack:
+        cur = stack.pop()
+        for nxt, edge in graph.adjacency.get(cur, []):
+            if edge not in contracted:
+                raw.setdefault(id(edge), (roots.get(cur, cur), roots.get(nxt, nxt), edge))
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    for u, v, edge in raw.values():
+        if edge.segment is None:
+            parent[find(u)] = find(v)
+    edges: list[_SPEdge] = []
+    for u, v, edge in raw.values():
+        if edge.segment is None:
+            continue
+        ru, rv = find(u), find(v)
+        if ru == rv:
+            return None
+        edges.append(_SPEdge(ru, rv, [edge.segment]))
+    keep = {find(roots.get(n, n)) for n in (start, goal, *graph.pads.values())}
+    # A via junction is where branches may END; a doubled run stitched by
+    # interior rungs is a ladder, not a simple group, and stays ambiguous.
+    barrel_junctions = {find(u) for u, _, edge in raw.values() if edge.segment is None}
+
+    groups: list[ParallelGroup] = []
+    changed = True
+    while changed:
+        changed = False
+        by_pair: dict[frozenset[_Node], list[_SPEdge]] = {}
+        for e in edges:
+            by_pair.setdefault(frozenset((e.u, e.v)), []).append(e)
+        for members in by_pair.values():
+            if len(members) < 2:
+                continue
+            branches = [m.segments for m in members]
+            if not _group_qualifies(branches):
+                continue
+            groups.append(ParallelGroup(tuple(tuple(b) for b in branches)))
+            merged = _SPEdge(
+                members[0].u, members[0].v, [s for b in branches for s in b], grouped=True
+            )
+            edges = [e for e in edges if e not in members] + [merged]
+            changed = True
+        incident: dict[_Node, list[_SPEdge]] = {}
+        for e in edges:
+            incident.setdefault(e.u, []).append(e)
+            incident.setdefault(e.v, []).append(e)
+        for node, inc in incident.items():
+            if node in keep or node in barrel_junctions or len(inc) != 2 or inc[0] is inc[1]:
+                continue
+            a, b = inc
+            ends = [x for e in (a, b) for x in (e.u, e.v) if x != node]
+            if len(ends) != 2 or ends[0] == ends[1]:
+                continue
+            merged = _SPEdge(ends[0], ends[1], a.segments + b.segments, a.grouped or b.grouped)
+            edges = [e for e in edges if e is not a and e is not b] + [merged]
+            changed = True
+            break
+    for junction in barrel_junctions:
+        if sum(e.grouped for e in edges if junction in (e.u, e.v)) > 1:
+            return None
+    nodes = {n for e in edges for n in (e.u, e.v)}
+    if edges and len(edges) > len(nodes) - 1:
+        return None
+    return groups
+
+
 def _describe_witness(witness: dict[str, object]) -> str:
     if not witness:
         return ""
@@ -1864,7 +2016,10 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                     sink=sink,
                     reason="endpoint via fanout is outside the proved local pad-to-trunk motif",
                 )
+    parallel_groups: list[ParallelGroup] = []
     if _component_has_cycle(adjacency, start, arrays):
+        parallel_groups = _reduce_parallel_groups(adjacency, start, goal, arrays) or []
+    if not parallel_groups and _component_has_cycle(adjacency, start, arrays):
         witness = _component_cycle_witness(adjacency, start, arrays)
         return PathResolution(
             spec=spec,
@@ -1884,7 +2039,11 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
     path_segments = list(
         {
             id(seg): seg
-            for seg in [*path_segments, *(seg for array in arrays for seg in array.members)]
+            for seg in [
+                *path_segments,
+                *(seg for array in arrays for seg in array.members),
+                *(seg for group in parallel_groups for seg in group.segments),
+            ]
         }.values()
     )
 
@@ -1921,6 +2080,7 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
         length_mm=sum(_seg_length(s) for s in path_segments),
         layer_changes=_layer_changes(pcb, spec.net_name, path_segments, arrays),
         sense_taps=tuple({id(seg): seg for seg in sense_taps}.values()),
+        parallel_groups=tuple(parallel_groups),
     )
 
 
