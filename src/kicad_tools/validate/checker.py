@@ -29,13 +29,14 @@ from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.pour_slot import PourSlotRule
 from .rules.redundant_copper import RedundantCopperRule
+from .rules.reinforcement_incomplete import ReinforcementIncompleteRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.via_in_pad import ViaInPadRule
 from .rules.zone_fill import IsolatedCopperRule, ZoneFillRule
 from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from pathlib import Path
 
     from kicad_tools.router.current_paths import CurrentPathSpec
@@ -137,6 +138,8 @@ class DRCChecker:
         copper_oz_inner: float | None = None,
         declared_spec_currents: list[str] | None = None,
         current_path_specs: Sequence[CurrentPathSpec] | None = None,
+        reinforcement_wires: Sequence[dict] | None = None,
+        reinforcement_waived_nets: Iterable[str] | None = None,
         mask_copper_request: MaskCopperRequest | None = None,
         physical_copper_gap_mm: float | None = None,
         authored_min_clearance_mm: float | None = None,
@@ -287,6 +290,10 @@ class DRCChecker:
         self.current_path_specs: list[CurrentPathSpec] = (
             list(current_path_specs) if current_path_specs else []
         )
+        # Issue #8746: wire records (gauge source) and nets whose ampacity
+        # waiver cites reinforcement, for ``reinforcement_incomplete``.
+        self.reinforcement_wires: list[dict] = list(reinforcement_wires or [])
+        self.reinforcement_waived_nets: frozenset[str] = frozenset(reinforcement_waived_nets or ())
         # Issue #4176: when True, the connectivity rule decides segment /
         # pad / via unions by real geometric copper contact (shapely polygon
         # intersection) instead of the legacy 0.01mm endpoint-proximity
@@ -355,6 +362,7 @@ class DRCChecker:
     CHECK_ALL_METHODS: tuple[str, ...] = (
         "check_ampacity",
         "check_path_ampacity",
+        "check_reinforcement_incomplete",
         "check_clearances",
         "check_physical_copper_gap",
         "check_connectivity",
@@ -469,6 +477,9 @@ class DRCChecker:
         # under-width declared branch is a real thermal/fire hazard and
         # MUST still block gating consumers.
         "path_ampacity": CATEGORY_ADVISORY,
+        # Buttress-wire completeness (Issue #8746): errors only on nets whose
+        # ampacity waiver cites reinforcement, so it is not fab-bucket noise.
+        "reinforcement_incomplete": CATEGORY_ADVISORY,
         # Connector mating / edge-access (Issue #4613): mechanical
         # accessibility advisories, not fab-blocking copper defects.
         # Explicit entries are REQUIRED -- category_for_rule defaults
@@ -1310,6 +1321,22 @@ class DRCChecker:
             path is declared.
         """
         rule = PathAmpacityRule(specs=self.current_path_specs)
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_reinforcement_incomplete(self) -> DRCResults:
+        """Verify reinforced runs are buildable (Issue #8746, #8741 slice 4b).
+
+        Active only when a current-paths file declares a
+        ``reinforcement_eligible`` path; otherwise a clean no-op. Findings are
+        errors on nets whose ampacity waiver cites reinforcement
+        (:data:`~kicad_tools.validate.rules.reinforcement_incomplete
+        .REINFORCEMENT_REASON_RE`), warnings elsewhere.
+        """
+        rule = ReinforcementIncompleteRule(
+            specs=self.current_path_specs,
+            wires=self.reinforcement_wires,
+            waived_nets=self.reinforcement_waived_nets,
+        )
         return self._absolutize(rule.check(self.pcb, self.design_rules))
 
     def check_impedance(self) -> DRCResults:

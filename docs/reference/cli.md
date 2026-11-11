@@ -1507,6 +1507,36 @@ declared current; this does not assume equal current sharing or qualify the
 array by summed widths. Unsupported same-net arcs and custom pad stacks prevent
 array recognition.
 
+#### `reinforcement_incomplete` (`kct check`, #8746)
+
+Verifies that a buttress-wire-reinforced run (`kct pcb reinforce`) is
+buildable. Category `reinforcement_incomplete` (`--only` / `--skip`); it is
+**active only when the current-paths file declares a
+`reinforcement_eligible` path** (otherwise reported `skipped`). The legs are
+re-derived from the board's eligible copper and checked against board geometry
+(vias, through-hole pads, `F.Mask`/`B.Mask` `gr_line`s), never against the
+`<board>.reinforcement.json` sidecar's own anchor list; the sidecar only supplies
+the wire gauge (`anchor_drill_for_awg`; 16 AWG when absent). Per single-layer leg:
+
+| Sub-check | Fails when |
+|---|---|
+| `a` | the leg does not have exactly two anchors (holes of the anchor drill on the leg), one within the end window of each leg end (distance to the edge of the end copper + end offset 1.0 mm + 2.0 mm nudge + anchor radius) |
+| `b` | the leg between the anchors is not covered by a continuous mask opening on its side (collinear pieces are unioned; 0.05 mm tolerance) |
+| `c` | an anchor via is tented on either side |
+| `d` | the path changes layer through a via whose drill is smaller than the anchor drill (layer-change record of `current-paths-audit`) |
+| `stray` | an anchor-sized via on the net is at no leg end |
+
+Inner-layer legs have no solder mask, so `b`/`c` are skipped for them. Each
+finding names the net, layer, leg and sub-check, with sheet-absolute coordinates.
+
+**Severity / waiver rule.** A finding is an **error** when its net carries an
+`ampacity` or `path_ampacity` waiver in `.kct_waivers.json` whose `reason`
+matches the case-insensitive regex `reinforc|buttress|wire` (the waiver claims a
+wire carries the current, so the wire must be buildable; for a keyed entry the
+net is taken from the key); otherwise it is a **warning**. The rule's own findings are
+waivable like any other (`rule: "reinforcement_incomplete"`); a waived finding keeps
+its severity and does not clear the manufacturing gate by default.
+
 Route-time width selection itself stays governed by the net-class
 `trace_width` (the same declarative/checked-post-route split
 `NetClassRouting.target_ampacity` already uses); see the

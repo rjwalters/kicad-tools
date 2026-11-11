@@ -9,6 +9,7 @@ CHECK_CATEGORIES = [
     "physical_copper_gap",
     "ampacity",
     "path_ampacity",
+    "reinforcement_incomplete",
     "clearance",
     "connectivity",
     "connector_access",
