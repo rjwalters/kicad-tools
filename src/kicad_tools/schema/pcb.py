@@ -7219,6 +7219,45 @@ class PCB:
             for g in self._graphic_lines
         )
 
+    def graphic_lines_on(self, layer: str) -> list[GraphicLine]:
+        """The board-level ``gr_line`` graphics on ``layer`` (sheet-absolute coordinates)."""
+        return [g for g in self._graphic_lines if g.layer == layer]
+
+    def remove_graphic_lines(self, lines: list[GraphicLine]) -> int:
+        """Remove specific ``gr_line`` graphics (Issue #8747); returns how many went.
+
+        Matched by identity in the in-memory list, then dropped from the
+        S-expression tree by UUID (or, for a UUID-less node, by layer and endpoints).
+        """
+        if not lines:
+            return 0
+        ids = {id(g) for g in lines}
+        victims = [g for g in self._graphic_lines if id(g) in ids]
+        uuids = {g.uuid for g in victims if g.uuid}
+        removed = 0
+        for node in list(self._sexp.children):
+            if node.is_atom or node.tag != "gr_line":
+                continue
+            u = node.find("uuid")
+            uuid = (u.get_string(0) or "") if u else ""
+            if uuid:
+                hit = uuid in uuids
+            else:
+                parsed = GraphicLine.from_sexp(node)
+                hit = any(
+                    not g.uuid
+                    and g.layer == parsed.layer
+                    and g.start == parsed.start
+                    and g.end == parsed.end
+                    for g in victims
+                )
+            if hit:
+                self._sexp.remove(node)
+                removed += 1
+        self._graphic_lines = [g for g in self._graphic_lines if id(g) not in ids]
+        self._graphics = [g for g in self._graphics if not (g.uuid and g.uuid in uuids)]
+        return len(victims)
+
     def add_graphic_line(
         self,
         start: tuple[float, float],

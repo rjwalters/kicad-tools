@@ -999,6 +999,138 @@ def _print_reinforce_legs(outcome, origin_x: float, origin_y: float) -> None:
         print(f"    excluded copper: {rs.length_mm:.1f} mm -- {rs.path_excluded_reason}")
 
 
+def _clear_entries(items, origin_x: float, origin_y: float, reason: bool = False) -> list:
+    out = []
+    for it in items:
+        e = {"x": round(it.x + origin_x, 4), "y": round(it.y + origin_y, 4)}
+        if reason:
+            e["reason"] = it.reason
+        out.append(e)
+    return out
+
+
+def _print_clear_lines(clear_outcome, origin_x: float, origin_y: float, dry_run: bool) -> None:
+    verb = "would be removed" if dry_run else "removed"
+    print(f"  Anchors cleared: {clear_outcome.removed_count} ({verb})")
+    for a in clear_outcome.removed:
+        print(f"    {verb.split()[-1]} anchor at ({a.x + origin_x:.2f}, {a.y + origin_y:.2f})")
+    for r in clear_outcome.refused:
+        print(
+            f"    kept anchor at ({r.x + origin_x:.2f}, {r.y + origin_y:.2f}): refused -- {r.reason}"
+        )
+    if clear_outcome.openings_removed:
+        print(f"  Mask openings cleared: {len(clear_outcome.openings_removed)} ({verb})")
+        for o in clear_outcome.openings_removed:
+            print(
+                f"    {o.layer} opening ({o.start[0] + origin_x:.2f}, {o.start[1] + origin_y:.2f})"
+                f" -> ({o.end[0] + origin_x:.2f}, {o.end[1] + origin_y:.2f})"
+            )
+
+
+def _load_sidecar_wires(pcb_path: Path) -> list | None:
+    """The board's wire-list sidecar records, or None when absent/unreadable (#8747)."""
+    from kicad_tools.pcb.reinforcement_sidecar import load_wires, sidecar_path
+
+    path = sidecar_path(pcb_path)
+    if not path.is_file():
+        return None
+    try:
+        return load_wires(path)
+    except (OSError, ValueError) as e:
+        print(f"Warning: ignoring unreadable {path}: {e}", file=sys.stderr)
+        return None
+
+
+def _drop_cleared_wires(output_path: Path, clear_outcome, origin_x: float, origin_y: float) -> int:
+    """Remove the sidecar wire records whose anchors were cleared (#8747)."""
+    from kicad_tools.pcb.reinforcement_sidecar import drop_wires, sidecar_path
+
+    removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
+    if not removed:
+        return 0
+    return drop_wires(sidecar_path(output_path), clear_outcome.net_name, removed)
+
+
+def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
+    return [
+        {
+            "layer": o.layer,
+            "start": [round(o.start[0] + origin_x, 4), round(o.start[1] + origin_y, 4)],
+            "end": [round(o.end[0] + origin_x, 4), round(o.end[1] + origin_y, 4)],
+        }
+        for o in openings
+    ]
+
+
+def _finish_reinforce_clear(
+    args, pcb, pcb_path: Path, output_path: Path, clear_outcome, dry_run: bool, output_format: str
+) -> int:
+    """Report and (unless ``--dry-run``) save a ``pcb reinforce --clear`` pass (#8747)."""
+    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "input": str(pcb_path),
+                    "output": str(output_path)
+                    if not dry_run and clear_outcome.removed_count
+                    else None,
+                    "dry_run": dry_run,
+                    "clear": True,
+                    "net": clear_outcome.net_name,
+                    "wire_gauge_awg": clear_outcome.wire_gauge_awg,
+                    "anchor_drill_mm": round(clear_outcome.anchor_drill_mm, 4),
+                    "anchor_pad_mm": round(clear_outcome.anchor_pad_mm, 4),
+                    "anchors_cleared": clear_outcome.removed_count,
+                    "cleared": _clear_entries(clear_outcome.removed, origin_x, origin_y),
+                    "clear_refused": _clear_entries(
+                        clear_outcome.refused, origin_x, origin_y, reason=True
+                    ),
+                    "identified_by": clear_outcome.identified_by,
+                    "mask_openings_cleared": _opening_entries(
+                        clear_outcome.openings_removed, origin_x, origin_y
+                    ),
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(f"PCB Reinforce --clear{' (dry run)' if dry_run else ''}")
+        print(f"  Input:  {pcb_path}")
+        print(f"  Net:            {clear_outcome.net_name}")
+        print(f"  Wire gauge:     {clear_outcome.wire_gauge_awg} AWG")
+        print(
+            f"  Anchor size:    drill {clear_outcome.anchor_drill_mm:.3f} mm, "
+            f"pad {clear_outcome.anchor_pad_mm:.3f} mm"
+        )
+        if not clear_outcome.removed and not clear_outcome.refused:
+            print("  Nothing to clear: no anchor-sized same-net vias found.")
+        else:
+            _print_clear_lines(clear_outcome, origin_x, origin_y, dry_run)
+        if not dry_run and clear_outcome.removed_count:
+            print()
+            print("  NOTE: refill zone pours afterward (e.g. `kicad-cli pcb drc --refill-zones`).")
+
+    if not dry_run and clear_outcome.removed_count:
+        try:
+            pcb.save(output_path)
+            _carry_sidecars(pcb_path, output_path)
+            if output_format == "text":
+                print()
+                print(f"  Saved to: {output_path}")
+        except Exception as e:
+            print(f"Error saving PCB: {e}", file=sys.stderr)
+            return 1
+        try:
+            dropped = _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
+        except (OSError, ValueError) as e:
+            print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+            return 1
+        if dropped and output_format == "text":
+            print(f"  Sidecar:  dropped {dropped} wire record(s)")
+    return 0
+
+
 def _run_reinforce_list_wires(args, pcb_path: Path, net_name: str | None) -> int:
     """``pcb reinforce --list-wires``: print the sidecar's wires (#8744)."""
     from kicad_tools.pcb.reinforcement_sidecar import (
@@ -1036,7 +1168,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     are refused and reported, never placed. In-place by default; ``-o``
     writes elsewhere; ``--dry-run`` reports without writing.
     """
-    from kicad_tools.pcb.reinforce import ReinforceError, reinforce_net
+    from kicad_tools.pcb.reinforce import ReinforceError, clear_anchors, reinforce_net
     from kicad_tools.schema.pcb import PCB
 
     net_name = getattr(args, "net", None)
@@ -1044,6 +1176,12 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         return _run_reinforce_list_wires(args, pcb_path, net_name)
     if not net_name:
         print("Error: --net is required", file=sys.stderr)
+        return 1
+
+    clear_only = bool(getattr(args, "clear", False))
+    replace = bool(getattr(args, "replace", False))
+    if clear_only and replace:
+        print("Error: --clear and --replace are mutually exclusive", file=sys.stderr)
         return 1
 
     wire_gauge = getattr(args, "wire_gauge", 16)
@@ -1150,6 +1288,26 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         except (ValueError, OSError, StandardLookupError) as e:
             print(f"Error: invalid voltage-map: {e}", file=sys.stderr)
             return 1
+
+    # Issue #8747: --clear / --replace first remove the net's existing anchors
+    # (in memory; nothing is written under --dry-run). --replace carries on to
+    # place new anchors and writes once.
+    clear_outcome = None
+    if clear_only or replace:
+        try:
+            clear_outcome = clear_anchors(
+                pcb,
+                net_name,
+                wire_gauge_awg=wire_gauge,
+                sidecar_wires=_load_sidecar_wires(pcb_path),
+            )
+        except ReinforceError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+        if clear_only:
+            return _finish_reinforce_clear(
+                args, pcb, pcb_path, output_path, clear_outcome, dry_run, output_format
+            )
 
     try:
         outcome = reinforce_net(
@@ -1284,6 +1442,23 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             for r in outcome.refused_openings
         ],
     }
+    if clear_outcome is not None:
+        result["replace"] = True
+        result["anchors_cleared"] = clear_outcome.removed_count
+        result["cleared"] = _clear_entries(clear_outcome.removed, origin_x, origin_y)
+        result["clear_refused"] = _clear_entries(
+            clear_outcome.refused, origin_x, origin_y, reason=True
+        )
+        result["identified_by"] = clear_outcome.identified_by
+        result["mask_openings_cleared"] = _opening_entries(
+            clear_outcome.openings_removed, origin_x, origin_y
+        )
+        if not dry_run:
+            try:
+                _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
+            except (OSError, ValueError) as e:
+                print(f"Error updating reinforcement sidecar: {e}", file=sys.stderr)
+                return 1
 
     # Issue #8744: wire list sidecar (ends mode only; never on a dry run).
     from kicad_tools.pcb.reinforcement_sidecar import build_wire_records, write_sidecar
@@ -1351,6 +1526,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             _print_reinforce_legs(outcome, origin_x, origin_y)
         else:
             _print_reinforce_runs(outcome, all_runs)
+        if clear_outcome is not None:
+            print()
+            _print_clear_lines(clear_outcome, origin_x, origin_y, dry_run)
         print()
         print(f"  Anchors placed:  {outcome.placed_count}")
         print(f"  Anchors refused: {outcome.refused_count}")
@@ -1367,7 +1545,9 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             )
         if result["wire_sidecar"]:
             print(f"  Wire list:      {result['wire_sidecar']} ({len(wire_records)} wire(s))")
-        if not dry_run and outcome.placed_count:
+        if not dry_run and (
+            outcome.placed_count or (clear_outcome is not None and clear_outcome.removed_count)
+        ):
             print()
             print(
                 "  NOTE: anchors are same-net vias -- refill zone pours "
@@ -1395,8 +1575,10 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             else:
                 print("  NOTE: mask openings are off; anchors inherit the board's via tenting.")
 
-    # Save unless dry-run and at least one anchor was placed.
-    if not dry_run and outcome.placed_count:
+    # Save unless dry-run and at least one anchor was placed (or cleared).
+    if not dry_run and (
+        outcome.placed_count or (clear_outcome is not None and clear_outcome.removed_count)
+    ):
         try:
             pcb.save(output_path)
             _carry_sidecars(pcb_path, output_path)

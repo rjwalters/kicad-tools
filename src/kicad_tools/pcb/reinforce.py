@@ -425,6 +425,241 @@ class ReinforceError(ValueError):
     """Raised when the reinforce pass cannot proceed (e.g. unknown net)."""
 
 
+# --------------------------------------------------------------------------
+# ``--clear`` / ``--replace`` (Issue #8747): remove previously placed anchors
+# --------------------------------------------------------------------------
+
+#: Tolerance (mm) when matching a via's drill / pad to the anchor size.
+_ANCHOR_SIZE_TOL_MM = 1e-3
+#: Sidecar anchors are rounded to 4 decimals; board files to ~2.
+_SIDECAR_ANCHOR_TOL_MM = 0.02
+#: A mask-opening endpoint counts as on the net's copper within this distance.
+_OPENING_ON_COPPER_TOL_MM = 0.02
+
+#: Reason on a :class:`RefusedClear` whose removal would sever the net.
+CLEAR_REFUSED_SEVERS_NET = (
+    "removal would leave the net without its only layer link (copper that this "
+    "anchor joins would be disconnected)"
+)
+
+
+@dataclass
+class ClearedAnchor:
+    """An anchor via removed (or, in a dry run, that would be removed)."""
+
+    x: float
+    y: float
+
+
+@dataclass
+class RefusedClear:
+    """An anchor-sized via that was left in place by the connectivity guard."""
+
+    x: float
+    y: float
+    reason: str = CLEAR_REFUSED_SEVERS_NET
+
+
+@dataclass
+class ClearResult:
+    """Outcome of a :func:`clear_anchors` pass."""
+
+    net_name: str
+    wire_gauge_awg: int
+    anchor_drill_mm: float
+    anchor_pad_mm: float
+    removed: list[ClearedAnchor] = field(default_factory=list)
+    refused: list[RefusedClear] = field(default_factory=list)
+    #: Solder-mask opening graphics removed with the anchors (#8743, #8747).
+    openings_removed: list[MaskOpening] = field(default_factory=list)
+    #: ``"sidecar"`` when the wire-list sidecar named the anchors, else ``"size"``.
+    identified_by: str = "size"
+
+    @property
+    def removed_count(self) -> int:
+        return len(self.removed)
+
+    @property
+    def refused_count(self) -> int:
+        return len(self.refused)
+
+
+def _copper_component_count(model, removed: set[int]) -> int:
+    """Connected groups of the net's copper, ignoring isolated vias.
+
+    A group made only of vias (a stray via nothing is joined to) is not copper
+    anybody relies on, so it never counts -- removing a leaf or isolated
+    anchor must not look like a split.
+    """
+    comp = model.components(removed)
+    groups: set[int] = set()
+    for i, c in enumerate(comp):
+        if c != -1 and model.nodes[i].kind != "via":
+            groups.add(c)
+    return len(groups)
+
+
+def clear_anchors(
+    pcb: PCB,
+    net_name: str,
+    *,
+    wire_gauge_awg: int = DEFAULT_WIRE_GAUGE_AWG,
+    design_rules: DesignRules | None = None,
+    dry_run: bool = False,
+    sidecar_wires: list[dict] | None = None,
+) -> ClearResult:
+    """Remove the buttress-wire anchors previously placed for ``net_name``.
+
+    When ``sidecar_wires`` (the #8744 wire-list records) has wires for the net,
+    the anchors they list identify the vias exactly. Otherwise an anchor is
+    identified by size: a through via on ``net_name`` whose drill and pad equal
+    :func:`anchor_drill_for_awg` / :func:`anchor_pad_for_drill` for
+    ``wire_gauge_awg``. Vias on any other net are never touched.
+
+    The net's solder-mask openings (#8743) go with the anchors, so no exposed
+    run is left behind (:attr:`ClearResult.openings_removed`).
+
+    Each removal goes through the connectivity model of
+    :mod:`kicad_tools.pcb_prune`: an anchor whose removal would split the net's
+    copper into more groups than before -- it is the net's only link between
+    layers or copper groups -- is refused and reported in
+    :attr:`ClearResult.refused`, and stays on the board. Candidates are
+    judged one at a time against the removals already accepted, so when several
+    anchors share a link, enough of them stay to keep it.
+
+    With ``dry_run`` the board is not modified.
+
+    Raises:
+        ReinforceError: If the net does not exist on the board.
+    """
+    from kicad_tools.pcb_prune import _build_net_models
+
+    rules = design_rules or _FALLBACK_DESIGN_RULES
+    net_obj = pcb.get_net_by_name(net_name)
+    if net_obj is None and not any(s.net_name == net_name for s in pcb.segments):
+        raise ReinforceError(f"net {net_name!r} not found on board")
+    net_number = net_obj.number if net_obj is not None else None
+
+    drill = anchor_drill_for_awg(wire_gauge_awg)
+    pad = anchor_pad_for_drill(drill, rules.min_annular_ring_mm)
+    result = ClearResult(
+        net_name=net_name,
+        wire_gauge_awg=wire_gauge_awg,
+        anchor_drill_mm=drill,
+        anchor_pad_mm=pad,
+    )
+
+    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    on_net = [
+        v
+        for v in pcb.vias
+        if v.via_type is None
+        and (
+            (net_number is not None and v.net_number == net_number)
+            or (net_number is None and v.net_name == net_name)
+        )
+    ]
+    # The wire-list sidecar (#8744) names the anchors exactly (sheet-absolute);
+    # without wires for this net fall back to the size rule.
+    listed = [
+        (a["x"], a["y"])
+        for w in (sidecar_wires or [])
+        if w.get("net") == net_name
+        for a in w.get("anchors", [])
+    ]
+    if listed:
+        result.identified_by = "sidecar"
+        candidates = [
+            v
+            for v in on_net
+            if any(
+                abs(v.position[0] + ox - ax) <= _SIDECAR_ANCHOR_TOL_MM
+                and abs(v.position[1] + oy - ay) <= _SIDECAR_ANCHOR_TOL_MM
+                for ax, ay in listed
+            )
+        ]
+    else:
+        candidates = [
+            v
+            for v in on_net
+            if abs(v.drill - drill) <= _ANCHOR_SIZE_TOL_MM
+            and abs(v.size - pad) <= _ANCHOR_SIZE_TOL_MM
+        ]
+    if not candidates:
+        return result
+
+    model = _build_net_models(pcb).get(candidates[0].net_number)
+    node_of = {}
+    if model is not None:
+        node_of = {id(n.ref): i for i, n in enumerate(model.nodes) if n.kind == "via"}
+
+    gone: set[int] = set()
+    baseline = _copper_component_count(model, set()) if model is not None else 0
+    accepted = []
+    for via in candidates:
+        idx = node_of.get(id(via))
+        if model is not None and idx is not None:
+            if _copper_component_count(model, gone | {idx}) > baseline:
+                result.refused.append(RefusedClear(x=via.position[0], y=via.position[1]))
+                continue
+            gone.add(idx)
+        accepted.append(via)
+        result.removed.append(ClearedAnchor(x=via.position[0], y=via.position[1]))
+
+    if accepted:
+        stale = _stale_mask_openings(pcb, net_name, result)
+        result.openings_removed = [o for o, _ in stale]
+        if not dry_run:
+            pcb.remove_vias(accepted)
+            pcb.remove_graphic_lines([g for _, g in stale])
+    return result
+
+
+def _dist_to_segment(
+    p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]
+) -> float:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    n = dx * dx + dy * dy
+    t = 0.0 if n == 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / n))
+    return math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy))
+
+
+def _stale_mask_openings(pcb: PCB, net_name: str, result: ClearResult) -> list:
+    """Mask-opening ``gr_line``s of ``net_name`` left without their anchors (#8747).
+
+    An opening (#8743) is a ``gr_line`` on F.Mask/B.Mask whose endpoints both lie
+    on the net's copper on the matching layer. One touching an anchor that
+    stays (refused by the connectivity guard) is kept: its wire is still in use.
+    Returns ``(MaskOpening, GraphicLine)`` pairs, board-relative coordinates.
+    """
+    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    kept = [(r.x, r.y) for r in result.refused]
+    out = []
+    for copper, mask in MASK_LAYER_FOR_COPPER.items():
+        segs = [
+            (s.start, s.end) for s in pcb.segments if s.layer == copper and s.net_name == net_name
+        ]
+        if not segs:
+            continue
+
+        def on_copper(pt: tuple[float, float]) -> bool:
+            return any(_dist_to_segment(pt, a, b) <= _OPENING_ON_COPPER_TOL_MM for a, b in segs)
+
+        for g in pcb.graphic_lines_on(mask):
+            a = (g.start[0] - ox, g.start[1] - oy)
+            b = (g.end[0] - ox, g.end[1] - oy)
+            if not (on_copper(a) and on_copper(b)):
+                continue
+            if any(
+                math.dist(a, k) <= _SIDECAR_ANCHOR_TOL_MM
+                or math.dist(b, k) <= _SIDECAR_ANCHOR_TOL_MM
+                for k in kept
+            ):
+                continue
+            out.append((MaskOpening(mask, a, b, g.width), g))
+    return out
+
+
 def _seg_length(seg: Segment) -> float:
     (x1, y1), (x2, y2) = seg.start, seg.end
     return math.hypot(x2 - x1, y2 - y1)

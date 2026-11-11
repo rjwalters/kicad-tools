@@ -96,6 +96,45 @@ def merge_wires(existing: list[dict[str, Any]], new: list[dict[str, Any]]) -> li
     return sort_wires(list(merged.values()))
 
 
+def _near(a: dict[str, float], b: tuple[float, float], tol: float = 0.05) -> bool:
+    return abs(a["x"] - b[0]) <= tol and abs(a["y"] - b[1]) <= tol
+
+
+def wires_for_net(wires: list[dict[str, Any]], net: str) -> list[dict[str, Any]]:
+    return [w for w in wires if w.get("net") == net]
+
+
+def wires_with_anchors(
+    wires: list[dict[str, Any]], net: str, removed: list[tuple[float, float]]
+) -> list[dict[str, Any]]:
+    """Wires of ``net`` that have an anchor at one of the ``removed`` (sheet-absolute) points."""
+    return [
+        w
+        for w in wires_for_net(wires, net)
+        if any(_near(a, r) for a in w.get("anchors", []) for r in removed)
+    ]
+
+
+def drop_wires(path: Path, net: str, removed: list[tuple[float, float]]) -> int:
+    """Delete the sidecar wires of ``net`` anchored at a removed point; returns the count.
+
+    A no-op when the sidecar is absent. The file is rewritten deterministically.
+    """
+    if not path.is_file():
+        return 0
+    wires = load_wires(path)
+    gone = wires_with_anchors(wires, net, removed)
+    if not gone:
+        return 0
+    gone_ids = {id(w) for w in gone}
+    kept = [w for w in wires if id(w) not in gone_ids]
+    text = json.dumps(
+        {"version": SIDECAR_VERSION, "wires": sort_wires(kept)}, indent=2, sort_keys=True
+    )
+    path.write_text(text + "\n", encoding="utf-8")
+    return len(gone)
+
+
 def load_wires(path: Path) -> list[dict[str, Any]]:
     """Read a sidecar's wires. Raises ``OSError``/``ValueError`` if unreadable."""
     data = json.loads(path.read_text(encoding="utf-8"))
