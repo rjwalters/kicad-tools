@@ -116,6 +116,10 @@ def run_readiness_command(args) -> int:
     if getattr(args, "readiness_skip_cleanup", False):
         sub_argv.append("--skip-cleanup")
 
+    merge_lcsc_from = getattr(args, "readiness_merge_lcsc_from", None)
+    if merge_lcsc_from:
+        sub_argv.extend(["--merge-lcsc-from", str(merge_lcsc_from)])
+
     checked_at = getattr(args, "readiness_checked_at", None)
     if checked_at:
         sub_argv.extend(["--checked-at", checked_at])

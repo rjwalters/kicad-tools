@@ -328,6 +328,11 @@ def create_voltage_divider_pcb(output_dir: Path) -> Path:
     (legacy_teardrops no)
   )
   (paper "A4")
+  (title_block
+    (title "Voltage Divider")
+    (date "2026-11")
+    (rev "A")
+  )
   (layers
     (0 "F.Cu" signal)
     (31 "B.Cu" signal)
@@ -904,6 +909,18 @@ def main() -> int:
                 "isolation on a quiet machine, or raise the --timeout in "
                 "route_pcb() if this recurs on an unloaded host."
             )
+
+        # Step 5.6: Issue #8532 / #8598 -- every board carries global
+        # fiducials and a board-ID silkscreen (default-on ``fiducials_missing``
+        # / ``board_id_missing`` rules).  Added after routing and before DRC,
+        # LVS and export so every downstream artifact sees the final copper.
+        from kicad_tools.cli.pcb_add_board_info import run_add_board_info
+        from kicad_tools.cli.pcb_add_fiducials import run_add_fiducials
+
+        if run_add_fiducials(routed_path, sides="populated") != 0:
+            raise RuntimeError("pcb add-fiducials failed")
+        if run_add_board_info(routed_path, auto=True) != 0:
+            raise RuntimeError("pcb add-board-info failed")
 
         # Step 6: Run DRC
         drc_success = run_drc(routed_path)

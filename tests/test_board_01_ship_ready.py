@@ -131,9 +131,7 @@ def test_board_01_drc_clean_with_jlcpcb_rules() -> None:
     results = run_selected_checks(
         checker,
         only_set=None,
-        # Issue #8598: the committed board has no fiducials / board ID yet
-        # (regenerating needs the pinned toolchain); drop this skip once it has.
-        skip_set={"fiducials", "board_id"},
+        skip_set=set(),
     )
     # Issue #3527 / #3549 (June 2026): the ``clearance_segment_zone``
     # rule surfaced 4 stale-fill shorts (VIN/VOUT vs the GND F.Cu fill)

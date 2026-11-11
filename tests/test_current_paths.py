@@ -1145,3 +1145,91 @@ class TestThermalDesignCurrent:
     def test_description_names_the_waveform(self) -> None:
         assert "RMS" in _pulsed_spec().thermal_design_current().description
         assert "continuous" in _trunk_spec().thermal_design_current().description
+
+
+# --------------------------------------------------------------------------
+# Doubled copper / simple parallel groups (Issue #8790)
+# --------------------------------------------------------------------------
+
+
+def _doubled_pcb(*, widths=(2.0, 2.0), vias=(), second_xs=None):
+    """J1 (20,50) -> J2 (32,50): a B.Cu run plus an F.Cu copy of it."""
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=100, height=100, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+    xs = [20, *sorted(vias), 32]
+    for a, b in zip(xs, xs[1:], strict=False):
+        pcb.add_trace((a, 50), (b, 50), width=widths[0], layer="B.Cu", net="NET1")
+    cx = second_xs or [20, *sorted(vias), 32]
+    for a, b in zip(cx, cx[1:], strict=False):
+        pcb.add_trace((a, 50), (b, 50), width=widths[1], layer="F.Cu", net="NET1")
+    for x in vias:
+        pcb.add_via(x, 50, net="NET1")
+    return pcb
+
+
+def _j_spec() -> CurrentPathSpec:
+    return CurrentPathSpec(
+        name="DOUBLED",
+        net_name="NET1",
+        source=PathEndpoint("J1", "1"),
+        sink=PathEndpoint("J2", "1"),
+        continuous_a=5.0,
+    )
+
+
+class TestParallelGroups:
+    def test_doubled_run_resolves_and_names_group(self) -> None:
+        r = resolve_current_path(_doubled_pcb(), _j_spec())
+        assert r.status == "resolved"
+        assert len(r.parallel_groups) == 1
+        assert {s.layer for s in r.segments} == {"F.Cu", "B.Cu"}
+        assert "parallel group" in r.parallel_groups[0].describe()
+
+    def test_three_unequal_free_widths_two_layers_resolve(self) -> None:
+        r = resolve_current_path(_doubled_pcb(widths=(2.0, 1.0)), _j_spec())
+        assert r.status == "resolved"
+
+    def test_end_stitched_full_copy_resolves(self) -> None:
+        r = resolve_current_path(_doubled_pcb(vias=(24,)), _j_spec())
+        assert r.status == "ambiguous"  # interior rung = ladder, not a simple group
+
+    def test_shorter_stitched_copy_resolves(self) -> None:
+        pcb = _doubled_pcb(vias=(24, 28), second_xs=[24, 28])
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "resolved"
+
+    def test_same_layer_detour_stays_ambiguous(self) -> None:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100, center=False)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+        pcb.add_trace(("J1", "1"), ("J2", "1"), width=2.0, layer="F.Cu", net="NET1")
+        pcb.add_trace(("J1", "1"), (26, 60), width=2.0, layer="B.Cu", net="NET1")
+        pcb.add_trace((26, 60), ("J2", "1"), width=2.0, layer="B.Cu", net="NET1")
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "ambiguous"
+        assert r.witness
+
+    def test_loop_through_third_pad_stays_ambiguous(self) -> None:
+        from kicad_tools.schema.pcb import PCB
+
+        pcb = PCB.create(width=100, height=100, center=False)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="U3", x=26, y=50, net="NET1")
+        pcb.add_trace(("J1", "1"), ("J2", "1"), width=2.0, layer="B.Cu", net="NET1")
+        pcb.add_trace(("J1", "1"), ("U3", "1"), width=2.0, layer="F.Cu", net="NET1")
+        pcb.add_trace(("U3", "1"), ("J2", "1"), width=2.0, layer="F.Cu", net="NET1")
+        assert resolve_current_path(pcb, _j_spec()).status == "ambiguous"
+
+    def test_three_node_mesh_stays_ambiguous(self) -> None:
+        pcb = _doubled_pcb()
+        _add_pad_footprint(pcb, ref="U3", x=26, y=70, net="NET1")
+        pcb.add_trace(("J1", "1"), ("U3", "1"), width=2.0, layer="F.Cu", net="NET1")
+        pcb.add_trace(("U3", "1"), ("J2", "1"), width=2.0, layer="F.Cu", net="NET1")
+        r = resolve_current_path(pcb, _j_spec())
+        assert r.status == "ambiguous"

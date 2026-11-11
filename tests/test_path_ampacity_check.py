@@ -568,3 +568,39 @@ class TestPulsedPathAmpacity:
         assert len(results.errors) == 1
         assert "unresolved" in results.errors[0].message
         assert results.infos == []
+
+
+# --------------------------------------------------------------------------
+# Doubled copper judged on summed cross-section (Issue #8790)
+# --------------------------------------------------------------------------
+
+
+def _doubled_ampacity_pcb(width_b: float, width_f: float) -> PCB:
+    pcb = PCB.create(width=100, height=100, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+    pcb.add_trace(("J1", "1"), ("J2", "1"), width=width_b, layer="B.Cu", net="NET1")
+    pcb.add_trace(("J1", "1"), ("J2", "1"), width=width_f, layer="F.Cu", net="NET1")
+    return pcb
+
+
+class TestDoubledCopper:
+    def test_doubled_pair_meeting_summed_requirement_passes(self) -> None:
+        # 15 A needs ~6.29 mm at 2 oz; 2 x 3.5 mm carries it, 1 x 3.5 mm would not.
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(_doubled_ampacity_pcb(3.5, 3.5), _design_rules_2oz())
+        assert results.errors == []
+
+    def test_under_width_doubled_pair_still_fails(self) -> None:
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        results = rule.check(_doubled_ampacity_pcb(2.0, 2.0), _design_rules_2oz())
+        assert len(results.errors) == 1
+        assert "parallel group" in results.errors[0].message
+
+    def test_single_run_same_width_still_fails(self) -> None:
+        pcb = PCB.create(width=100, height=100, center=False)
+        _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+        _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+        pcb.add_trace(("J1", "1"), ("J2", "1"), width=3.5, layer="B.Cu", net="NET1")
+        rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
+        assert rule.check(pcb, _design_rules_2oz()).errors

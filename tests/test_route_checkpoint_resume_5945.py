@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import re
 import shutil
 from pathlib import Path
 from unittest.mock import patch
@@ -44,6 +45,21 @@ def _copy_board(src: Path, dest: Path) -> Path:
     for suffix in (".kicad_pro", ".kicad_dru"):
         if src.with_suffix(suffix).exists():
             shutil.copyfile(src.with_suffix(suffix), dest.with_suffix(suffix))
+    return dest
+
+
+_FIDUCIAL_BLOCK = re.compile(r'^\t\(footprint "Fiducial:.*?^\t\)\n', re.M | re.S)
+
+
+def _copy_routed_without_fiducials(dest: Path) -> Path:
+    """Copy board 01's routed PCB minus the post-route fiducial footprints.
+
+    ``kct pcb add-fiducials`` runs after routing (Issue #8598), so the routed
+    output carries FID1-3 while the unrouted source board does not. A resume
+    checkpoint is a routed copy of its *source*, so strip them to model that.
+    """
+    dest = _copy_board(VD_ROUTED, dest)
+    dest.write_text(_FIDUCIAL_BLOCK.sub("", dest.read_text()))
     return dest
 
 
@@ -127,7 +143,8 @@ class TestBestCheckpointWriter:
         assert not (tmp_path / "ck.kicad_pcb").exists()
 
     def test_identity_mismatch(self, tmp_path):
-        assert checkpoint_identity_mismatch(VD_UNROUTED, VD_ROUTED) is None
+        ck = _copy_routed_without_fiducials(tmp_path / "ck.kicad_pcb")
+        assert checkpoint_identity_mismatch(VD_UNROUTED, ck) is None
         other = REPO / "boards" / "00-simple-led" / "output" / "simple_led.kicad_pcb"
         assert checkpoint_identity_mismatch(VD_UNROUTED, other)
 
@@ -402,7 +419,7 @@ class TestRouteAutoPasses:
         from kicad_tools.cli.commands import routing
 
         board = _copy_board(VD_UNROUTED, tmp_path / "vd.kicad_pcb")
-        ck = _copy_board(VD_ROUTED, tmp_path / "ck.kicad_pcb")
+        ck = _copy_routed_without_fiducials(tmp_path / "ck.kicad_pcb")
         called: list[str] = []
 
         def fake_one(args, net_name, pcb_path, output_path, **kwargs):
@@ -421,7 +438,7 @@ class TestRouteAutoPasses:
         from kicad_tools.cli.commands import routing
 
         board = _copy_board(VD_UNROUTED, tmp_path / "vd.kicad_pcb")
-        ck = _copy_board(VD_ROUTED, tmp_path / "ck.kicad_pcb")
+        ck = _copy_routed_without_fiducials(tmp_path / "ck.kicad_pcb")
         out = tmp_path / "out.kicad_pcb"
         out.write_text("stale output from an earlier run\n")
 
