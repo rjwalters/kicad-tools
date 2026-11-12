@@ -231,6 +231,10 @@ def match_rotation_correction(
     return 0.0
 
 
+class UnsupportedCopperWeightError(ValueError):
+    """The profile has no floor table entry for the requested copper weight."""
+
+
 @dataclass
 class DesignRules:
     """PCB design constraints for a specific layer count and copper weight."""
@@ -280,6 +284,12 @@ class DesignRules:
     min_smd_pad_clearance_mm: float | None = None
     min_pth_hole_to_track_mm: float | None = None
     min_inner_pth_hole_to_copper_mm: float | None = None
+
+    # Inner-layer copper clearance floor (Issue #8836).  ``min_clearance_mm`` is
+    # the OUTER-layer floor (it scales with outer copper weight); when inner
+    # copper is lighter the fab's inner floor is looser.  ``None`` means the
+    # same floor applies to every copper layer.
+    min_inner_clearance_mm: float | None = None
 
     # Pad constraints
     min_pad_size_mm: float = 0.25
@@ -377,6 +387,7 @@ class DesignRules:
             "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
             "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
             "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,
+            "min_inner_clearance_mm": self.min_inner_clearance_mm,
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
             "inner_copper_oz": self.inner_copper_oz,
@@ -558,12 +569,31 @@ class ManufacturerProfile:
             return None
         return self.dfm_thresholds.lookup(layers, outer_oz, inner_oz)
 
-    def get_design_rules(self, layers: int = 4, copper_oz: float = 1.0) -> DesignRules:
-        """Get design rules for a specific configuration."""
+    def get_design_rules(
+        self, layers: int = 4, copper_oz: float = 1.0, *, strict: bool = False
+    ) -> DesignRules:
+        """Get design rules for a specific configuration.
+
+        With ``strict=True`` (used by ``kct check`` / ``kct readiness``), a
+        heavier-than-1oz outer weight with no profile entry raises
+        :class:`UnsupportedCopperWeightError` instead of silently falling back
+        to the 1 oz floors (Issue #8836).
+        """
         # Try exact match first
         key = f"{layers}layer_{copper_oz:.0f}oz"
         if key in self.design_rules:
             return self.design_rules[key]
+
+        # Never silently substitute a LIGHTER copper weight's floors for a
+        # heavier board (Issue #8836): 2 oz floors are looser-to-tighter than
+        # 1 oz, so a 1 oz fallback would pass boards the fab rejects.
+        if strict and copper_oz > 1.0 + 1e-6:
+            have = sorted({k for k in self.design_rules if k.startswith(f"{layers}layer_")})
+            raise UnsupportedCopperWeightError(
+                f"{self.name}: no design-rule floors for {layers}-layer boards with "
+                f"{copper_oz:g} oz outer copper (profile has: {', '.join(have) or 'none'}). "
+                "Add a profile entry with a cited source instead of using 1 oz floors."
+            )
 
         # Try without copper weight
         key = f"{layers}layer_1oz"
