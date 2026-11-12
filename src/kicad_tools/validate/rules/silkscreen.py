@@ -1225,7 +1225,7 @@ def check_silk_hole_overlap(
     pair.
     """
     require_shapely("silk-hole overlap geometry")
-    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely import STRtree
     from shapely.geometry import Point
 
     from .factory_clearance import _hole_geometry
