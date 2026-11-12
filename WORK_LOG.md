@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-11
 
+- **PR #8816**: feat(boards): add fiducials and board ID to board 02
+- **Issue #8759** (closed): Add fiducials and board ID to committed boards 00, 02, 03, 05, 06, 07
 - **PR #8814**: fix(optimize): count netclass_clearance_copper in the --drc-aware referee
 - **PR #8812**: feat(readiness): add --quantity and --inventory-covered to the bom stock gate
 - **PR #8811**: fix(readiness): refuse --output not named manufacturing before running gates
