@@ -205,3 +205,88 @@ design_rules:
     board_thickness_mm: 1.6
     outer_copper_oz: 1.0
     inner_copper_oz: 1.0
+
+# Versioned DFM threshold table (Issue #8839, epic #8838).
+#
+# One entry per (layers, outer oz, inner oz) stackup.  EVERY threshold carries
+# its own ``source_url`` + ``retrieved`` (ISO date) + ``basis``:
+#   capability_page  -- number published on the fab's capability page
+#   observed_jlcdfm  -- alert value OBSERVED in the fab's DFM tool on a real
+#                       board (not a published spec; re-check before relying on it)
+# ``danger_mm`` is the floor ``kct check`` enforces (it can only tighten the
+# design_rules values above, never relax them); ``warning_mm`` is recorded data.
+# A stackup with NO entry here fails closed: ``kct check`` reports verdict
+# ``incomplete`` instead of falling back to another copper weight.
+dfm_thresholds:
+  version: 1
+  entries:
+    2layer_1oz:
+      layers: 2
+      outer_oz: 1.0
+      inner_oz: 0.0
+      thresholds:
+        trace_spacing: {danger_mm: 0.127, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        pad_spacing: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-10'}
+        annular_ring_via: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        annular_ring_pth: {danger_mm: 0.18, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
+        mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+    2layer_2oz:
+      layers: 2
+      outer_oz: 2.0
+      inner_oz: 0.0
+      thresholds:
+        trace_spacing: {danger_mm: 0.1524, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        pad_spacing: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-10'}
+        annular_ring_via: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        annular_ring_pth: {danger_mm: 0.254, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
+        mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+    4layer_1oz:
+      layers: 4
+      outer_oz: 1.0
+      inner_oz: 0.5
+      thresholds:
+        trace_spacing: {danger_mm: 0.1016, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        pad_spacing: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-10'}
+        annular_ring_via: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        annular_ring_pth: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
+        mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+    4layer_1oz_inner1oz:
+      layers: 4
+      outer_oz: 1.0
+      inner_oz: 1.0
+      thresholds:
+        trace_spacing: {danger_mm: 0.1016, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        pad_spacing: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-10'}
+        annular_ring_via: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        annular_ring_pth: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
+        mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+    4layer_2oz:
+      layers: 4
+      outer_oz: 2.0
+      inner_oz: 0.5
+      thresholds:
+        trace_spacing: {danger_mm: 0.1, warning_mm: 0.15, basis: observed_jlcdfm, source_url: https://github.com/rjwalters/kicad-tools/issues/8838, retrieved: '2026-11-12'}
+        pad_spacing: {danger_mm: 0.15, warning_mm: 0.13, warning_basis: observed_jlcdfm, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-10'}
+        annular_ring_via: {danger_mm: 0.1, warning_mm: 0.15, warning_basis: observed_jlcdfm, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        annular_ring_pth: {danger_mm: 0.254, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
+        mask_bridge: {danger_mm: 0.2, basis: observed_jlcdfm, source_url: https://github.com/rjwalters/kicad-tools/issues/8838, retrieved: '2026-11-12'}
+    6layer_1oz:
+      layers: 6
+      outer_oz: 1.0
+      inner_oz: 0.5
+      thresholds:
+        trace_spacing: {danger_mm: 0.0889, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        pad_spacing: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-10'}
+        annular_ring_via: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        annular_ring_pth: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
+        mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+    6layer_1oz_inner1oz:
+      layers: 6
+      outer_oz: 1.0
+      inner_oz: 1.0
+      thresholds:
+        trace_spacing: {danger_mm: 0.0889, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        pad_spacing: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-10'}
+        annular_ring_via: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
+        annular_ring_pth: {danger_mm: 0.15, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-09-09'}
+        mask_bridge: {danger_mm: 0.1, basis: capability_page, source_url: https://jlcpcb.com/capabilities/pcb-capabilities, retrieved: '2026-01-16'}
