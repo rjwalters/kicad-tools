@@ -72,16 +72,17 @@ def _export_writer(routed: Path) -> None:
 
 
 def _board06_pair_rules_then_export(routed: Path) -> None:
-    """``kct route`` writes the floors, ``build.py`` adds the LVDS pair block, then export.
+    """The floors and attach-zone block, then ``build.py``'s LVDS pair block last.
 
     Board 06 routes only IN/OUT, so the LVDS pairs need ``build.py``
-    (Issue #8404); the exporter keeps that block and re-ends the file with the
-    attach-zone block.
+    (Issue #8404).  The recipe's final DRU carries the pair block after the
+    attach-zone block (Issue #8801: the replay used to re-run the exporter
+    after the pair rules, which put the pair block first and no longer
+    matches a fresh recipe run).
     """
     _export_writer(routed)
     rules = runpy.run_path(str(BOARDS / "06-diffpair-test" / "assembled-demo" / "build.py"))
     rules["write_pair_rules"](routed, BOARDS / "06-diffpair-test" / "output" / "net_class_map.json")
-    _export_writer(routed)
 
 
 def _board04_native_floors(routed: Path) -> None:

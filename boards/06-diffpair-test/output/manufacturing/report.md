@@ -2,7 +2,7 @@
 title: "diffpair_test_routed"
 subtitle: "Design Report"
 author: "kicad-tools 0.29.0"
-date: "Rev 1 | 2026-11-11 | jlcpcb-tier1"
+date: "Rev 1 | 2026-11-12 | jlcpcb-tier1"
 geometry: "margin=1in"
 fontsize: 11pt
 colorlinks: true
@@ -20,7 +20,7 @@ header-includes:
 | Layers | 4 copper (F.Cu, In1.Cu, In2.Cu, B.Cu) |
 | Footprints | 39 (36 SMD, 3 THT, 0 other) |
 | Nets | 18 |
-| Traces | 182 segments |
+| Traces | 183 segments |
 | Vias | 55 |
 | Board Size | 90.0 x 70.0 mm |
 
