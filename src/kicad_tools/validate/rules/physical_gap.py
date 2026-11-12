@@ -471,7 +471,7 @@ def _facing_edge_pairs(tree, edges, normals, distance_mm):
     vectorised, and the exact ``dwithin`` runs only on the survivors.
     """
     import numpy as np
-    import shapely
+    import shapely  # type: ignore[import-untyped]
 
     if not edges:
         return []
@@ -515,7 +515,7 @@ def check_physical_copper_gap(
     Facing-edge screening excludes local corners. This is a slit detector,
     not a guarantee about acute notches, etching chemistry or stale zone fills.
     """
-    from shapely import STRtree, union_all  # type: ignore[import-untyped]
+    from shapely import STRtree, union_all
     from shapely.geometry import LineString
     from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
     from shapely.ops import nearest_points  # type: ignore[import-untyped]
