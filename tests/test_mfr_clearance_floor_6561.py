@@ -29,8 +29,17 @@ from kicad_tools.router.rules import DesignRules, NetClassRouting
 RULES_DIR = Path(__file__).resolve().parents[1] / "src" / "kicad_tools" / "manufacturers" / "rules"
 
 _KEY_RE = re.compile(r"^(\d+)layer_(\d+)oz$")
+# Unscoped ``Clearance - <mfr>`` or, when outer/inner floors differ (Issue #8836),
+# the ``Clearance (outer) - <mfr>`` rule.  The router has one floor for every
+# layer, so it takes the outer (stricter) value; the inner rule is checked
+# separately to be no tighter than it.
 _CLEARANCE_RE = re.compile(
-    r'\(rule "Clearance - [^"]*"\s*\(constraint clearance \(min ([0-9.]+)mm\)\)\)'
+    r'\(rule "Clearance(?: \(outer\))? - [^"]*"\s*(?:\(layer outer\)\s*)?'
+    r"\(constraint clearance \(min ([0-9.]+)mm\)\)\)"
+)
+_INNER_CLEARANCE_RE = re.compile(
+    r'\(rule "Clearance \(inner\) - [^"]*"\s*\(layer inner\)\s*'
+    r"\(constraint clearance \(min ([0-9.]+)mm\)\)\)"
 )
 
 
@@ -46,6 +55,9 @@ def _stackup_keys(mfr: str) -> list[tuple[int, int]]:
 def _dru_clearance(text: str) -> float:
     match = _CLEARANCE_RE.search(text)
     assert match, "no general 'Clearance - <mfr>' rule in the .kicad_dru"
+    inner = _INNER_CLEARANCE_RE.search(text)
+    if inner:
+        assert float(inner.group(1)) <= float(match.group(1)), "inner floor above outer floor"
     return float(match.group(1))
 
 
