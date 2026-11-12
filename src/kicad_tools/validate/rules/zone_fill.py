@@ -50,12 +50,16 @@ if TYPE_CHECKING:
     from kicad_tools.schema.pcb import PCB, Zone
 
 
-def _zone_bounding_box(zone: Zone) -> str:
-    """Return a human-readable bounding box string for the zone polygon."""
+def _zone_bounding_box(zone: Zone, origin: tuple[float, float] = (0.0, 0.0)) -> str:
+    """Return a human-readable bounding box string for the zone polygon.
+
+    ``origin`` is the board origin; coordinates are shown sheet-absolute.
+    """
     if not zone.polygon:
         return "no boundary"
-    xs = [p[0] for p in zone.polygon]
-    ys = [p[1] for p in zone.polygon]
+    ox, oy = origin
+    xs = [p[0] + ox for p in zone.polygon]
+    ys = [p[1] + oy for p in zone.polygon]
     return f"({min(xs):.2f}, {min(ys):.2f}) to ({max(xs):.2f}, {max(ys):.2f}) mm"
 
 
@@ -111,13 +115,14 @@ class ZoneFillRule(DRCRule):
         """
         results = DRCResults()
         results.rules_checked = 1
+        origin = getattr(pcb, "board_origin", (0.0, 0.0))
 
         for zone in pcb.zones:
             if getattr(zone, "keepout", None) is not None:
                 continue
             net_label = zone.net_name if zone.net_name else "unassigned"
             layer = zone.layer or "unknown"
-            bbox = _zone_bounding_box(zone)
+            bbox = _zone_bounding_box(zone, origin)
             center = _zone_center(zone)
 
             if not zone.is_filled:
