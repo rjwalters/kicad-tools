@@ -55,3 +55,24 @@ def test_checker_method_registered(tmp_path):
     p.write_text(_board(_seg((0, 0), (10, 0)), _seg((10, 0), (0, 3))))
     checker = DRCChecker(PCB.load(str(p)), manufacturer="jlcpcb", layers=2)
     assert checker.check_sharp_trace_corner().violations[0].rule_id == "sharp_trace_corner"
+
+
+def test_zero_length_segment_artifact_not_flagged(tmp_path):
+    # A 0.0004 mm stub makes start~start match first; the true bend is 135 deg.
+    v = _check(
+        tmp_path,
+        _seg((17.775, 33.0), (17.775, 32.9996)),
+        _seg((17.775, 32.9996), (17.139, 32.3636)),
+    )
+    assert v == []
+
+
+def test_vertex_buried_under_same_net_pad_not_flagged(tmp_path):
+    pad = (
+        '(footprint "Test:FP" (layer "F.Cu") (uuid "fp") (at 10 0)\n'
+        '  (property "Reference" "C1" (at 0 -2 0) (layer "F.SilkS"))\n'
+        '  (pad "1" smd rect (at 0 0) (size 1.6 1.6) (layers "F.Cu") (net 1 "SIG")))\n'
+    )
+    p = tmp_path / "b.kicad_pcb"
+    p.write_text(_board(_seg((0, 0), (10, 0)), _seg((10, 0), (0, 3)), pad))
+    assert SharpTraceCornerRule().check(PCB.load(str(p)), None).violations == []

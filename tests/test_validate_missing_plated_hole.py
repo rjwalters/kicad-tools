@@ -24,12 +24,16 @@ def _smd(layer):
 THRU = '(pad "1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.8) (layers "*.Cu") (net 0 ""))'
 
 
+def _smd_net(layer, net, name):
+    return f'(pad "1" smd rect (at 0 0) (size 1 1) (layers "{layer}") (net {net} "{name}"))'
+
+
 def _violations(tmp_path, *fps):
     p = tmp_path / "b.kicad_pcb"
     p.write_text(
         '(kicad_pcb (version 20240108) (generator "test")\n'
         '  (layers (0 "F.Cu" signal) (31 "B.Cu" signal) (44 "Edge.Cuts" user))\n'
-        '  (net 0 "")\n' + "".join(fps) + ")\n"
+        '  (net 0 "") (net 1 "A") (net 2 "B")\n' + "".join(fps) + ")\n"
     )
     pcb = PCB.load(str(p))
     return p, pcb, MissingPlatedHoleRule().check(pcb, None).violations
@@ -77,3 +81,18 @@ def test_checker_method_registered(tmp_path):
     )
     checker = DRCChecker(pcb, manufacturer="jlcpcb", layers=2)
     assert checker.check_missing_plated_hole().violations[0].rule_id == "missing_plated_hole"
+
+
+def test_different_net_pads_not_flagged(tmp_path):
+    _, _, v = _violations(
+        tmp_path,
+        _fp("J1", 10, 10, _smd_net("F.Cu", 1, "A")),
+        _fp("J2", 10, 10, _smd_net("B.Cu", 2, "B")),
+    )
+    assert v == []
+    _, _, v = _violations(
+        tmp_path,
+        _fp("J1", 10, 10, _smd_net("F.Cu", 1, "A")),
+        _fp("J2", 10, 10, _smd_net("B.Cu", 1, "A")),
+    )
+    assert len(v) == 1

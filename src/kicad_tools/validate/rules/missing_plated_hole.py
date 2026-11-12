@@ -64,6 +64,10 @@ class MissingPlatedHoleRule(DRCRule):
             for fp_b, pad_b, c_b in bottom:
                 if math.dist(c_t, c_b) > COLOCATION_TOLERANCE_MM:
                     continue
+                # Different nets (e.g. card-edge fingers A1/B1): joining them
+                # with a hole would short the nets, so it is not a missing hole.
+                if pad_t.net_number != pad_b.net_number:
+                    continue
                 if any(math.dist(c_t, h) <= COLOCATION_TOLERANCE_MM for h in holes):
                     continue
                 results.add(

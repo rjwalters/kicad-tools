@@ -30,8 +30,14 @@ from typing import Any
 KnownWarningKey = tuple[str, str, str]
 
 #: Rule-id prefixes that are advisory hints and never fail a strict gate (#8218,
-#: #8435: ``pour_slot`` is a geometric advisory, not a native-DRC oracle).
-NON_GATING_RULE_PREFIXES: tuple[str, ...] = ("redundant_copper", "pour_slot")
+#: #8435: ``pour_slot`` is a geometric advisory, not a native-DRC oracle; #8840:
+#: ``sharp_trace_corner`` is a fab hint whose real branch wedges cannot be
+#: acknowledged by location, and whose threshold is unverified against a fab).
+NON_GATING_RULE_PREFIXES: tuple[str, ...] = (
+    "redundant_copper",
+    "pour_slot",
+    "sharp_trace_corner",
+)
 
 #: Warning rules whose findings name no ref/pad (track copper), keyed by board
 #: location instead: ``(rule, "", "@x/y")`` with x/y in mm rounded to 0.01

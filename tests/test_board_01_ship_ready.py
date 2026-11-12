@@ -152,10 +152,22 @@ def test_board_01_drc_clean_with_jlcpcb_rules() -> None:
     # Issues #7220 / #7295: R2's solid pad-2 override is gone (the thermal
     # spoke ladder narrows the spoke before going solid), so the
     # ``thermal_asymmetry`` advisory no longer fires and no warning is allowed.
-    warn_count = sum(1 for v in results.violations if v.is_warning)
+    #
+    # Issue #8840: advisory hints (``NON_GATING_RULE_PREFIXES``, e.g. the
+    # ``sharp_trace_corner`` Y-branch wedge on VOUT) never fail a strict gate,
+    # so they are excluded here exactly as in board 04's gate.
+    from kicad_tools.validate.known_warnings import NON_GATING_RULE_PREFIXES
+
+    warn_count = sum(
+        1
+        for v in results.violations
+        if v.is_warning and not v.rule_id.startswith(NON_GATING_RULE_PREFIXES)
+    )
 
     sample = [
-        f"{v.rule_id}: {v.message}" for v in results.violations if (v.is_error or v.is_warning)
+        f"{v.rule_id}: {v.message}"
+        for v in results.violations
+        if (v.is_error or (v.is_warning and not v.rule_id.startswith(NON_GATING_RULE_PREFIXES)))
     ][:5]
     assert error_count == 0, f"Expected 0 DRC errors, got {error_count}; sample={sample}"
     assert warn_count == 0, f"Expected 0 DRC warnings, got {warn_count}; sample={sample}"
