@@ -103,12 +103,12 @@ def check_tht_smd_spacing(
     for layer in sorted({s[0] for s in smd}):
         pads = [s for s in smd if s[0] == layer]
         tree = STRtree([p[2] for p in pads])
-        for span, identity, geom, net, owner in tht:
+        for span, identity, geom, net, tht_owner in tht:
             if layer not in span:
                 continue
             for raw in tree.query(geom, predicate="dwithin", distance=warning_mm):
                 _, smd_id, smd_geom, smd_net, smd_owner = pads[int(raw)]
-                if smd_id == identity or (owner is not None and owner == smd_owner):
+                if smd_id == identity or (tht_owner is not None and tht_owner == smd_owner):
                     continue
                 distance = geom.distance(smd_geom)
                 if distance <= TOLERANCE or distance >= warning_mm - TOLERANCE:
