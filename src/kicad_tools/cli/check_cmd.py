@@ -2365,8 +2365,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: invalid mask-to-copper request: {exc}", file=sys.stderr)
             return 1
 
-    if mask_copper_request is not None and (
-        "mask_to_copper" in skip_set or (only_set is not None and "mask_to_copper" not in only_set)
+    if (
+        mask_copper_request is None
+        and getattr(args, "mfr", None)
+        and "mask_to_copper" not in skip_set
+        and (only_set is None or "mask_to_copper" in only_set)
+    ):
+        # Issue #8842: an explicit --mfr turns mask_to_copper on by default
+        # using that manufacturer's cited interim policy (None => stays opt-in).
+        from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+        mask_copper_request = default_request_for_manufacturer(effective_mfr)
+        mask_copper_default_applied = mask_copper_request is not None
+    else:
+        mask_copper_default_applied = False
+
+    if (
+        mask_copper_request is not None
+        and not mask_copper_default_applied
+        and (
+            "mask_to_copper" in skip_set
+            or (only_set is not None and "mask_to_copper" not in only_set)
+        )
     ):
         print(
             "Error: explicit mask-copper config conflicts with --only/--skip selection",

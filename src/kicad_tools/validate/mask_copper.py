@@ -1,7 +1,10 @@
 """Explicit process policy and source-qualified solder-mask exposure assessment.
 
-This check is opt-in. Neither a manufacturer's generic mask expansion nor a
-mask-web width supplies a mask-to-copper process clearance requirement.
+Outside ``--mfr`` this check is opt-in. Neither a manufacturer's generic mask
+expansion nor a mask-web width supplies a mask-to-copper process clearance
+requirement; ``default_request_for_manufacturer`` supplies an explicit, cited
+interim policy for manufacturers whose process limit has been observed
+(issue #8842).
 """
 
 from __future__ import annotations
@@ -20,6 +23,9 @@ class MaskCopperPolicy:
     source: str
     process: str
     revision: str
+    # Optional advisory tier (issue #8842): measurements at or above
+    # ``clearance_mm`` but within this distance are warnings, never failures.
+    warning_clearance_mm: float | None = None
 
     def __post_init__(self):
         if (
@@ -28,6 +34,12 @@ class MaskCopperPolicy:
             or self.clearance_mm < 0
         ):
             raise ValueError("Mask-to-copper clearance must be finite and nonnegative")
+        if self.warning_clearance_mm is not None and (
+            isinstance(self.warning_clearance_mm, bool)
+            or not math.isfinite(self.warning_clearance_mm)
+            or self.warning_clearance_mm < self.clearance_mm
+        ):
+            raise ValueError("Mask-to-copper warning clearance must be finite and >= clearance")
         if any(
             not isinstance(v, str) or not v.strip()
             for v in (self.source, self.process, self.revision)
@@ -110,6 +122,7 @@ class MaskCopperMeasurement:
             "violation",
             "uncertain",
             "intentional",
+            "warning",
         ) or self.relation not in ("overlap", "touching", "disjoint"):
             raise ValueError("Invalid mask measurement disposition/relation")
         if self.mask_side not in (
@@ -350,7 +363,12 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                     continue  # Exclude only this UUID's own contribution.
                 result.evaluated_pairs += 1
                 distance = opening.distance(copper)
-                if distance > policy.clearance_mm + uncertainty:
+                outer_limit = (
+                    policy.warning_clearance_mm
+                    if policy.warning_clearance_mm is not None
+                    else policy.clearance_mm
+                )
+                if distance > outer_limit + uncertainty:
                     continue
                 intersection = opening.intersection(copper)
                 area = intersection.area
@@ -360,6 +378,8 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                 relation = "overlap" if area > 0 else "touching" if distance == 0 else "disjoint"
                 if certain_exposure or distance < policy.clearance_mm - uncertainty:
                     disposition = "violation"
+                elif distance > policy.clearance_mm + uncertainty:
+                    disposition = "warning"
                 else:
                     disposition = "uncertain"
                 intent = (
@@ -472,6 +492,8 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
     for index, measurement in enumerate(assessment.measurements):
         if measurement.disposition == "intentional":
             severity = "info"
+        elif measurement.disposition == "warning":
+            severity = "warning"
         else:
             severity = "error"
         result.add(
@@ -488,3 +510,25 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
             )
         )
     return result
+
+
+# Interim constants (issue #8842) until the manufacturer threshold table of
+# #8839 lands: JLCDFM's observed mask-opening-to-trace limits for JLCPCB.
+_JLCPCB_MASK_COPPER_POLICY = MaskCopperPolicy(
+    clearance_mm=0.09,
+    source="JLCDFM mask-opening-exposing-trace observation (epic #8838)",
+    process="jlcpcb",
+    revision="interim-2026-11-12",
+    warning_clearance_mm=0.15,
+)
+
+
+def default_request_for_manufacturer(manufacturer_id: str | None) -> MaskCopperRequest | None:
+    """Default-on request for ``--mfr``; None when no cited policy exists.
+
+    Mask expansion is not supplied here: the native geometry already carries
+    the board's effective expansion.
+    """
+    if manufacturer_id and manufacturer_id.lower().startswith("jlcpcb"):
+        return MaskCopperRequest(policy=_JLCPCB_MASK_COPPER_POLICY)
+    return None
