@@ -2299,10 +2299,17 @@ def main(argv: list[str] | None = None) -> int:
     # Preset selection still keys on the scalar/outer ``--copper`` (or the
     # historical 1oz default) -- only the ampacity copper weights follow the
     # declared stackup.
-    preset_copper_oz = cli_copper_outer if cli_copper_outer is not None else 1.0
-
     # Tier 1: derive copper weights from the board's declared stackup.
     stackup_outer, stackup_inner = stackup_copper_oz(pcb)
+
+    # Issue #8836: the manufacturer floors (clearance, width) scale with outer
+    # copper weight, so an undeclared ``--copper`` follows the declared stackup
+    # instead of silently using the 1oz floors.
+    preset_copper_oz = (
+        cli_copper_outer
+        if cli_copper_outer is not None
+        else (stackup_outer if stackup_outer is not None else 1.0)
+    )
 
     # Per-class resolution: explicit --copper wins, else the declared
     # stackup, else None (leave the profile default in place).
@@ -2354,6 +2361,8 @@ def main(argv: list[str] | None = None) -> int:
         stackup_inner,
         disagreement=copper_disagreement,
     )
+    # Issue #8836: name the outer weight the manufacturer floors were derived for.
+    copper_weights["floors_outer_oz"] = preset_copper_oz
 
     mask_copper_request = None
     if getattr(args, "mask_copper_config", None):
@@ -3232,7 +3241,7 @@ def build_check_rule_set(
         pcb,
         manufacturer=effective_mfr,
         layers=layers,
-        copper_oz=1.0,
+        copper_oz=copper_outer if copper_outer is not None else 1.0,
         copper_oz_outer=copper_outer,
         copper_oz_inner=copper_inner,
         net_class_map=net_class_map,
@@ -3864,6 +3873,8 @@ def _format_copper_weights(copper_weights: dict) -> str:
         entry = copper_weights[cls]
         oz = "profile default" if entry["oz"] is None else f"{entry['oz']:g}oz"
         parts.append(f"{cls} {oz} ({entry['source']})")
+    if copper_weights.get("floors_outer_oz") is not None:
+        parts.append(f"mfr floors for {copper_weights['floors_outer_oz']:g}oz outer")
     return ", ".join(parts)
 
 
