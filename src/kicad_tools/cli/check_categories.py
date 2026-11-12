@@ -48,6 +48,7 @@ CHECK_CATEGORIES = [
     "spec_conformance",
     "mask_to_copper",
     "thermal_asymmetry",
+    "tht_smd_spacing",
     "via_in_pad",
     "via_type",
     "via_under_body",

@@ -39,6 +39,16 @@ from .clearance import _pad_on_layer, _pad_polygon, _repair_fill_polygon
 # Polygon approximation and comparison tolerance, in millimetres.
 TOLERANCE = 0.001
 
+# Fab-view thresholds applied by default under ``--mfr jlcpcb`` (Issue #8843).
+# Source: JLCDFM observations recorded in epic #8838 (2026-11-12) -- observed
+# from gerbers, NOT documented by the fab.  A versioned per-manufacturer /
+# per-copper-weight table is epic #8838 item 2; until it lands these live in
+# this one place.
+FAB_VIEW_GAP_DANGER_MM = 0.10  # gap below this: JLCDFM "danger" -> error
+FAB_VIEW_GAP_WARNING_MM = 0.15  # gap below this: JLCDFM "warning" -> warning
+FAB_VIEW_MASK_BRIDGE_2OZ_MM = 0.20  # pad-to-pad mask-bridge spacing on 2 oz copper
+FAB_VIEW_MASK_BRIDGE_OZ = 2.0
+
 
 @dataclass
 class CopperSource:
@@ -46,6 +56,7 @@ class CopperSource:
     layer: str
     net: str
     identity: str
+    kind: str = ""
 
 
 def _arc_geometry(node, origin=(0.0, 0.0)):
@@ -385,6 +396,7 @@ def _collect(pcb):
                             layer,
                             net_name(pad.net_number),
                             pad.uuid or f"{fp.reference}:pad:{index}",
+                            "pad",
                         )
                     )
     for index, via in enumerate(pcb.vias):
@@ -450,8 +462,15 @@ def _collect(pcb):
     return sources, unsupported
 
 
-def check_physical_copper_gap(pcb, minimum_mm: float) -> DRCResults:
+def check_physical_copper_gap(
+    pcb, minimum_mm: float, *, error_below_mm: float | None = None
+) -> DRCResults:
     """Report open gaps; never reinterpret a copper join as zero clearance.
+
+    ``error_below_mm`` enables two severity tiers (Issue #8843): a gap below
+    it is an ``error``, a gap in ``[error_below_mm, minimum_mm)`` is a
+    ``warning``. Every gap is still listed. ``None`` keeps the historical
+    single-tier behaviour (everything ``error``).
 
     Facing-edge screening excludes local corners. This is a slit detector,
     not a guarantee about acute notches, etching chemistry or stale zone fills.
@@ -563,9 +582,10 @@ def check_physical_copper_gap(pcb, minimum_mm: float) -> DRCResults:
                     key = ids, nets
                     if key in findings and (findings[key].actual_value or 0) <= distance:
                         continue
+                    tiered_warning = error_below_mm is not None and distance >= error_below_mm
                     findings[key] = DRCViolation(
                         "physical_copper_gap",
-                        "error",
+                        "warning" if tiered_warning else "error",
                         f"Physical copper gap {distance:.4f}mm < {minimum_mm:.4f}mm; "
                         f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
                         f"({b.x + ox:.6f}, {b.y + oy:.6f})",
@@ -579,4 +599,77 @@ def check_physical_copper_gap(pcb, minimum_mm: float) -> DRCResults:
                     )
         for key in sorted(findings):
             results.add(findings[key])
+    return results
+
+
+def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
+    """Pad-to-pad mask-bridge spacing on 2 oz copper (Issue #8843).
+
+    Net-agnostic: two distinct pads on one layer whose copper boundaries are
+    closer than :data:`FAB_VIEW_MASK_BRIDGE_2OZ_MM` leave no room for a solder
+    mask bridge. Only the 2 oz threshold is known (epic #8838); other weights
+    are not judged here (the versioned table is epic item 2).
+
+    Fail closed: ``copper_oz is None`` (weight not declared by stackup or
+    ``--copper``) reports ``physical_copper_gap_incomplete`` instead of
+    assuming 1 oz.
+    """
+    from shapely import STRtree  # type: ignore[import-untyped]
+
+    results = DRCResults(rules_checked=1)
+    if copper_oz is None:
+        results.add(
+            DRCViolation(
+                "physical_copper_gap_incomplete",
+                "error",
+                "Pad mask-bridge check incomplete: copper weight unknown "
+                "(declare a stackup copper weight or pass --copper)",
+            )
+        )
+        return results
+    if abs(copper_oz - FAB_VIEW_MASK_BRIDGE_OZ) > 1e-6:
+        return results
+    limit = FAB_VIEW_MASK_BRIDGE_2OZ_MM
+    sources, unsupported = _collect(pcb)
+    if unsupported:
+        # The gap pass already reports incomplete geometry; stay quiet here.
+        return results
+    ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
+    for layer in sorted({s.layer for s in sources}):
+        pads = [
+            s for s in sources if s.layer == layer and s.kind == "pad" and not s.geometry.is_empty
+        ]
+        tree = STRtree([p.geometry for p in pads])
+        seen: set[tuple[int, int]] = set()
+        for i, pad in enumerate(pads):
+            for raw_j in tree.query(pad.geometry, predicate="dwithin", distance=limit):
+                j = int(raw_j)
+                if j <= i or (i, j) in seen:
+                    continue
+                seen.add((i, j))
+                other = pads[j]
+                distance = pad.geometry.distance(other.geometry)
+                # distance ~0 means touching/overlapping pads: not a mask gap.
+                if distance <= TOLERANCE or distance >= limit - TOLERANCE:
+                    continue
+                from shapely.ops import nearest_points  # type: ignore[import-untyped]
+
+                a, b = nearest_points(pad.geometry, other.geometry)
+                ids = tuple(sorted((pad.identity, other.identity)))
+                results.add(
+                    DRCViolation(
+                        "physical_copper_gap",
+                        "error",
+                        f"Pad mask bridge {distance:.4f}mm < {limit:.4f}mm on "
+                        f"{copper_oz:g} oz copper; closest boundaries "
+                        f"({a.x + ox:.6f}, {a.y + oy:.6f}) and ({b.x + ox:.6f}, {b.y + oy:.6f})",
+                        location=((a.x + b.x) / 2, (a.y + b.y) / 2),
+                        layer=layer,
+                        actual_value=distance,
+                        required_value=limit,
+                        items=ids,
+                        nets=tuple(sorted({pad.net, other.net})),
+                        closest_locations=((a.x, a.y), (b.x, b.y)),
+                    )
+                )
     return results

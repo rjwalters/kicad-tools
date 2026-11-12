@@ -216,8 +216,11 @@ def precheck(
     if (
         category == "physical_copper_gap"
         and getattr(checker, "physical_copper_gap_mm", None) is None
+        and not getattr(checker, "fab_view", False)
     ):
         return skipped(category, "opt_in:--physical-copper-gap")
+    if category == "tht_smd_spacing" and not getattr(checker, "fab_view", False):
+        return skipped(category, "opt_in:--mfr jlcpcb")
     if category == "routing_policy" and not getattr(checker, "require_routing_policy", False):
         from kicad_tools.validate.rules.routing_policy import declares_routing_policy
 
