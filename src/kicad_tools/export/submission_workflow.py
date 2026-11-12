@@ -11,7 +11,19 @@ Tapeout manifest contract read by :func:`preflight` (``manifest.json``, written 
     {"files": {"<name>": {"sha256": ..., "size": ...}, ...},
      "tapeout": {"board_sha256": "<sha256 of the board file>",
                  "readiness_sha256": "<sha256 of the passing readiness.json receipt>",
-                 "human_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>"}}}
+                 "human_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>",
+                                   "gerber_sha256": "<sha256 of the gerber zip>"},
+                 "fab_review_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>",
+                                        "gerber_sha256": "<sha256 of the gerber zip>"}}}
+
+Two distinct attestations (issue #8818). ``human_signoff`` is the *release for
+upload*: gates pass, these bytes may be sent to the fab for preview. It is
+enough for every ``submit-jlcpcb`` mode up to the fab's gerber viewer / DFM
+result but must not save a cart. ``fab_review_signoff`` is recorded afterwards
+(``kct tapeout-sign-off --stage fab-review``), once a human has looked at the
+fab's rendering of the uploaded bytes; only it lets the cart be saved. Both
+bind the gerber zip sha256, and a change to the board or the gerbers
+invalidates both.
 
 Nothing here calls checkout, payment or parts purchase, and "ordered" is never
 set by code: the states it reports stop at ``stock-checked`` / ``uploaded``.
@@ -68,6 +80,8 @@ class Preflight:
     board_layers: int
     assembly_sides: tuple[str, ...]
     board_sha256: str
+    #: The valid fab-review attestation (issue #8818), or ``None`` (release-only).
+    fab_review_signoff: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +124,7 @@ class WorkflowResult:
     page: ReviewPage
     upload: dict[str, Any] | None = None
     states: dict[str, str] = field(default_factory=dict)
+    fab_review_signoff: dict[str, Any] | None = None
 
 
 def _sha(data: bytes) -> str:
@@ -313,24 +328,41 @@ def _load_readiness(
     return _sha(raw)
 
 
+SIGNOFF_STAGES = ("release", "fab-review")
+
+
+def _gerber_sha(files: dict[str, Any]) -> str:
+    return str(files[_pick(files, r"gerber.*\.zip$", "gerber")]["sha256"])
+
+
 def sign_off_bundle(
     bundle_root: Path,
     board: Path,
     reviewer: str,
     *,
-    readiness: Path,
+    readiness: Path | None = None,
     signed_at: str | None = None,
+    stage: str = "release",
 ) -> dict[str, Any]:
     """Record an explicit human sign-off in ``manifest.json`` (the one producer of it).
 
-    Refuses (manifest untouched) unless the bundle is intact and a passing
-    ``kct readiness`` receipt (``readiness``) is bound to ``board`` and covers
-    every bundle file; then writes
-    ``tapeout.{board_sha256, readiness_sha256, human_signoff}``.
-    Re-running is idempotent apart from ``signed_at``. The reviewer is never
-    invented: a blank name is refused.
+    ``stage="release"`` (default) attests "gates pass; these bytes may be sent
+    to the fab for preview". It refuses (manifest untouched) unless the bundle
+    is intact and a passing ``kct readiness`` receipt (``readiness``, required
+    at this stage) is bound to ``board`` and covers every bundle file; then
+    writes ``tapeout.{board_sha256, readiness_sha256, human_signoff}`` and
+    drops any earlier fab-review attestation.
+
+    ``stage="fab-review"`` attests "I looked at the fab's rendering of the
+    uploaded bytes". It needs a valid release sign-off for the same board and
+    gerber zip, and writes ``tapeout.fab_review_signoff``.
+
+    Both bind the gerber zip sha256. Re-running is idempotent apart from
+    ``signed_at``. The reviewer is never invented: a blank name is refused.
     """
-    bundle_root, board, readiness = Path(bundle_root), Path(board), Path(readiness)
+    bundle_root, board = Path(bundle_root), Path(board)
+    if stage not in SIGNOFF_STAGES:
+        raise WorkflowError(f"Unknown sign-off stage {stage!r} (expected one of {SIGNOFF_STAGES})")
     if not (reviewer or "").strip():
         raise WorkflowError("Sign-off needs a non-blank --reviewer (a human's name)")
     if not board.is_file():
@@ -348,25 +380,56 @@ def sign_off_bundle(
         )
     _verify_file_records(bundle_root, files)
     board_sha = _file_sha(board)
-    receipt_sha = _load_readiness(
-        readiness,
-        board_sha,
-        {n: r["sha256"] for n, r in files.items() if n != "manifest.json"},
-        bundle_root,
-    )
-    tapeout: dict[str, Any] = {
-        "board_sha256": board_sha,
-        "readiness_sha256": receipt_sha,
-        "human_signoff": {
-            "reviewer": reviewer.strip(),
-            "signed_at": signed_at or datetime.now(timezone.utc).isoformat(),
-        },
+    gerber_sha = _gerber_sha(files)
+    record = {
+        "reviewer": reviewer.strip(),
+        "signed_at": signed_at or datetime.now(timezone.utc).isoformat(),
+        "gerber_sha256": gerber_sha,
     }
-    manifest["tapeout"] = tapeout
+    if stage == "fab-review":
+        tapeout = manifest.get("tapeout")
+        release = tapeout.get("human_signoff") if isinstance(tapeout, dict) else None
+        if not isinstance(release, dict):
+            raise WorkflowError(
+                "No release sign-off to build on: run kct tapeout-sign-off (release stage) first"
+            )
+        assert isinstance(tapeout, dict)
+        _check_signoff_binding(tapeout, release, board_sha, gerber_sha, "human_signoff")
+        tapeout["fab_review_signoff"] = record
+    else:
+        if readiness is None:
+            raise WorkflowError("The release sign-off needs --readiness <readiness.json>")
+        receipt_sha = _load_readiness(
+            Path(readiness),
+            board_sha,
+            {n: r["sha256"] for n, r in files.items() if n != "manifest.json"},
+            bundle_root,
+        )
+        tapeout = {
+            "board_sha256": board_sha,
+            "readiness_sha256": receipt_sha,
+            "human_signoff": record,
+        }
+        manifest["tapeout"] = tapeout
     (bundle_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=False) + "\n", encoding="utf-8"
     )
     return tapeout
+
+
+def _check_signoff_binding(
+    tapeout: dict[str, Any], record: dict[str, Any], board_sha: str, gerber_sha: str, key: str
+) -> None:
+    """Refuse when a recorded attestation no longer matches the board or gerber zip."""
+    if tapeout.get("board_sha256") != board_sha:
+        raise WorkflowError("Board file sha256 differs from tapeout.board_sha256")
+    bound = record.get("gerber_sha256")
+    # Legacy release sign-offs predate the gerber binding; fab-review always has it.
+    if (bound is None and key != "human_signoff") or (bound is not None and bound != gerber_sha):
+        raise WorkflowError(
+            f"Gerber zip sha256 differs from tapeout.{key}.gerber_sha256; "
+            "the sign-off no longer covers these bytes, re-run kct tapeout-sign-off"
+        )
 
 
 def preflight(bundle_root: Path, board: Path) -> Preflight:
@@ -399,10 +462,19 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
     if not board.is_file():
         raise WorkflowError(f"Board file not found: {board}")
     board_sha = _file_sha(board)
-    if tapeout.get("board_sha256") != board_sha:
-        raise WorkflowError("Board file sha256 differs from tapeout.board_sha256")
-
     gerber = _pick(files, r"gerber.*\.zip$", "gerber")
+    gerber_sha = str(files[gerber]["sha256"])
+    _check_signoff_binding(tapeout, signoff, board_sha, gerber_sha, "human_signoff")
+    fab_review = tapeout.get("fab_review_signoff")
+    if fab_review is not None:
+        # A stale or malformed fab-review record invalidates the bundle outright.
+        if (
+            not isinstance(fab_review, dict)
+            or not str(fab_review.get("reviewer", "")).strip()
+            or not str(fab_review.get("signed_at", "")).strip()
+        ):
+            raise WorkflowError("Malformed tapeout.fab_review_signoff in the manifest")
+        _check_signoff_binding(tapeout, fab_review, board_sha, gerber_sha, "fab_review_signoff")
     bom = _pick(files, r"bom.*\.csv$", "BOM")
     cpl = _pick(files, r"(cpl|pos|placement).*\.csv$", "CPL")
     sides = _cpl_sides((bundle_root / cpl).read_bytes())
@@ -413,6 +485,7 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
         board_layers=_count_copper_layers(board),
         assembly_sides=sides,
         board_sha256=board_sha,
+        fab_review_signoff=dict(fab_review) if fab_review is not None else None,
     )
 
 
@@ -565,7 +638,7 @@ def run_submission(
         "stock_check": "blocked" if report.blocked else "stock-checked",
         "upload": (upload_info or {}).get("state", "not-performed"),
     }
-    return WorkflowResult(plan, report, page, upload_info, states)
+    return WorkflowResult(plan, report, page, upload_info, states, facts.fab_review_signoff)
 
 
 def _upload_leg(

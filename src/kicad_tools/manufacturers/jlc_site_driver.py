@@ -19,6 +19,11 @@ Binding constraints (each is enforced in code and covered by a test):
   is checked against :data:`DISALLOWED_PATHS` (robots.txt) and the allowlist
   :data:`ALLOWED_HOSTS`. The part-matching export is downloaded by the operator
   and handed in as bytes; the driver never fetches it.
+* **No cart without the fab-view sign-off (issue #8818).** The driver uploads
+  and checks the factory match, then refuses to click "save to cart" unless the
+  tapeout manifest carries a ``fab_review_signoff`` (a human looked at the fab's
+  gerber viewer / DFM result and ran ``kct tapeout-sign-off --stage
+  fab-review``). Re-run after signing; the pause is the abort itself.
 * **Stops at the saved cart.** The last action is "save to cart". Nothing here
   places an order, pays for anything or buys parts, and "ordered" is never set.
 * **Kill switch.** Any failed assertion raises :class:`DriverAbort` (with a
@@ -165,7 +170,6 @@ class SiteResult:
     lead_time: str
     state: str = "in-cart"  # never "ordered": only the human sets that
     remaining_human_steps: tuple[str, ...] = (
-        "Review the gerber viewer / DFM result on the JLCPCB page",
         "Confirm consignment / parts inventory choices",
         "Place and pay for the order yourself (this tool never does)",
     )
@@ -306,8 +310,14 @@ def run_driver(
     shots_dir: Path,
     *,
     attended: bool = True,
+    fab_review_signed: bool = False,
 ) -> SiteResult:
-    """Drive the order form to a saved cart. Raises :class:`DriverAbort` on any failure."""
+    """Drive the order form to a saved cart. Raises :class:`DriverAbort` on any failure.
+
+    ``fab_review_signed`` says the manifest carries a valid fab-review sign-off
+    (issue #8818); without it the run stops after the factory match, before
+    "save to cart".
+    """
     if not attended:
         raise DriverAbort("attended", "the website driver only runs attended")
     fields = map_order_fields(spec)
@@ -357,6 +367,16 @@ def run_driver(
         StepRecord("factory-match", "", {"factory_csv_sha256": report["factory_csv_sha256"]})
     )
 
+    if not fab_review_signed:
+        raise DriverAbort(
+            "fab-review",
+            "the form is filled and the gerbers are uploaded, but the cart cannot be saved "
+            "without the fab-view sign-off. Review the gerber viewer / DFM result on the "
+            "JLCPCB page, record it with `kct tapeout-sign-off --stage fab-review`, then "
+            "re-run --website",
+            run._shot("abort-fab-review"),
+        )
+
     quote: dict[str, str] = {}
 
     def save() -> dict[str, Any]:
@@ -394,7 +414,11 @@ def guided_checklist(spec: SiteOrderSpec, inputs: SiteInputs) -> list[str]:
         f"5. Upload {inputs.bom.name} and {inputs.cpl.name}",
         "6. Download JLC's part-matching export and check it with the factory-match gate",
         "7. Select every THT line; confirm no part was substituted or left unselected",
-        "8. Save to cart and STOP; review the gerber viewer, then place the order yourself",
+        "8. Review the gerber viewer / DFM result on the page; it is the first look at the "
+        "fab's rendering of your bytes",
+        "9. Record that review: kct tapeout-sign-off --stage fab-review (cart stays blocked "
+        "without it)",
+        "10. Save to cart and STOP; place the order yourself",
     ]
     return lines
 

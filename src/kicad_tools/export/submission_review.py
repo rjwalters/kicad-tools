@@ -358,12 +358,16 @@ def render_review_page(
     stock: Mapping[str, Any] | None = None,
     upload: Mapping[str, Any] | None = None,
     site: Mapping[str, Any] | None = None,
+    fab_review_signoff: Mapping[str, Any] | None = None,
 ) -> ReviewPage:
     """Publish a portable local review page for ``plan``.
 
     ``site`` (``SiteResult.as_dict()`` from the attended website driver) is
     rendered display-only as a "Website cart hand-off" section and sets the
-    ``cart`` state to ``in-cart``; it never sets ``order``.
+    ``cart`` state to ``in-cart``; it never sets ``order``. An ``in-cart``
+    ``site`` is refused (:class:`ReviewError`) unless ``fab_review_signoff``
+    (the manifest's fab-view attestation, issue #8818) is supplied: a cart
+    must not be reported for bytes nobody has seen in the fab's viewer.
 
     ``stock`` (``{"status": "pass"|"blocked", "lines": [...]}``, each line
     ``{"catalog_id", "need", "stock", "status", ...}``) and ``upload``
@@ -472,6 +476,11 @@ def render_review_page(
     if upload is not None:
         states["upload"] = str(upload.get("state", "not-performed"))
     if site is not None:
+        if str(site.get("state", "in-cart")) == "in-cart" and fab_review_signoff is None:
+            raise ReviewError(
+                "refusing the in-cart state without a fab-view sign-off; review the fab's "
+                "gerber viewer, then run kct tapeout-sign-off --stage fab-review"
+            )
         states["factory_matching"] = "factory-matched"
         states["cart"] = str(site.get("state", "in-cart"))
 
