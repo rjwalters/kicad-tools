@@ -223,7 +223,8 @@ The `manifest.json` `kct export` wrote in Gate 3 only covers **what `kct export`
 {"files": {"<bundle-relative path>": {"sha256": "<hex>", "size": <bytes>}},
  "tapeout": {"board_sha256": "<sha256 of the board .kicad_pcb>",
              "readiness_sha256": "<sha256 of the passing readiness.json receipt>",
-             "human_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>"}}}
+             "human_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>", "gerber_sha256": "<sha256>"},
+             "fab_review_signoff": {"reviewer": "<name>", "signed_at": "<ISO 8601>", "gerber_sha256": "<sha256>"}}}
 ```
 
 Per-file records use the keys `sha256` and `size` (not `bytes`). The `tapeout` block is **not** written by `kct export` or by this skill: it is a human act. After the gates pass, the human (or the agent on their explicit instruction, with their name) records it:
@@ -233,6 +234,8 @@ kct tapeout-sign-off <dir> --board <board.kicad_pcb> --readiness <readiness.json
 ```
 
 It verifies the manifest's file set equals `<dir>` and every `sha256`/`size`, and **refuses (exit 2, manifest untouched)** unless the `kct readiness` receipt is `ready` with every check passed (`kct_check`, `native_drc`, `artifacts`, `bom` present), hashes `--board` in its `inputs`, and covers every bundle file; only then does it write `tapeout`, including the receipt's sha256. Never invent a reviewer. After any change to the bundle or board, re-run the gates (or `kct readiness --verify`) to get a fresh receipt, and only then re-sign.
+
+**Two sign-offs, each attesting something different (issue #8818).** The command above (`--stage release`, the default) says *the gates pass; these bytes may be sent to the fab for preview*. It is enough to upload and preview, never to save a cart. After uploading, look at the fab's gerber viewer / DFM rendering of those bytes, then record that review: `kct tapeout-sign-off <dir> --board <board.kicad_pcb> --stage fab-review --reviewer "<name>"` (no `--readiness` needed). Only that second attestation lets `submit-jlcpcb --website` save the cart. Both bind the gerber zip sha256; changing the board or gerbers invalidates both, and re-running the release sign-off drops an earlier fab-review one.
 
 **Gate condition:** a `manifest.json` exists, is newer than every other file it lists, its file set equals the actual contents of `<dir>` (nothing in the directory is unchecksummed, nothing checksummed is missing), and it records the per-rule warning counts. A stale or partial manifest is a **failure** — it breaks the "upload as-is" contract.
 

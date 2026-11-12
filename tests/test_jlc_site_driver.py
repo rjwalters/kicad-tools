@@ -82,8 +82,36 @@ def inputs(tmp_path):
 SPEC = drv.SiteOrderSpec(4, 5, "1.6", "1", "1", "top", True)
 
 
-def run(page, inputs, tmp_path, csv=GOOD_CSV, spec=SPEC):
-    return drv.run_driver(page, spec, inputs, EXPECTED, MAPPING, lambda: csv, tmp_path / "shots")
+def run(page, inputs, tmp_path, csv=GOOD_CSV, spec=SPEC, fab_review_signed=True):
+    return drv.run_driver(
+        page,
+        spec,
+        inputs,
+        EXPECTED,
+        MAPPING,
+        lambda: csv,
+        tmp_path / "shots",
+        fab_review_signed=fab_review_signed,
+    )
+
+
+def test_no_cart_click_without_fab_review_signoff(state, inputs, tmp_path):
+    page = FakePage(state)
+    with pytest.raises(drv.DriverAbort, match="fab-review") as exc:
+        run(page, inputs, tmp_path, fab_review_signed=False)
+    assert exc.value.step == "fab-review"
+    assert "tapeout-sign-off --stage fab-review" in exc.value.reason
+    assert not clicked(page, "save_to_cart")
+    assert any(e[0] == "file" for e in page.log)  # upload/preview still happened
+
+
+def test_guided_checklist_reviews_viewer_before_cart(inputs):
+    lines = drv.guided_checklist(SPEC, inputs)
+    review = next(i for i, ln in enumerate(lines) if "gerber viewer" in ln)
+    signoff = next(i for i, ln in enumerate(lines) if "--stage fab-review" in ln)
+    cart = next(i for i, ln in enumerate(lines) if "Save to cart" in ln)
+    assert review < signoff < cart
+    assert not any("gerber viewer" in s for s in drv.SiteResult.remaining_human_steps)
 
 
 def clicked(page, key):

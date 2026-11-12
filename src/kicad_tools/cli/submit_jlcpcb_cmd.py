@@ -124,7 +124,14 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
             page, close = drv.connect_attended_page(args.cdp_port)
             try:
                 site = drv.run_driver(
-                    page, spec, inputs, expected, mapping, get_match_csv, out / "site-screenshots"
+                    page,
+                    spec,
+                    inputs,
+                    expected,
+                    mapping,
+                    get_match_csv,
+                    out / "site-screenshots",
+                    fab_review_signed=result.fab_review_signoff is not None,
                 )
             finally:
                 close()
@@ -141,6 +148,7 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
         destination=out / "review-page-cart",
         stock=result.stock.as_dict(),
         site=site.as_dict(),
+        fab_review_signoff=result.fab_review_signoff,
     )
     print(f"cart: {site.cart_url}  (state: {site.state})")
     print(f"review page: {page_out.directory}")

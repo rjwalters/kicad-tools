@@ -231,7 +231,14 @@ def test_review_page_renders_site_handoff_without_order_state(env):
         "match_diff": [],
         "remaining_human_steps": ["Place and pay for the order yourself"],
     }
-    page = render_review_page(result.plan, destination=env["out"] / "cart-page", site=site)
+    with pytest.raises(Exception, match="fab-view sign-off"):
+        render_review_page(result.plan, destination=env["out"] / "cart-refused", site=site)
+    page = render_review_page(
+        result.plan,
+        destination=env["out"] / "cart-page",
+        site=site,
+        fab_review_signoff={"reviewer": "Ann"},
+    )
     text = (page.directory / "index.md").read_text()
     assert "https://cart.jlcpcb.com/x" in text and "$42.10" in text and "5 days" in text
     assert "- cart: in-cart" in text and "- factory_matching: factory-matched" in text
@@ -323,8 +330,72 @@ def test_signoff_is_idempotent_and_updates_signed_at(env):
     rec = wf.sign_off_bundle(
         env["bundle"], board, "Bob", readiness=write_receipt(env), signed_at="2026-02-01T00:00:00Z"
     )
-    assert rec["human_signoff"] == {"reviewer": "Bob", "signed_at": "2026-02-01T00:00:00Z"}
+    gerber_sha = hashlib.sha256((env["bundle"] / "gerbers.zip").read_bytes()).hexdigest()
+    assert rec["human_signoff"] == {
+        "reviewer": "Bob",
+        "signed_at": "2026-02-01T00:00:00Z",
+        "gerber_sha256": gerber_sha,
+    }
     wf.preflight(env["bundle"], board)
+
+
+def _released(env):
+    export_shaped_manifest(env)
+    board = env["src"] / "b.kicad_pcb"
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=write_receipt(env))
+    return board
+
+
+def test_fab_review_requires_release_signoff(env):
+    export_shaped_manifest(env)
+    with pytest.raises(wf.WorkflowError, match="release sign-off"):
+        wf.sign_off_bundle(env["bundle"], env["src"] / "b.kicad_pcb", "Ann", stage="fab-review")
+
+
+def test_release_only_preflights_without_fab_review(env):
+    board = _released(env)
+    assert wf.preflight(env["bundle"], board).fab_review_signoff is None
+
+
+def test_fab_review_signoff_recorded_and_bound(env):
+    board = _released(env)
+    rec = wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    assert rec["fab_review_signoff"]["reviewer"] == "Bob"
+    assert rec["fab_review_signoff"]["gerber_sha256"] == rec["human_signoff"]["gerber_sha256"]
+    assert wf.preflight(env["bundle"], board).fab_review_signoff["reviewer"] == "Bob"
+    with pytest.raises(wf.WorkflowError, match="non-blank"):
+        wf.sign_off_bundle(env["bundle"], board, " ", stage="fab-review")
+
+
+def test_board_change_invalidates_both_signoffs(env):
+    board = _released(env)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    board.write_text(board.read_text() + "\n; edited\n")
+    with pytest.raises(wf.WorkflowError, match="Board file sha256"):
+        wf.preflight(env["bundle"], board)
+
+
+def test_gerber_change_invalidates_both_signoffs(env):
+    board = _released(env)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    manifest_path = env["bundle"] / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    # Re-hash the manifest record so only the sign-off binding can catch the change.
+    (env["bundle"] / "gerbers.zip").write_bytes(b"PK\x03\x04other")
+    manifest["files"]["gerbers.zip"] = {
+        "sha256": hashlib.sha256(b"PK\x03\x04other").hexdigest(),
+        "size": len(b"PK\x03\x04other"),
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(wf.WorkflowError, match="gerber_sha256"):
+        wf.preflight(env["bundle"], board)
+
+
+def test_rerunning_release_signoff_drops_fab_review(env):
+    board = _released(env)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    wf.sign_off_bundle(env["bundle"], board, "Ann", readiness=write_receipt(env))
+    assert wf.preflight(env["bundle"], board).fab_review_signoff is None
 
 
 @pytest.mark.parametrize("reviewer", ["", "   "])
