@@ -76,3 +76,53 @@ def test_vertex_buried_under_same_net_pad_not_flagged(tmp_path):
     p = tmp_path / "b.kicad_pcb"
     p.write_text(_board(_seg((0, 0), (10, 0)), _seg((10, 0), (0, 3)), pad))
     assert SharpTraceCornerRule().check(PCB.load(str(p)), None).violations == []
+
+
+def _wseg(a, b, width, layer="F.Cu", net=1):
+    return (
+        f"(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (width {width}) "
+        f'(layer "{layer}") (net {net}))'
+    )
+
+
+def test_vertex_at_through_via_on_inner_layer_not_flagged(tmp_path):
+    via = '(via (at 10 0) (size 0.65) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))'
+    p = tmp_path / "b.kicad_pcb"
+    p.write_text(
+        _board(
+            _seg((0, 0), (10, 0), layer="B.Cu"),
+            _seg((10, 0), (0, 3), layer="B.Cu"),
+            via,
+        )
+    )
+    assert SharpTraceCornerRule().check(PCB.load(str(p)), None).violations == []
+
+
+def test_width_filled_hairpin_not_flagged(tmp_path):
+    # Out and back 0.08 mm apart with 0.18 mm traces: the copper is solid.
+    v = _check(
+        tmp_path,
+        _wseg((0, 31.72), (10, 31.72), 0.18),
+        _wseg((10, 31.72), (8, 31.80), 0.18),
+    )
+    assert v == []
+
+
+def test_thin_trace_inside_wide_trace_not_flagged(tmp_path):
+    v = _check(
+        tmp_path,
+        _wseg((0, 0), (10, 0), 2.0),
+        _wseg((10, 0), (6, 0.9), 0.25),
+    )
+    assert v == []
+
+
+def test_stacked_duplicate_segments_reported_once(tmp_path):
+    v = _check(
+        tmp_path,
+        _seg((0, 0), (10, 0)),
+        _seg((0, 0), (10, 0)),
+        _seg((10, 0), (0, 3)),
+        _seg((10, 0), (0, 3)),
+    )
+    assert len(v) == 1
