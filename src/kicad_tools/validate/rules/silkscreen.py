@@ -10,7 +10,7 @@ This module implements DRC checks for silkscreen elements:
 - Silkscreen geometry coverage (which silk primitives were NOT modeled)
 
 **Modeled silk geometry.**  :func:`_stroke_geometry` builds the printed ink
-for ``line``, ``rect`` and (since #5811) ``poly`` primitives -- the latter in
+for ``line``, ``rect``, ``circle``, ``arc`` and (since #5811) ``poly`` primitives -- the latter in
 both fill states, because a filled polygon prints its interior and routinely
 carries a zero stroke width.  Primitives outside
 :data:`MODELED_SILK_GRAPHIC_TYPES` contribute no geometry at all; rather than
@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
@@ -113,7 +114,7 @@ _MIN_SILK_OVERLAP_AREA_MM2 = 0.005
 # Anything outside this set contributes NO geometry to the clearance checks,
 # which is a coverage gap, not a clean result -- :func:`check_silk_coverage`
 # reports each occurrence so it cannot pass unnoticed.
-MODELED_SILK_GRAPHIC_TYPES = ("line", "rect", "poly")
+MODELED_SILK_GRAPHIC_TYPES = ("line", "rect", "poly", "circle", "arc")
 
 #: Rule id for the coverage advisory emitted per unmodeled silk primitive.
 SILK_GEOMETRY_UNMODELED_RULE_ID = "silk_geometry_unmodeled"
@@ -701,13 +702,79 @@ def _poly_geometry(
     return LineString([*points, points[0]]).buffer(width / 2.0)
 
 
+def _circle_geometry(
+    graphic: FootprintGraphic | BoardGraphic,
+    xf: Callable[[tuple[float, float]], tuple[float, float]],
+    width: float,
+) -> _Geometry | None:
+    """Printed ink of a silk circle: a disc when filled, else a ring.
+
+    The radius is the centre-to-``end`` distance (``BoardGraphic`` has no
+    ``radius`` field).  The footprint transform is rigid, so transforming the
+    centre preserves the radius.
+    """
+    from shapely.geometry import Point
+
+    if graphic.center is None:
+        return None
+    cx, cy = graphic.center
+    radius = math.hypot(graphic.end[0] - cx, graphic.end[1] - cy)
+    centre = Point(xf((cx, cy)))
+    if graphic.is_filled:
+        disc = centre.buffer(radius + max(width, 0.0) / 2.0) if radius > 0 else None
+        if disc is None and width > 0:
+            disc = centre.buffer(width / 2.0)
+        return disc
+    if width <= 0 or radius <= 0:
+        return None
+    return centre.buffer(radius).exterior.buffer(width / 2.0)
+
+
+def _arc_geometry(
+    graphic: FootprintGraphic | BoardGraphic,
+    xf: Callable[[tuple[float, float]], tuple[float, float]],
+    width: float,
+) -> _Geometry | None:
+    """Printed ink of a silk arc: its tessellated centreline buffered by width/2."""
+    from shapely.geometry import LineString
+
+    from kicad_tools.schema.pcb import Arc
+
+    if width <= 0 or graphic.mid is None:
+        return None
+    start, mid, end = xf(graphic.start), xf(graphic.mid), xf(graphic.end)
+    if start == end:
+        return None
+    try:
+        # Reuse the copper-arc 3-point circle maths (duck-typed: it only
+        # reads start/mid/end).
+        (acx, acy), radius, a0, sweep = Arc.circular_geometry(
+            SimpleNamespace(start=start, mid=mid, end=end)  # type: ignore[arg-type]
+        )
+        step = 4 * math.asin(math.sqrt(min(0.01 / (2 * radius), 0.5)))
+        count = min(max(2, math.ceil(abs(sweep) / step)), 10000)
+        points = [start]
+        points += [
+            (
+                acx + radius * math.cos(a0 + sweep * i / count),
+                acy + radius * math.sin(a0 + sweep * i / count),
+            )
+            for i in range(1, count)
+        ]
+        points.append(end)
+    except (ValueError, ZeroDivisionError):
+        # Collinear / degenerate points: print the chord.
+        points = [start, end]
+    return LineString(points).buffer(width / 2.0)
+
+
 def _stroke_geometry(
     graphic: FootprintGraphic | BoardGraphic,
     transform: _Transform | None,
 ) -> _Geometry | None:
     """Build a shapely polygon for a silk line/rect/poly graphic's printed ink.
 
-    Returns ``None`` for graphic types we do not model (circle/arc -- see
+    Returns ``None`` for graphic types we do not model (see
     :func:`iter_unmodeled_silk_graphics`, which keeps those visible as
     incomplete coverage rather than letting them read as clean) and for
     primitives that print nothing (zero stroke width on a line/rect or on
@@ -721,6 +788,13 @@ def _stroke_geometry(
 
     def xf(p: tuple[float, float]) -> tuple[float, float]:
         return transform(p) if transform is not None else p
+
+    if graphic.graphic_type == "circle":
+        # Before the zero-width return: a filled disc prints with width 0.
+        return _circle_geometry(graphic, xf, width)
+
+    if graphic.graphic_type == "arc":
+        return _arc_geometry(graphic, xf, width)
 
     if graphic.graphic_type == "poly":
         # Checked BEFORE the zero-width return: a filled polygon prints its
@@ -982,8 +1056,8 @@ def iter_unmodeled_silk_graphics(
 ) -> Iterator[tuple[str, str, tuple[float, float], str, str]]:
     """Yield ``(label, graphic_type, location, layer, uuid)`` per unmodeled silk shape.
 
-    A silk primitive outside :data:`MODELED_SILK_GRAPHIC_TYPES` (today:
-    ``circle`` and ``arc``, plus anything a future KiCad version adds)
+    A silk primitive outside :data:`MODELED_SILK_GRAPHIC_TYPES` (anything
+    a future KiCad version adds)
     contributes no geometry to ``silk_over_copper`` / ``silk_overlap`` /
     ``silk_edge_clearance`` / ``silk_pad_clearance``.  That is a **gap in
     coverage, not a clean result**: before #5811 the same silence also hid
@@ -1290,13 +1364,26 @@ def check_silk_overlap(
     # 2-endpoint form) and only ever paired with a line of the same footprint.
     line_endpoints = {}
     rect_rings = {}
+    # Arcs (#8863) are open strokes too: an arc joined end-to-end to a line or
+    # another arc of the same footprint is one drawn outline, so overlap
+    # confined to the shared joint is not a finding.
+    arc_endpoints = {}
     for footprint in pcb.footprints:
         transform = _fp_transform(footprint)
         for graphic in footprint.graphics:
-            if graphic.graphic_type not in ("line", "rect") or _silk_side(graphic.layer) is None:
+            if (
+                graphic.graphic_type not in ("line", "rect", "arc")
+                or _silk_side(graphic.layer) is None
+            ):
                 continue
             geom = _stroke_geometry(graphic, transform)
             if geom is None:
+                continue
+            if graphic.graphic_type == "arc":
+                arc_endpoints[(f"{footprint.reference} (fp_arc)", geom.wkb)] = (
+                    (transform(graphic.start), transform(graphic.end)),
+                    graphic.stroke_width,
+                )
                 continue
             if graphic.graphic_type == "rect":
                 sx, sy = graphic.start
@@ -1347,6 +1434,23 @@ def check_silk_overlap(
                             joint = Point(contact).buffer(max(line_rect[0][1], line_rect[1][1]))
                             if overlap.difference(joint).area < 1e-9:
                                 continue
+                arc_a = arc_endpoints.get((label_a, geom.wkb))
+                arc_b = arc_endpoints.get((label_b, other_geom.wkb))
+                info_a = arc_a or a
+                info_b = arc_b or b
+                if (
+                    label_a.split(" (")[0] == label_b.split(" (")[0]
+                    and (arc_a is not None or arc_b is not None)
+                    and info_a is not None
+                    and info_b is not None
+                ):
+                    ends_a, width_a = info_a
+                    ends_b, width_b = info_b
+                    joint_point = _shared_endpoint(ends_a, ends_b)
+                    if joint_point is not None:
+                        joint = Point(joint_point).buffer(max(width_a, width_b))
+                        if overlap.difference(joint).area < 1e-9:
+                            continue
                 if label_a == label_b and a is not None and b is not None:
                     # Duplicate lines share both endpoints and must still
                     # flag; _shared_endpoint returns None in that case.
