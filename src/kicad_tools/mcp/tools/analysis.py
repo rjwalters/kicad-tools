@@ -914,6 +914,7 @@ def get_drc_violations(
         results,
         schematic=schematic_path,
         allow_incomplete=allow_incomplete,
+        manufacturer=rules,
     )
 
     # Convert violations to MCP format.  ``severity_filter`` is a view over

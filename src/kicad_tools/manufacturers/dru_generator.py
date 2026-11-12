@@ -404,10 +404,24 @@ def generate_dru(
     )
 
     # --- Clearance (general copper-to-copper) ---
-    lines.append(
-        f'(rule "Clearance{label_suffix}"\n'
-        f"  (constraint clearance (min {rules.min_clearance_mm}mm)))"
-    )
+    inner_clearance = rules.min_inner_clearance_mm
+    if inner_clearance is not None and inner_clearance != rules.min_clearance_mm:
+        # Outer/inner floors differ with copper weight (Issue #8836).
+        lines.append(
+            f'(rule "Clearance (outer){label_suffix}"\n'
+            "  (layer outer)\n"
+            f"  (constraint clearance (min {rules.min_clearance_mm}mm)))"
+        )
+        lines.append(
+            f'(rule "Clearance (inner){label_suffix}"\n'
+            "  (layer inner)\n"
+            f"  (constraint clearance (min {inner_clearance}mm)))"
+        )
+    else:
+        lines.append(
+            f'(rule "Clearance{label_suffix}"\n'
+            f"  (constraint clearance (min {rules.min_clearance_mm}mm)))"
+        )
 
     # These factory constraints have distinct applicability. Do not encode
     # silk-to-pad as a silk-layer restriction: native cross-layer pairs need
