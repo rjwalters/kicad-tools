@@ -16,6 +16,7 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-12
 
+- **PR #8835**: Bump Repo Skills 0.25.10 -> 0.26.1
 - **PR #8833**: feat: flag short-jog staircases and let compress_staircase absorb trailing legs
 - **Issue #8831** (closed): Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free
 - **PR #8829**: feat: reinforce refuses runs under same-side courtyards
