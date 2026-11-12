@@ -1436,14 +1436,16 @@ def check_silk_overlap(
                                 continue
                 arc_a = arc_endpoints.get((label_a, geom.wkb))
                 arc_b = arc_endpoints.get((label_b, other_geom.wkb))
+                info_a = arc_a or a
+                info_b = arc_b or b
                 if (
                     label_a.split(" (")[0] == label_b.split(" (")[0]
                     and (arc_a is not None or arc_b is not None)
-                    and (arc_a or a) is not None
-                    and (arc_b or b) is not None
+                    and info_a is not None
+                    and info_b is not None
                 ):
-                    ends_a, width_a = arc_a or a
-                    ends_b, width_b = arc_b or b
+                    ends_a, width_a = info_a
+                    ends_b, width_b = info_b
                     joint_point = _shared_endpoint(ends_a, ends_b)
                     if joint_point is not None:
                         joint = Point(joint_point).buffer(max(width_a, width_b))
