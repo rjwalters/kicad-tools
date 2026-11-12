@@ -18,6 +18,11 @@ copper outline and the SMD pad's copper outline. Pads/vias with a gap of ~0
 against SMD pads on any layer the barrel reaches; a pad on F.Cu is never
 compared with a via that only spans inner layers. Any net, any footprint.
 Non-plated (``np_thru_hole``) holes are ignored.
+
+Pads of the *same footprint* are never compared with each other: a connector's
+shield / mounting tabs and its own SMD pins are placed by the library
+footprint, not by the board designer, so a short gap there is not a placement
+defect (board 06's J1/J4 produced all of its findings this way).
 """
 
 from __future__ import annotations
@@ -60,8 +65,9 @@ def check_tht_smd_spacing(
     origin = board_origin(pcb)
     ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
 
-    smd: list[tuple[str, str, Any, str]] = []  # (layer, identity, geometry, net)
-    tht: list[tuple[set[str], str, Any, str]] = []  # (layers, identity, geometry, net)
+    # (layer, identity, geometry, net, footprint) / (layers, identity, geometry, net, footprint)
+    smd: list[tuple[str, str, Any, str, int | None]] = []
+    tht: list[tuple[set[str], str, Any, str, int | None]] = []
     for fp in pcb.footprints:
         for index, pad in enumerate(fp.pads):
             if pad.type not in {"smd", "thru_hole"}:
@@ -73,12 +79,13 @@ def check_tht_smd_spacing(
                 continue
             identity = pad.uuid or f"{fp.reference}:{pad.number}:pad:{index}"
             net = str(pad.net_number)
+            owner = id(fp)
             if pad.type == "smd":
                 for layer in layers:
                     if _pad_on_layer(pad, layer):
-                        smd.append((layer, identity, geom, net))
+                        smd.append((layer, identity, geom, net, owner))
             else:
-                tht.append((set(layers), identity, geom, net))
+                tht.append((set(layers), identity, geom, net, owner))
     for via in pcb.vias if include_vias else ():
         if any(layer not in layers for layer in via.layers):
             continue
@@ -89,18 +96,19 @@ def check_tht_smd_spacing(
                 via_ref(via, origin),
                 Point(via.position).buffer(via.size / 2, quad_segs=64),
                 str(via.net_number),
+                None,
             )
         )
 
     for layer in sorted({s[0] for s in smd}):
         pads = [s for s in smd if s[0] == layer]
         tree = STRtree([p[2] for p in pads])
-        for span, identity, geom, net in tht:
+        for span, identity, geom, net, owner in tht:
             if layer not in span:
                 continue
             for raw in tree.query(geom, predicate="dwithin", distance=warning_mm):
-                _, smd_id, smd_geom, smd_net = pads[int(raw)]
-                if smd_id == identity:
+                _, smd_id, smd_geom, smd_net, smd_owner = pads[int(raw)]
+                if smd_id == identity or (owner is not None and owner == smd_owner):
                     continue
                 distance = geom.distance(smd_geom)
                 if distance <= TOLERANCE or distance >= warning_mm - TOLERANCE:

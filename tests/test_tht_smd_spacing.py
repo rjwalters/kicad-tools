@@ -61,6 +61,17 @@ def test_via_arm_is_opt_in():
     assert [v.severity for v in found] == ["error"]
 
 
+def test_same_footprint_pads_are_not_compared():
+    """A connector's own shield tab vs its SMD pin is footprint design, not placement."""
+    one = """(footprint "C" (layer "F.Cu") (at 0 0) (property "Reference" "J1")
+      (pad "S1" thru_hole circle (at 0 0) (size 1.6 1.6) (drill 0.9)
+        (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "tab"))
+      (pad "1" smd rect (at 2.3 0) (size 1 1) (layers "F.Cu") (net 2 "B") (uuid "pin")))"""
+    assert not check_tht_smd_spacing(board(one)).violations
+    # The same geometry across two footprints is still reported.
+    assert check_tht_smd_spacing(board(tht(), smd(1.5))).violations
+
+
 def test_non_plated_hole_ignored():
     npth = """(footprint "N" (layer "F.Cu") (at 0 0) (property "Reference" "H1")
       (pad "" np_thru_hole circle (at 0 0) (size 1.6 1.6) (drill 1.6) (layers "*.Cu")))"""
