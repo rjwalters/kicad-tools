@@ -23,6 +23,7 @@ Non-plated (``np_thru_hole``) holes are ignored.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 from ..copper_refs import board_origin, via_ref
 from ..violations import DRCResults, DRCViolation
@@ -34,9 +35,20 @@ WARNING_MM = 2.7
 
 
 def check_tht_smd_spacing(
-    pcb, danger_mm: float = DANGER_MM, warning_mm: float = WARNING_MM
+    pcb,
+    danger_mm: float = DANGER_MM,
+    warning_mm: float = WARNING_MM,
+    *,
+    include_vias: bool = False,
 ) -> DRCResults:
-    """Report THT pads and vias closer than the thresholds to any SMD pad."""
+    """Report THT pads (and, opt-in, vias) closer than the thresholds to any SMD pad.
+
+    ``include_vias`` is off by default: vias are routinely fanned out within
+    2 mm of SMD pads on every routed board (board 06 alone yields ~1,480 via
+    findings against 18 THT-pad findings), and a via barrel is not a
+    wave/selective-solder feature. The default therefore judges plated
+    through-hole *component* pads only.
+    """
     from shapely import STRtree  # type: ignore[import-untyped]
     from shapely.geometry import Point  # type: ignore[import-untyped]
     from shapely.ops import nearest_points  # type: ignore[import-untyped]
@@ -48,8 +60,8 @@ def check_tht_smd_spacing(
     origin = board_origin(pcb)
     ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
 
-    smd: list[tuple[str, str, object, str]] = []  # (layer, identity, geometry, net)
-    tht: list[tuple[set[str], str, object, str]] = []  # (layers, identity, geometry, net)
+    smd: list[tuple[str, str, Any, str]] = []  # (layer, identity, geometry, net)
+    tht: list[tuple[set[str], str, Any, str]] = []  # (layers, identity, geometry, net)
     for fp in pcb.footprints:
         for index, pad in enumerate(fp.pads):
             if pad.type not in {"smd", "thru_hole"}:
@@ -67,7 +79,7 @@ def check_tht_smd_spacing(
                         smd.append((layer, identity, geom, net))
             else:
                 tht.append((set(layers), identity, geom, net))
-    for via in pcb.vias:
+    for via in pcb.vias if include_vias else ():
         if any(layer not in layers for layer in via.layers):
             continue
         first, last = sorted(layers.index(layer) for layer in via.layers)

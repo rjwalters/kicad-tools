@@ -469,7 +469,8 @@ def check_physical_copper_gap(
 
     ``error_below_mm`` enables two severity tiers (Issue #8843): a gap below
     it is an ``error``, a gap in ``[error_below_mm, minimum_mm)`` is a
-    ``warning``. Every gap is still listed. ``None`` keeps the historical
+    ``warning``; a slit whose two sides are the same net is a ``warning`` at any
+    distance. Every gap is still listed. ``None`` keeps the historical
     single-tier behaviour (everything ``error``).
 
     Facing-edge screening excludes local corners. This is a slit detector,
@@ -582,7 +583,13 @@ def check_physical_copper_gap(
                     key = ids, nets
                     if key in findings and (findings[key].actual_value or 0) <= distance:
                         continue
-                    tiered_warning = error_below_mm is not None and distance >= error_below_mm
+                    # Tiered mode: [error_below, minimum) is a warning, and a
+                    # same-net-only slit is a warning at any distance (issue
+                    # #8843 allows this): it is always listed, but it cannot
+                    # short two nets, so it must not block the build.
+                    tiered_warning = error_below_mm is not None and (
+                        distance >= error_below_mm or len(nets) == 1
+                    )
                     findings[key] = DRCViolation(
                         "physical_copper_gap",
                         "warning" if tiered_warning else "error",
@@ -611,17 +618,21 @@ def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
     are not judged here (the versioned table is epic item 2).
 
     Fail closed: ``copper_oz is None`` (weight not declared by stackup or
-    ``--copper``) reports ``physical_copper_gap_incomplete`` instead of
-    assuming 1 oz.
+    ``--copper``) reports a ``physical_copper_gap_incomplete`` *info* finding instead
+    of assuming 1 oz (listed, never blocking).
     """
-    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely import STRtree
 
     results = DRCResults(rules_checked=1)
     if copper_oz is None:
         results.add(
             DRCViolation(
                 "physical_copper_gap_incomplete",
-                "error",
+                # Reported (never a silent pass) at info: the mask-bridge check
+                # only judges 2 oz, so an error/warning here would block (or,
+                # under --strict, fail) every board with no declared stackup
+                # weight.
+                "info",
                 "Pad mask-bridge check incomplete: copper weight unknown "
                 "(declare a stackup copper weight or pass --copper)",
             )
@@ -652,7 +663,7 @@ def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
                 # distance ~0 means touching/overlapping pads: not a mask gap.
                 if distance <= TOLERANCE or distance >= limit - TOLERANCE:
                     continue
-                from shapely.ops import nearest_points  # type: ignore[import-untyped]
+                from shapely.ops import nearest_points
 
                 a, b = nearest_points(pad.geometry, other.geometry)
                 ids = tuple(sorted((pad.identity, other.identity)))

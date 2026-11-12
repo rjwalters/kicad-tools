@@ -53,9 +53,11 @@ def test_back_side_smd_pad_is_measured():
     assert found[0].layer == "B.Cu"
 
 
-def test_via_to_smd_and_inner_only_via_ignored():
+def test_via_arm_is_opt_in():
     via = '(via (at 0 0) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "v"))'
-    found = check_tht_smd_spacing(board(via, smd(1.5))).violations
+    # Default: routine via fan-out near SMD pads is not a finding.
+    assert not check_tht_smd_spacing(board(via, smd(1.5))).violations
+    found = check_tht_smd_spacing(board(via, smd(1.5)), include_vias=True).violations
     assert [v.severity for v in found] == ["error"]
 
 
