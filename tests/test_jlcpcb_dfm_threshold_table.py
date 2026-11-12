@@ -136,7 +136,10 @@ def test_real_4layer_board_is_not_incomplete(capsys):
     main([str(_BOARD_4L), "--mfr", "jlcpcb", "--format", "json"])
     out = capsys.readouterr().out
     data = json.loads(out[out.index("{") :])
-    assert data.get("verdict") != "incomplete"
+    # The overall verdict can also be "incomplete" for an unrelated reason
+    # (fab DFM parity, #8845), so assert on this table's own lookup.
+    dfm = data["copper_weights"]["dfm_table"]
+    assert dfm["entry"] is not None and dfm["entry"].startswith("4layer_")
 
 
 # Each main() is a full `kct check` (~13s locally); allow headroom on loaded CI.
