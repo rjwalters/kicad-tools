@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.manufacturers import DesignRules, get_profile
 
@@ -394,6 +394,8 @@ class DRCChecker:
         "check_silkscreen",
         "check_solder_mask_pads",
         "check_mask_to_copper",
+        "check_mask_negative_expansion",
+        "check_mask_multi_segment",
         "check_footprint_placement",
         "check_netlist",
         "check_pin1_markers",
@@ -498,6 +500,9 @@ class DRCChecker:
         # fab-blocking defect.  Explicit entry REQUIRED -- the ``via``
         # prefix fallback would file it under Manufacturing.
         "via_under_body": CATEGORY_ADVISORY,
+        # JLCDFM mask warnings (Issue #8847): fab-DFM advisories.
+        "mask_negative_expansion": CATEGORY_ADVISORY,
+        "mask_multi_segment": CATEGORY_ADVISORY,
         # 3D model coverage (Issue #7682): a documentation/render advisory,
         # never fab-blocking.
         "model_coverage": CATEGORY_ADVISORY,
@@ -1699,6 +1704,55 @@ class DRCChecker:
 
         rule = SolderMaskPadRules()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def _mask_opening_findings(self, which: str) -> DRCResults:
+        from .rules.mask_expansion import check_mask_openings
+
+        snapshot, _reason = self.mask_geometry_snapshot()
+        if snapshot is None:
+            return DRCResults()
+        return self._absolutize(check_mask_openings(snapshot, self.pcb, which))
+
+    def mask_geometry_snapshot(self) -> tuple[Any, str | None]:
+        """Cached ``(snapshot, None)`` or ``(None, reason)`` when unavailable.
+
+        The snapshot is read from the saved source file, so a checker built
+        from an unsaved or modified PCB object reports coverage as unknown
+        rather than a clean pass (Issue #8847).
+        """
+        cached: tuple[Any, str | None] | None = getattr(self, "_mask_snapshot_cache", None)
+        if cached is not None:
+            return cached
+        from .mask_geometry import inspect_mask_geometry
+
+        path = getattr(self.pcb, "path", None)
+        try:
+            if path is None:
+                result: tuple[Any, str | None] = (None, "no_saved_source_pcb")
+            else:
+                snap = inspect_mask_geometry(path)
+                if snap.complete:
+                    result = (snap, None)
+                else:
+                    feats = sorted({u["feature"] for u in snap.unsupported})
+                    result = (snap, "incomplete:mask_geometry (" + ", ".join(feats) + ")")
+        except (OSError, ValueError, ImportError) as exc:
+            result = (None, f"mask_geometry_unavailable: {exc}")
+        self._mask_snapshot_cache = result
+        return result
+
+    def check_mask_negative_expansion(self) -> DRCResults:
+        """Warn on mask openings smaller than their pad (Issue #8847).
+
+        Pure geometry on the source-bound mask snapshot; default-on and
+        independent of the opt-in ``mask_to_copper`` native path.  Zero
+        expansion is not flagged; a per-pad override wins over the board value.
+        """
+        return self._mask_opening_findings("negative")
+
+    def check_mask_multi_segment(self) -> DRCResults:
+        """Warn when one mask opening is several disjoint pieces (Issue #8847)."""
+        return self._mask_opening_findings("multi")
 
     def check_footprint_placement(self) -> DRCResults:
         """Check that footprints are placed inside the board outline.

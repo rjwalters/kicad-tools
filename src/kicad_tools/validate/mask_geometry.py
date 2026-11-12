@@ -385,7 +385,7 @@ def inspect_mask_geometry(pcb_path: str | Path) -> MaskGeometrySnapshot:
             continue
         copper = _buffer(Point(*via.position), via.size / 2)
         for side, setting in (("F", via.tenting_front), ("B", via.tenting_back)):
-            default = getattr(pcb.setup, "tenting_front" if side == "F" else "tenting_back")
+            default = getattr(pcb.setup, "tenting_front" if side == "F" else "tenting_back", None)
             if setting not in {None, "none", "yes", "no"}:
                 unsupported(via.uuid, "tenting", "Unrecognized via tenting value")
                 continue

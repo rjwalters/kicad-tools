@@ -33,7 +33,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from kicad_tools.analysis.routing_quality import (
     FRAGMENT_LENGTH_MM,
@@ -2783,6 +2783,10 @@ def main(argv: list[str] | None = None) -> int:
         drc_only=drc_only,
         strict_copper_disagreement=bool(args.strict and copper_disagreement),
         dfm_incomplete=dfm_incomplete,
+        manufacturer=args.mfr,
+    )
+    fab_dfm_parity = (
+        check_verdict.fab_dfm_parity.to_dict() if check_verdict.fab_dfm_parity else None
     )
     meta = check_verdict.meta
     verdict, exit_code = check_verdict.verdict, check_verdict.exit_code
@@ -2821,6 +2825,7 @@ def main(argv: list[str] | None = None) -> int:
             scope=scope_record,
             project_rules=project_rules,
             copper_weights=copper_weights,
+            fab_dfm_parity=fab_dfm_parity,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -2849,6 +2854,10 @@ def main(argv: list[str] | None = None) -> int:
     # the JSON stream (the JSON carries the full ``coverage`` map).
     if not machine_output and not drc_only:
         print_coverage_stanza(coverage)
+        if check_verdict.fab_dfm_parity is not None:
+            from kicad_tools.validate.fab_dfm_parity import format_parity_stanza
+
+            print(format_parity_stanza(check_verdict.fab_dfm_parity))
 
     # Write JSON report to file if --output specified
     if args.output:
@@ -2869,6 +2878,7 @@ def main(argv: list[str] | None = None) -> int:
             exit_code=exit_code,
             scope=scope_record,
             copper_weights=copper_weights,
+            fab_dfm_parity=fab_dfm_parity,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -2904,6 +2914,8 @@ class CheckVerdict:
     meta: MetaCheckResult | None
     error_count: int
     warning_count: int
+    #: Issue #8845: fab DFM parity report (``--mfr jlcpcb`` only), else ``None``.
+    fab_dfm_parity: Any = None
 
 
 def evaluate_check_verdict(
@@ -2917,6 +2929,7 @@ def evaluate_check_verdict(
     drc_only: bool = False,
     strict_copper_disagreement: bool = False,
     dfm_incomplete: bool = False,
+    manufacturer: str | None = None,
 ) -> CheckVerdict:
     """Turn DRC results into ``kct check``'s verdict + exit code (Issue #7260).
 
@@ -2941,6 +2954,9 @@ def evaluate_check_verdict(
             disagreement (always a fail).
         dfm_incomplete: The stackup has no DFM-table entry (Issue #8839); a
             would-be ``pass`` becomes ``incomplete``.
+        manufacturer: Manufacturer id; for the JLCPCB family a danger-capable
+            ``not_covered`` fab DFM parity row (Issue #8845) makes an otherwise
+            passing verdict ``incomplete``.
     """
     counted = list(results.violations) if violations is None else list(violations)
     error_count = sum(1 for v in counted if v.is_error)
@@ -2975,7 +2991,10 @@ def evaluate_check_verdict(
         allow_incomplete=allow_incomplete,
         meta=meta,
     )
-    if dfm_incomplete and verdict == "pass":
+    from kicad_tools.validate.fab_dfm_parity import evaluate_parity
+
+    parity = evaluate_parity(manufacturer)
+    if (dfm_incomplete or (parity is not None and parity.incomplete)) and verdict == "pass":
         from ._gate import gate_exit_code
 
         exit_code, verdict = gate_exit_code(
@@ -2987,6 +3006,7 @@ def evaluate_check_verdict(
         meta=meta,
         error_count=error_count,
         warning_count=warning_count,
+        fab_dfm_parity=parity,
     )
 
 
@@ -3617,6 +3637,8 @@ def run_selected_checks(
         "solder_mask": checker.check_solder_mask_pads,
         "spec_conformance": _spec_conformance_check,
         "mask_to_copper": checker.check_mask_to_copper,
+        "mask_negative_expansion": checker.check_mask_negative_expansion,
+        "mask_multi_segment": checker.check_mask_multi_segment,
         "thermal_asymmetry": checker.check_thermal_asymmetry,
         "via_in_pad": checker.check_via_in_pad,
         "via_type": checker.check_via_type_capability,
@@ -4378,6 +4400,7 @@ def output_json(
     scope: dict | None = None,
     project_rules: list[dict] | None = None,
     copper_weights: dict | None = None,
+    fab_dfm_parity: dict | None = None,
 ) -> None:
     """Output violations as JSON.
 
@@ -4471,6 +4494,9 @@ def output_json(
         data["fabrication_process"] = fabrication_process
     if coverage is not None:
         data["coverage"] = coverage
+    # Issue #8845: additive; present under --mfr jlcpcb only.
+    if fab_dfm_parity is not None:
+        data["fab_dfm_parity"] = fab_dfm_parity
     # Issue #7230: additive top-level verdict/exit_code from the same call
     # that decides the process exit.  ``summary.passed`` stays DRC-only.
     if verdict is not None:
@@ -4534,6 +4560,7 @@ def write_json_report(
     exit_code: int | None = None,
     scope: dict | None = None,
     copper_weights: dict | None = None,
+    fab_dfm_parity: dict | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
@@ -4608,6 +4635,9 @@ def write_json_report(
         data["fabrication_process"] = fabrication_process
     if coverage is not None:
         data["coverage"] = coverage
+    # Issue #8845: additive; present under --mfr jlcpcb only.
+    if fab_dfm_parity is not None:
+        data["fab_dfm_parity"] = fab_dfm_parity
     # Issue #7230: additive top-level verdict/exit_code from the same call
     # that decides the process exit.  ``summary.passed`` stays DRC-only.
     if verdict is not None:
