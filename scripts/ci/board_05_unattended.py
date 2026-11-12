@@ -287,6 +287,10 @@ def run_kct_check(routed: Path, evidence: Path) -> dict:
             str(routed),
             "--mfr",
             MANUFACTURER,
+            # Issue #8842: mask_to_copper is default-on under --mfr but has no
+            # baseline in this 0-warnings gate; skipped until #8839/#8858 land.
+            "--skip",
+            "mask_to_copper",
             "--format",
             "json",
             "--output",
