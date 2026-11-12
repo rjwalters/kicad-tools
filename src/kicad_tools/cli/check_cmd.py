@@ -3928,9 +3928,9 @@ def _apply_dfm_table(
     checker.design_rules = replace(
         r,
         min_clearance_mm=max(r.min_clearance_mm, t["trace_spacing"].danger_mm),
-        min_smd_pad_clearance_mm=max(r.min_smd_pad_clearance_mm, t["pad_spacing"].danger_mm),
+        min_smd_pad_clearance_mm=max(r.min_smd_pad_clearance_mm or 0.0, t["pad_spacing"].danger_mm),
         min_annular_ring_mm=max(r.min_annular_ring_mm, t["annular_ring_via"].danger_mm),
-        min_pth_annular_ring_mm=max(r.min_pth_annular_ring_mm, t["annular_ring_pth"].danger_mm),
+        min_pth_annular_ring_mm=max(r.min_pth_annular_ring_mm or 0.0, t["annular_ring_pth"].danger_mm),
         min_solder_mask_dam_mm=max(r.min_solder_mask_dam_mm, t["mask_bridge"].danger_mm),
     )
     copper_weights["dfm_table"] = {

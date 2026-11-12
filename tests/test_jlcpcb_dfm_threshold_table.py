@@ -91,6 +91,19 @@ def test_apply_table_2oz_floors():
     assert cw["dfm_table"]["entry"] == "4layer_2oz"
 
 
+def test_apply_table_none_profile_fields_use_table_floor():
+    """Optional profile fields left as None must not crash max() (#8839)."""
+    from dataclasses import replace
+
+    c = _checker()
+    c.design_rules = replace(
+        c.design_rules, min_smd_pad_clearance_mm=None, min_pth_annular_ring_mm=None
+    )
+    assert _apply_dfm_table(c, "jlcpcb", 4, 2.0, 0.5, 1.0, {}) is False
+    assert c.design_rules.min_pth_annular_ring_mm == pytest.approx(0.254)
+    assert c.design_rules.min_smd_pad_clearance_mm is not None
+
+
 def test_verdict_incomplete_when_dfm_missing(tmp_path):
     from kicad_tools.cli.check_cmd import evaluate_check_verdict
 
