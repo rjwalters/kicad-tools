@@ -127,6 +127,8 @@ def test_lookup_snap_does_not_reach_unoffered_weights(stackup):
     assert get_profile("jlcpcb").get_dfm_entry(*stackup) is None
 
 
+# Each main() is a full `kct check` (~13s locally); allow headroom on loaded CI.
+@pytest.mark.timeout(300)
 def test_real_4layer_board_is_not_incomplete(capsys):
     """Regression: a committed 4L board with a stock stackup must not go incomplete."""
     from kicad_tools.cli.check_cmd import main
@@ -137,6 +139,8 @@ def test_real_4layer_board_is_not_incomplete(capsys):
     assert data.get("verdict") != "incomplete"
 
 
+# Each main() is a full `kct check` (~13s locally); allow headroom on loaded CI.
+@pytest.mark.timeout(300)
 def test_real_board_3oz_is_incomplete_and_allow_incomplete(capsys):
     from kicad_tools.cli.check_cmd import main
 

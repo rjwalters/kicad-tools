@@ -321,7 +321,12 @@ class DRCChecker:
 
         # Load manufacturer profile and design rules
         profile = get_profile(manufacturer)
-        self.design_rules: DesignRules = profile.get_design_rules(layers, copper_oz, strict=True)
+        # A fab with a DFM threshold table fails closed there (verdict
+        # ``incomplete``, Issue #8839), so the profile-level strict raise
+        # (Issue #8836) would only pre-empt that verdict with a hard error.
+        self.design_rules: DesignRules = profile.get_design_rules(
+            layers, copper_oz, strict=profile.dfm_thresholds is None
+        )
 
         # Issue #4326: override the ampacity copper weights ONLY.
         #
