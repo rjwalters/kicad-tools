@@ -462,6 +462,45 @@ def _collect(pcb):
     return sources, unsupported
 
 
+def _facing_edge_pairs(tree, edges, normals, distance_mm):
+    """Ordered ``(i, j)``, ``i < j`` edge pairs within ``distance_mm`` that face
+    each other (outward-normal dot <= -0.64).
+
+    Candidates come from a cheap bounding-box query (a box expanded by
+    ``distance_mm`` is a superset of ``dwithin``), the normal screen runs
+    vectorised, and the exact ``dwithin`` runs only on the survivors.
+    """
+    import numpy as np
+    import shapely
+
+    if not edges:
+        return []
+    edge_array = np.asarray(edges, dtype=object)
+    bounds = shapely.bounds(edge_array)
+    boxes = shapely.box(
+        bounds[:, 0] - distance_mm,
+        bounds[:, 1] - distance_mm,
+        bounds[:, 2] + distance_mm,
+        bounds[:, 3] + distance_mm,
+    )
+    hits = tree.query(boxes)
+    left, right = hits[0], hits[1]
+    keep = right > left
+    left, right = left[keep], right[keep]
+    if left.size == 0:
+        return []
+    n = np.asarray(normals, dtype=float)
+    dots = n[left, 0] * n[right, 0] + n[left, 1] * n[right, 1]
+    keep = dots <= -0.64
+    left, right = left[keep], right[keep]
+    if left.size == 0:
+        return []
+    keep = shapely.dwithin(edge_array[left], edge_array[right], distance_mm)
+    left, right = left[keep], right[keep]
+    order = np.lexsort((right, left))
+    return list(zip(left[order].tolist(), right[order].tolist(), strict=True))
+
+
 def check_physical_copper_gap(
     pcb, minimum_mm: float, *, error_below_mm: float | None = None
 ) -> DRCResults:
@@ -516,94 +555,90 @@ def check_physical_copper_gap(
         tree = STRtree(edges)
         source_tree = STRtree([s.geometry for s in local])
         findings: dict[tuple[tuple[str, ...], tuple[str, ...]], DRCViolation] = {}
-        for i, edge in enumerate(edges):
-            for raw_j in tree.query(edge, predicate="dwithin", distance=minimum_mm):
-                j = int(raw_j)
-                if j <= i:
+        # One vectorised bulk query + numpy normal screen replaces ~one STRtree
+        # query and a Python dot product per edge (Issue #8843: this pass is
+        # now default-on under jlcpcb, and was ~24 s on board 07). Same pair
+        # set, same (i, j) order as the per-edge loop, so results are unchanged.
+        pairs = _facing_edge_pairs(tree, edges, normals, minimum_mm)
+        for i, j in pairs:
+            edge = edges[i]
+            candidates = [nearest_points(edge, edges[j])]
+            middle = edge.interpolate(0.5, normalized=True)
+            candidates.append((middle, nearest_points(middle, edges[j])[1]))
+            middle = edges[j].interpolate(0.5, normalized=True)
+            candidates.append((nearest_points(edge, middle)[0], middle))
+            for a, b in candidates:
+                distance = a.distance(b)
+                if distance <= TOLERANCE or distance >= minimum_mm - TOLERANCE:
                     continue
-                if sum(a * b for a, b in zip(normals[i], normals[j], strict=True)) > -0.64:
+                dx, dy = (b.x - a.x) / distance, (b.y - a.y) / distance
+                # Both boundaries must face the open gap, within 25 degrees.
+                if normals[i][0] * dx + normals[i][1] * dy < math.cos(math.radians(25)):
                     continue
-                candidates = [nearest_points(edge, edges[j])]
-                middle = edge.interpolate(0.5, normalized=True)
-                candidates.append((middle, nearest_points(middle, edges[j])[1]))
-                middle = edges[j].interpolate(0.5, normalized=True)
-                candidates.append((nearest_points(edge, middle)[0], middle))
-                for a, b in candidates:
-                    distance = a.distance(b)
-                    if distance <= TOLERANCE or distance >= minimum_mm - TOLERANCE:
-                        continue
-                    dx, dy = (b.x - a.x) / distance, (b.y - a.y) / distance
-                    # Both boundaries must face the open gap, within 25 degrees.
-                    if normals[i][0] * dx + normals[i][1] * dy < math.cos(math.radians(25)):
-                        continue
-                    if normals[j][0] * -dx + normals[j][1] * -dy < 0.5:
-                        continue
-                    connector = LineString([a, b])
-                    # The open connector must contain no copper from a third
-                    # primitive; union provenance alone is not electrical isolation.
-                    if connector.intersection(union).length > 1e-8:
-                        continue
-                    owner_indices = [
-                        [
-                            int(k)
+                if normals[j][0] * -dx + normals[j][1] * -dy < 0.5:
+                    continue
+                connector = LineString([a, b])
+                # The open connector must contain no copper from a third
+                # primitive; union provenance alone is not electrical isolation.
+                if connector.intersection(union).length > 1e-8:
+                    continue
+                owner_indices = [
+                    [
+                        int(k)
+                        for k in source_tree.query(point, predicate="dwithin", distance=TOLERANCE)
+                        if local[int(k)].geometry.boundary.distance(point) <= TOLERANCE
+                    ]
+                    for point in (a, b)
+                ]
+                # Local shoulders at a pad escape or joined track are not
+                # slits. Exclude only the neighbourhood of the actual join,
+                # never a whole connected component or an entire source pair.
+                if any(
+                    left != right
+                    and local[left].geometry.intersects(local[right].geometry)
+                    and connector.distance(local[left].geometry.intersection(local[right].geometry))
+                    < minimum_mm
+                    for left in owner_indices[0]
+                    for right in owner_indices[1]
+                ):
+                    continue
+                owners = []
+                for point in (a, b):
+                    owners.append(
+                        sorted(
+                            (local[int(k)].identity, local[int(k)].net)
                             for k in source_tree.query(
                                 point, predicate="dwithin", distance=TOLERANCE
                             )
                             if local[int(k)].geometry.boundary.distance(point) <= TOLERANCE
-                        ]
-                        for point in (a, b)
-                    ]
-                    # Local shoulders at a pad escape or joined track are not
-                    # slits. Exclude only the neighbourhood of the actual join,
-                    # never a whole connected component or an entire source pair.
-                    if any(
-                        left != right
-                        and local[left].geometry.intersects(local[right].geometry)
-                        and connector.distance(
-                            local[left].geometry.intersection(local[right].geometry)
                         )
-                        < minimum_mm
-                        for left in owner_indices[0]
-                        for right in owner_indices[1]
-                    ):
-                        continue
-                    owners = []
-                    for point in (a, b):
-                        owners.append(
-                            sorted(
-                                (local[int(k)].identity, local[int(k)].net)
-                                for k in source_tree.query(
-                                    point, predicate="dwithin", distance=TOLERANCE
-                                )
-                                if local[int(k)].geometry.boundary.distance(point) <= TOLERANCE
-                            )
-                        )
-                    ids = tuple(sorted({identity for side in owners for identity, _ in side}))
-                    nets = tuple(sorted({net for side in owners for _, net in side}))
-                    key = ids, nets
-                    if key in findings and (findings[key].actual_value or 0) <= distance:
-                        continue
-                    # Tiered mode: [error_below, minimum) is a warning, and a
-                    # same-net-only slit is a warning at any distance (issue
-                    # #8843 allows this): it is always listed, but it cannot
-                    # short two nets, so it must not block the build.
-                    tiered_warning = error_below_mm is not None and (
-                        distance >= error_below_mm or len(nets) == 1
                     )
-                    findings[key] = DRCViolation(
-                        "physical_copper_gap",
-                        "warning" if tiered_warning else "error",
-                        f"Physical copper gap {distance:.4f}mm < {minimum_mm:.4f}mm; "
-                        f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
-                        f"({b.x + ox:.6f}, {b.y + oy:.6f})",
-                        location=((a.x + b.x) / 2, (a.y + b.y) / 2),
-                        layer=layer,
-                        actual_value=distance,
-                        required_value=minimum_mm,
-                        items=ids,
-                        nets=nets,
-                        closest_locations=((a.x, a.y), (b.x, b.y)),
-                    )
+                ids = tuple(sorted({identity for side in owners for identity, _ in side}))
+                nets = tuple(sorted({net for side in owners for _, net in side}))
+                key = ids, nets
+                if key in findings and (findings[key].actual_value or 0) <= distance:
+                    continue
+                # Tiered mode: [error_below, minimum) is a warning, and a
+                # same-net-only slit is a warning at any distance (issue
+                # #8843 allows this): it is always listed, but it cannot
+                # short two nets, so it must not block the build.
+                tiered_warning = error_below_mm is not None and (
+                    distance >= error_below_mm or len(nets) == 1
+                )
+                findings[key] = DRCViolation(
+                    "physical_copper_gap",
+                    "warning" if tiered_warning else "error",
+                    f"Physical copper gap {distance:.4f}mm < {minimum_mm:.4f}mm; "
+                    f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
+                    f"({b.x + ox:.6f}, {b.y + oy:.6f})",
+                    location=((a.x + b.x) / 2, (a.y + b.y) / 2),
+                    layer=layer,
+                    actual_value=distance,
+                    required_value=minimum_mm,
+                    items=ids,
+                    nets=nets,
+                    closest_locations=((a.x, a.y), (b.x, b.y)),
+                )
         for key in sorted(findings):
             results.add(findings[key])
     return results
