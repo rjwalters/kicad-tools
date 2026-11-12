@@ -72,7 +72,9 @@ The shipped `merge-group-check.yml` template needs `statuses: write`,
 `group-check` fails with `Resource not accessible by integration`. It also
 triggers on `workflow_run` (`completed`, `gh-readonly-queue/**`) so the `pending`
 status posted at `checks_requested` is re-evaluated when CI finishes; set
-`workflows:` to the name of your CI workflow.
+`workflows:` to the name of your CI workflow. This is why the job needs no wait
+step; a copy that polls for CI holds a runner for the whole check duration and
+should drop the wait and keep this trigger.
 
 A job that exists only to trim PR runs, such as `ci.yml`'s `changes`
 path-filter job, declares itself with a marker comment inside the job block:

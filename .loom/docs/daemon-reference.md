@@ -2243,6 +2243,7 @@ a second resync at the same release writes nothing.
 | `.claude/agents/<name>.md` | each shipped file copied, only when the repo has a real `.claude/agents/` directory (#11033). A symlinked one (this repo's dogfood link) is left alone; a file the release does not ship is the repo's |
 | `.gitignore` | only the Loom-managed block is merged (as `loom-daemon update-gitignore` does), and only when the file exists. The file is never listed in `installed_files` |
 | `.github/labels.yml` | only the block between `# BEGIN LOOM LABELS` and `# END LOOM LABELS` is replaced from the release (#11033); every byte outside it is kept, so a consumer's own labels above or below survive. With no markers the block is appended; with no file the release's file is written. Malformed markers (a second BEGIN or END, END before BEGIN, a lone or near-miss marker) leave the file untouched, log a warning, and make `resync-payload` and `resync-installed.sh` exit 1. The file is never listed in `installed_files`. Live forge labels are never deleted here: that is `loom-daemon labels migrate --apply` |
+| `.claude/settings.json` | missing project-level Loom hook entries are added (#13793) for each hook script under `.loom/hooks/`, from a table in `loom-daemon/src/init/hook_wiring.rs` that a test keeps equal to `scripts/install/provision-hooks.sh`. A hook counts as wired only when a command under the same event contains `.loom/hooks/<name>` (a Repo Skills path does not). Additive and idempotent: nothing is removed or reordered. A file that is not a JSON object, or whose `hooks` shape is unexpected, is left as it is and reported. Never listed in `installed_files` |
 | `.loom/CLAUDE.md`, `.loom/AGENTS.md` | re-rendered from the release's template with the install date the file already carries, so an unchanged template changes nothing. Only when the file exists and has an `**Installation Date**:` line |
 | files in `defaults/.loom-retired.list` | removed when present, whether or not `installed_files` lists them |
 
@@ -2282,7 +2283,6 @@ from an older template is brought up to date.
 | `package.json` (`loom-workspace` stub) | The removal of its `version` field is a one-time migration (#4285) |
 | root `CLAUDE.md` | Repo-customized. Removing a leftover `**Loom Version**` header is a one-time migration (#6612, #8147) |
 | `.gitattributes` `merge=ours` block and the local `merge.ours.driver` | They resolve per-host resync commits that conflict on the stamp (#4528). The daemon resync has one writer per change. An existing block is left as it is, and local git config cannot be committed |
-| `.claude/settings.json` hook wiring | The repo's own file. `resync-installed.sh` only warns about a hook that `scripts/install/provision-hooks.sh` wires and the file does not (#11033), and never writes it; the payload carries no wiring table. A daemon-dispatched launch injects the roll-pause wiring itself (#11049) |
 | forge labels | The drift check against `.github/labels.yml` is a forge read and a report, not an installed file. Run `sync-labels.sh` |
 
 Also unchanged by a resync: the root `CLAUDE.md` / `AGENTS.md` pointer sections,
