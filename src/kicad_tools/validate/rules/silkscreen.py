@@ -1333,11 +1333,11 @@ def _iter_graphic_mask_apertures(pcb: PCB) -> Iterator[tuple[str, _Geometry, str
                     f"{footprint.reference}) at ({c.x:.3f}, {c.y:.3f})"
                 ),
             )
-    for graphic in pcb.graphics:
-        side = sides.get(graphic.layer)
+    for board_graphic in pcb.graphics:
+        side = sides.get(board_graphic.layer)
         if side is None:
             continue
-        geom = _mask_graphic_geometry(graphic, board_xf)
+        geom = _mask_graphic_geometry(board_graphic, board_xf)
         if geom is None or geom.is_empty:
             continue
         c = geom.centroid
@@ -1345,7 +1345,7 @@ def _iter_graphic_mask_apertures(pcb: PCB) -> Iterator[tuple[str, _Geometry, str
             side,
             geom,
             (
-                f"mask opening (gr_{graphic.graphic_type} on {graphic.layer}) "
+                f"mask opening (gr_{board_graphic.graphic_type} on {board_graphic.layer}) "
                 f"at ({c.x:.3f}, {c.y:.3f})"
             ),
         )
@@ -1365,7 +1365,7 @@ def check_silk_over_mask_opening(
     overlap area.  Pad/via hits stay ``silk_over_copper`` warnings.
     """
     require_shapely("silk-over-mask-opening geometry")
-    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely import STRtree
 
     results = DRCResults(rules_checked=1)
     openings: dict[str, list[tuple[_Geometry, str]]] = {"F": [], "B": []}

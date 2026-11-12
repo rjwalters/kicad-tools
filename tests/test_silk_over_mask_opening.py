@@ -93,3 +93,16 @@ def test_pad_aperture_still_silk_over_copper_warning(tmp_path: Path) -> None:
     res, copper = _check(tmp_path, fp + _silk("F", (20, 80, 90)))
     assert not res.violations
     assert [v.severity for v in copper.violations] == ["warning"]
+
+
+def test_footprint_mask_graphic_opening_is_error(tmp_path: Path) -> None:
+    # fp_circle on F.Mask inside a footprint at (20 20): opening spans 18..22.
+    fp = """  (footprint "FID" (layer "F.Cu") (at 20 20)
+    (fp_circle (center 0 0) (end 2 0) (stroke (width 0) (type solid)) (fill yes)
+      (layer "F.Mask")))
+"""
+    res, _ = _check(tmp_path, fp + _silk("F", (20, 80, 90)))
+    assert len(res.violations) == 1
+    v = res.violations[0]
+    assert v.rule_id == "silk_over_mask_opening" and v.severity == "error"
+    assert "fp_circle" in v.message and "F.Mask" in v.message
