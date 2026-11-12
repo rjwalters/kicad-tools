@@ -191,23 +191,34 @@ def compress_staircase(
         staircase_end = _find_staircase_end(segments, i, config)
 
         if staircase_end - i >= config.min_staircase_segments:
-            # Found a staircase of sufficient length
-            start_point = (segments[i].x1, segments[i].y1)
-            end_point = (segments[staircase_end - 1].x2, segments[staircase_end - 1].y2)
-
-            # Copper kept around this run: what is already emitted (earlier
-            # replacements included), everything after the run, other chains.
-            kept = [*result, *segments[staircase_end:], *others]
-            template = segments[i]
+            # Found a staircase of sufficient length.  The strict two-direction
+            # run may stop short of legs that still descend the same diagonal
+            # (a trailing V leg, Issue #8831): try the longer monotone run
+            # first, then fall back to the strict one.
+            mono_end = _find_monotone_end(segments, i, staircase_end, config)
             replacement: list[Segment] = []
-            for candidate in (
-                _optimal_path(start_point, end_point, template, config),
-                _reverse_path(_optimal_path(end_point, start_point, template, config)),
-            ):
-                if not candidate or _overlaps_own_copper(candidate, kept):
-                    continue
-                if path_is_clear is None or all(path_is_clear(seg) for seg in candidate):
-                    replacement = candidate
+            consumed = staircase_end
+            for end_idx in dict.fromkeys((mono_end, staircase_end)):
+                start_point = (segments[i].x1, segments[i].y1)
+                end_point = (segments[end_idx - 1].x2, segments[end_idx - 1].y2)
+                # Copper kept around this run: what is already emitted
+                # (earlier replacements included), everything after the run,
+                # other chains.
+                kept = [*result, *segments[end_idx:], *others]
+                template = segments[i]
+                for candidate in (
+                    _optimal_path(start_point, end_point, template, config),
+                    _reverse_path(_optimal_path(end_point, start_point, template, config)),
+                ):
+                    if not candidate or _overlaps_own_copper(candidate, kept):
+                        continue
+                    if end_idx > staircase_end and len(candidate) >= end_idx - i:
+                        continue
+                    if path_is_clear is None or all(path_is_clear(seg) for seg in candidate):
+                        replacement = candidate
+                        break
+                if replacement:
+                    consumed = end_idx
                     break
 
             if replacement:
@@ -216,6 +227,7 @@ def compress_staircase(
                 # Collision detected - keep original staircase segments
                 for j in range(i, staircase_end):
                     result.append(segments[j])
+            staircase_end = consumed if replacement else staircase_end
             i = staircase_end
         else:
             # Not a staircase or too short, keep the segment
@@ -259,6 +271,60 @@ def _overlaps_own_copper(replacement: list[Segment], kept: list[Segment]) -> boo
             if min(t1, length) - max(t0, 0.0) > tol:
                 return True
     return False
+
+
+def _find_monotone_end(
+    segments: list[Segment],
+    start_idx: int,
+    strict_end: int,
+    config: OptimizationConfig | None = None,
+) -> int:
+    """Extend a staircase run over legs that keep descending its diagonal.
+
+    Starting from the strict alternating run ``[start_idx, strict_end)``, keep
+    absorbing following segments while every leg is a 45-degree multiple and
+    the run stays monotone in both axes (x never reverses, y never reverses).
+    A serpentine rung reverses an axis, so it is never absorbed (Issue #8603).
+    """
+    tol = 1.0  # degrees off a 45-degree multiple
+
+    def _signs(seg: Segment) -> tuple[int, int] | None:
+        dx, dy = seg.x2 - seg.x1, seg.y2 - seg.y1
+        ang = math.degrees(math.atan2(dy, dx)) % 45.0
+        if min(ang, 45.0 - ang) > tol:
+            return None
+        eps = 1e-6
+        return (
+            0 if abs(dx) < eps else (1 if dx > 0 else -1),
+            0 if abs(dy) < eps else (1 if dy > 0 else -1),
+        )
+
+    sx = sy = 0
+    for k in range(start_idx, strict_end):
+        sg = _signs(segments[k])
+        if sg is None:
+            return strict_end
+        for axis, v in enumerate(sg):
+            if v == 0:
+                continue
+            cur = sx if axis == 0 else sy
+            if cur and cur != v:
+                return strict_end
+            if axis == 0:
+                sx = v
+            else:
+                sy = v
+    end = strict_end
+    while end < len(segments):
+        sg = _signs(segments[end])
+        if sg is None:
+            break
+        if (sg[0] and sx and sg[0] != sx) or (sg[1] and sy and sg[1] != sy):
+            break
+        sx = sx or sg[0]
+        sy = sy or sg[1]
+        end += 1
+    return end
 
 
 def _find_staircase_end(segments: list[Segment], start_idx: int, config: OptimizationConfig) -> int:

@@ -305,6 +305,10 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # (MAX_COMMITTED_DRC_ERRORS) is unchanged.  Tool-side rule addition, not a
     # board regression; cleanup is via ``kct pcb prune``.
     "redundant_copper_covered",
+    # Issue #8831: advisory ``redundant_copper_staircase`` (warning only)
+    # flags short-jog staircases on the committed routing; tool-side rule
+    # addition, not a board regression.
+    "redundant_copper_staircase",
     # Issue #8435 (PR #8444) / #8503: the new advisory ``pour_slot`` rule flags
     # parallel different-net tracks too close for the zone fill between them
     # (39 distinct pairs on the committed routing once duplicate segment copies
