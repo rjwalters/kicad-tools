@@ -256,7 +256,12 @@ def _run_kct_check(
         return EngineRun(ok=False, detail=f"kct check raised {type(exc).__name__}: {exc}")
     if not report_path.is_file():
         return EngineRun(ok=False, detail="kct check wrote no JSON report", returncode=code)
-    return EngineRun(ok=True, returncode=code)
+    # Issue #8826: record the exact invocation so a Gate 1 mismatch against a
+    # hand-run ``kct check`` (e.g. a differing ``--copper``) is diagnosable.
+    # Paths are elided (``<pcb>``/``<report>``): they are throw-away and would
+    # make hash-bound evidence irreproducible (#6076).
+    invocation = " ".join(["kct", "check", "<pcb>", "--mfr", manufacturer, *extra])
+    return EngineRun(ok=True, detail=invocation, returncode=code)
 
 
 def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
@@ -1563,7 +1568,24 @@ def _blocking_unknown_coverage(report: dict) -> list[str]:
 
 
 def _gate_kct_check(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
-    """Gate 1 — ``kct check`` at the resolved fab tier."""
+    """Gate 1 — ``kct check`` at the resolved fab tier.
+
+    Issue #8826: a non-passing outcome names the exact ``kct check`` invocation
+    used, so a mismatch with a hand-run ``kct check`` (e.g. ``--copper``) is
+    diagnosable.
+    """
+    invocation = " ".join(
+        ["kct", "check", "<pcb>", "--mfr", options.manufacturer, *options.check_args]
+    )
+    outcome, report = _gate_kct_check_run(options, engines)
+    if outcome.status != PASSED:
+        note = f" [invocation: {invocation}]"
+        outcome.detail += note
+        outcome.blockers = [b + note for b in outcome.blockers]
+    return outcome, report
+
+
+def _gate_kct_check_run(options: ReadinessOptions, engines: Engines) -> tuple[CheckOutcome, dict]:
     report_path = options.evidence_dir / "kct-check.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     run = engines.kct_check(options.pcb, options.manufacturer, report_path, options.check_args)

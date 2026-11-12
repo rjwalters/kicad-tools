@@ -391,8 +391,10 @@ Run design rule checks without requiring kicad-cli:
 # Check against manufacturer rules
 kct check board.kicad_pcb --mfr jlcpcb --format json
 
-# Check against a 4-layer, 2 oz manufacturer rule set
-kct check board.kicad_pcb --mfr jlcpcb --layers 4 --copper 2
+# Check against a 4-layer rule set with 2 oz outer / 0.5 oz inner copper.
+# (A scalar `--copper 2` would also apply 2 oz to inner layers; omit the flag
+# when the board declares a stackup.)
+kct check board.kicad_pcb --mfr jlcpcb --layers 4 --copper outer=2,inner=0.5
 ```
 
 Python API:

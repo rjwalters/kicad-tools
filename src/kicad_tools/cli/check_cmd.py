@@ -2342,6 +2342,19 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
+    # Issue #8826: record the effective ampacity copper weights and where each
+    # came from, so the header / JSON report make a --copper-vs-stackup
+    # difference diagnosable.
+    copper_weights = _copper_weights_provenance(
+        resolved_copper_outer,
+        resolved_copper_inner,
+        cli_copper_outer,
+        cli_copper_inner,
+        stackup_outer,
+        stackup_inner,
+        disagreement=copper_disagreement,
+    )
+
     mask_copper_request = None
     if getattr(args, "mask_copper_config", None):
         from kicad_tools.validate.mask_copper import MaskCopperRequest
@@ -2781,6 +2794,7 @@ def main(argv: list[str] | None = None) -> int:
             exit_code=exit_code,
             scope=scope_record,
             project_rules=project_rules,
+            copper_weights=copper_weights,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -2791,7 +2805,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if check_scope is not None:
             print(f"Scope: {check_scope.describe()} (checks ran in full; not sign-off eligible)")
-        output_table(violations, results, pcb_path, effective_mfr, layers, args.verbose)
+        output_table(
+            violations,
+            results,
+            pcb_path,
+            effective_mfr,
+            layers,
+            args.verbose,
+            copper_weights=copper_weights,
+        )
         if meta is not None:
             print_meta_check_stanza(meta, args.verbose)
         if routing_quality is not None:
@@ -2820,6 +2842,7 @@ def main(argv: list[str] | None = None) -> int:
             verdict=verdict,
             exit_code=exit_code,
             scope=scope_record,
+            copper_weights=copper_weights,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -3801,6 +3824,61 @@ def _print_category_summary(violations: list[DRCViolation]) -> None:
         print(f"      {adv.detail()}  [{adv.rule_list()}]")
 
 
+def _copper_weights_provenance(
+    outer: float | None,
+    inner: float | None,
+    cli_outer: float | None,
+    cli_inner: float | None,
+    stackup_outer: float | None,
+    stackup_inner: float | None,
+    *,
+    disagreement: bool,
+) -> dict:
+    """Effective ampacity copper weights with their source (Issue #8826).
+
+    ``source`` is ``flag`` (explicit ``--copper``), ``stackup`` (declared
+    board stackup) or ``profile`` (manufacturer/profile default; ``oz`` is
+    ``None`` because nothing overrides it).
+    """
+
+    def _entry(oz: float | None, cli_oz: float | None, stk_oz: float | None) -> dict:
+        if cli_oz is not None:
+            source = "flag"
+        elif stk_oz is not None:
+            source = "stackup"
+        else:
+            source = "profile"
+        return {"oz": oz, "source": source}
+
+    return {
+        "outer": _entry(outer, cli_outer, stackup_outer),
+        "inner": _entry(inner, cli_inner, stackup_inner),
+        "flag_overrides_stackup": disagreement,
+    }
+
+
+def _format_copper_weights(copper_weights: dict) -> str:
+    """One-line header form of :func:`_copper_weights_provenance`."""
+    parts = []
+    for cls in ("outer", "inner"):
+        entry = copper_weights[cls]
+        oz = "profile default" if entry["oz"] is None else f"{entry['oz']:g}oz"
+        parts.append(f"{cls} {oz} ({entry['source']})")
+    return ", ".join(parts)
+
+
+def _annotate_copper_stale_cause(violation_dicts: list[dict], copper_weights: dict | None) -> None:
+    """Name a copper-flag override as the cause of stale ampacity waivers (#8826)."""
+    if not copper_weights or not copper_weights.get("flag_overrides_stackup"):
+        return
+    for d in violation_dicts:
+        if d.get("stale_waiver_cause") == "evidence_changed" and d.get("rule_id") in (
+            "ampacity",
+            "path_ampacity",
+        ):
+            d["stale_waiver_cause"] = "copper_flag_overrides_stackup"
+
+
 def output_table(
     violations: list[DRCViolation],
     results: DRCResults,
@@ -3808,6 +3886,7 @@ def output_table(
     mfr: str,
     layers: int,
     verbose: bool = False,
+    copper_weights: dict | None = None,
 ) -> None:
     """Output violations as a formatted table."""
     error_count = sum(1 for v in violations if v.is_error)
@@ -3821,6 +3900,8 @@ def output_table(
     print(f"File: {pcb_path.name}")
     print(f"Manufacturer: {mfr.upper()}")
     print(f"Layers: {layers}")
+    if copper_weights:
+        print(f"Copper (ampacity): {_format_copper_weights(copper_weights)}")
     print(f"Rules checked: {results.rules_checked}")
 
     print("\nResults:")
@@ -4167,8 +4248,13 @@ def output_json(
     exit_code: int | None = None,
     scope: dict | None = None,
     project_rules: list[dict] | None = None,
+    copper_weights: dict | None = None,
 ) -> None:
     """Output violations as JSON.
+
+    Issue #8826: ``copper_weights`` (outer/inner oz + source) is emitted as a
+    top-level object and names a ``--copper``-vs-stackup override as the
+    ``stale_waiver_cause`` of stale ampacity waivers.
 
     Issue #8643: ``project_rules`` (``sidecars.project_rules_findings``) is
     always emitted as a top-level list, empty when clean.
@@ -4198,6 +4284,7 @@ def output_json(
     waived_count = sum(1 for v in violations if v.is_waived)
 
     violation_dicts = [v.to_dict() for v in violations]
+    _annotate_copper_stale_cause(violation_dicts, copper_weights)
 
     summary_data: dict = {
         "errors": error_count,
@@ -4245,6 +4332,8 @@ def output_json(
         # Issue #8015: shared, versioned finding locators (additive).
         **findings_payload(from_violation_dict(d) for d in violation_dicts),
     }
+    if copper_weights is not None:
+        data["copper_weights"] = copper_weights
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
     if routing_quality is not None:
@@ -4315,8 +4404,11 @@ def write_json_report(
     verdict: str | None = None,
     exit_code: int | None = None,
     scope: dict | None = None,
+    copper_weights: dict | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
+
+    Issue #8826: ``copper_weights`` follows :func:`output_json`.
 
     Issue #3750: ``meta_checks`` is added to the envelope when meta-mode
     is active.  Omitted under ``--drc-only`` to preserve the legacy
@@ -4334,6 +4426,7 @@ def write_json_report(
     waived_count = sum(1 for v in violations if v.is_waived)
 
     violation_dicts = [v.to_dict() for v in violations]
+    _annotate_copper_stale_cause(violation_dicts, copper_weights)
 
     summary_data: dict = {
         "errors": error_count,
@@ -4376,6 +4469,8 @@ def write_json_report(
         # Issue #8015: shared, versioned finding locators (additive).
         **findings_payload(from_violation_dict(d) for d in violation_dicts),
     }
+    if copper_weights is not None:
+        data["copper_weights"] = copper_weights
     if meta is not None:
         data["meta_checks"] = meta.to_dict()
     if routing_quality is not None:
