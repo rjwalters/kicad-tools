@@ -198,3 +198,21 @@ def test_version_pinned_to_content_digest(table):
         f"dfm_thresholds changed: bump version and set _PINNED = ({table.version + 1}, "
         f"{_digest(table)!r})"
     )
+
+
+def test_drc_checker_default_fails_closed_on_3oz_jlcpcb():
+    """Non-`kct check` DRCChecker callers keep the #8836 fail-closed raise.
+
+    Only ``kct check`` opts out (``strict_copper=False``) because it applies the
+    table's ``incomplete`` verdict; export/MCP/fix-drc/audit paths must not
+    silently fall back to 1 oz floors.
+    """
+    from kicad_tools.manufacturers.base import UnsupportedCopperWeightError
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.checker import DRCChecker
+
+    pcb = PCB.load(str(_BOARD_4L))
+    with pytest.raises(UnsupportedCopperWeightError):
+        DRCChecker(pcb, manufacturer="jlcpcb", layers=4, copper_oz=3.0)
+    # The explicit opt-out used by `kct check` does not raise.
+    DRCChecker(pcb, manufacturer="jlcpcb", layers=4, copper_oz=3.0, strict_copper=False)

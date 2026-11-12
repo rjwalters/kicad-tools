@@ -2445,6 +2445,10 @@ def main(argv: list[str] | None = None) -> int:
                 (only_set is None or "diffpair_uncoupled_length" in only_set)
                 and "diffpair_uncoupled_length" not in skip_set
             ),
+            # Issue #8839: _apply_dfm_table (below) fails closed with an
+            # ``incomplete`` verdict for fabs that have a table; other fabs
+            # keep the #8836 hard raise.
+            strict_copper=get_profile(effective_mfr).dfm_thresholds is None,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
