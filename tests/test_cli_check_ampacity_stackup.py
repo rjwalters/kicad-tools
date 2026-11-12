@@ -110,6 +110,7 @@ def _run_check(pcb: Path, ncm: Path, report: Path, *, extra: list[str] | None = 
         str(report),
         "--format",
         "json",
+        "--allow-incomplete",  # Issue #8845: jlcpcb parity rows make the verdict incomplete
     ]
     if extra:
         argv.extend(extra)
@@ -327,6 +328,7 @@ def _run_kct_check(pcb: Path, ncm: Path, report: Path, *, extra: list[str] | Non
         str(report),
         "--format",
         "json",
+        "--allow-incomplete",  # Issue #8845: jlcpcb parity rows make the verdict incomplete
     ]
     if extra:
         argv.extend(extra)

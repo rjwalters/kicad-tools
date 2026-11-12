@@ -282,6 +282,8 @@ class ViolationType(Enum):
     SOLDER_MASK_BRIDGE = "solder_mask_bridge"
     SOLDER_MASK_CLEARANCE = "solder_mask_clearance"
     MASK_TO_COPPER = "mask_to_copper"
+    MASK_NEGATIVE_EXPANSION = "mask_negative_expansion"
+    MASK_MULTI_SEGMENT = "mask_multi_segment"
     MIN_PAD_SIZE = "min_pad_size"
     PTH_ANNULAR_RING = "pth_annular_ring"
 

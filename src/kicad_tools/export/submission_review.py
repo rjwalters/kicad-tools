@@ -348,6 +348,29 @@ def _site_section(site: Mapping[str, Any] | None) -> list[str]:
     return lines
 
 
+def _fab_dfm_section(fab_dfm: Mapping[str, Any] | None) -> list[str]:
+    """Display-only attested JLCDFM counts and fab-danger/kct-nothing mismatches (#8841)."""
+    if fab_dfm is None:
+        return []
+    lines = [
+        "## Fab DFM attestation (JLCDFM, manually attested)",
+        f"Attested by: {fab_dfm.get('reviewer')} at {fab_dfm.get('attested_at')}",
+        "",
+    ]
+    for cat, row in sorted(dict(fab_dfm.get("counts", {})).items()):
+        lines.append(
+            f"- {cat}: danger={row.get('danger')} warning={row.get('warning')} good={row.get('good')}"
+        )
+    mism = list(fab_dfm.get("mismatches", ()))
+    lines += ["", "Fab danger where kct reported nothing:"]
+    lines += [
+        f"- {m['category']}: fab danger={m['fab_danger']}, "
+        f"kct rules: {', '.join(m['kct_rules']) or 'none mapped'}"
+        for m in mism
+    ] or ["(none)"]
+    return lines + [""]
+
+
 def render_review_page(
     plan: SubmissionPlan,
     *,
@@ -359,6 +382,7 @@ def render_review_page(
     upload: Mapping[str, Any] | None = None,
     site: Mapping[str, Any] | None = None,
     fab_review_signoff: Mapping[str, Any] | None = None,
+    fab_dfm: Mapping[str, Any] | None = None,
 ) -> ReviewPage:
     """Publish a portable local review page for ``plan``.
 
@@ -514,6 +538,7 @@ def render_review_page(
     index_lines += [
         "",
         *_stock_upload_sections(stock, upload),
+        *_fab_dfm_section(fab_dfm),
         *_site_section(site),
         "## Upload/download file set",
         *(f"- uploads/{name}" for name in output_names),
