@@ -67,6 +67,10 @@ DFM_THRESHOLD_NAMES: tuple[str, ...] = (
 )
 
 
+#: Max |declared - offered| oz still treated as the offered weight (0.434 -> 0.5).
+DFM_OZ_SNAP_TOLERANCE = 0.1
+
+
 @dataclass(frozen=True)
 class DfmThreshold:
     """One DFM threshold with its provenance (Issue #8839)."""
@@ -76,6 +80,7 @@ class DfmThreshold:
     retrieved: str  # ISO date
     basis: str  # "capability_page" | "observed_jlcdfm"
     warning_mm: float | None = None
+    warning_basis: str | None = None  # defaults to ``basis`` when None
 
 
 @dataclass(frozen=True)
@@ -97,12 +102,18 @@ class DfmThresholdTable:
     entries: tuple[DfmEntry, ...]
 
     def lookup(self, layers: int, outer_oz: float, inner_oz: float) -> DfmEntry | None:
-        """Strict lookup: exact stackup or ``None`` -- never a fallback weight."""
+        """Lookup that snaps to the fab's offered weights, else ``None``.
+
+        A declared weight within ``DFM_OZ_SNAP_TOLERANCE`` of an offered weight
+        matches it (KiCad's stock 0.0152 mm inner copper is 0.434 oz, i.e. the
+        fab's 0.5 oz).  A weight the fab does not offer (3 oz, 2.5 oz) never
+        falls back to another weight.
+        """
         for e in self.entries:
             if (
                 e.layers == layers
-                and abs(e.outer_oz - outer_oz) < 1e-6
-                and abs(e.inner_oz - inner_oz) < 1e-6
+                and abs(e.outer_oz - outer_oz) <= DFM_OZ_SNAP_TOLERANCE
+                and abs(e.inner_oz - inner_oz) <= DFM_OZ_SNAP_TOLERANCE
             ):
                 return e
         return None
@@ -138,6 +149,7 @@ def load_dfm_thresholds(manufacturer_id: str) -> DfmThresholdTable | None:
                 source_url=str(t["source_url"]),
                 retrieved=str(t["retrieved"]),
                 basis=str(t["basis"]),
+                warning_basis=t.get("warning_basis"),
             )
         entries.append(
             DfmEntry(

@@ -2454,6 +2454,9 @@ def main(argv: list[str] | None = None) -> int:
         copper_weights,
     )
 
+    # NOTE (#8839): the #5006 per-board override below runs AFTER the table, so
+    # a cited board override may lower a table floor (it is the board's own
+    # cited exception); the table is the default, not a hard minimum.
     # Issue #5006: apply a validated, cited per-board fabrication-floor
     # override on top of the manufacturer profile's resolved DesignRules --
     # BEFORE any check runs and BEFORE --emit-drc-constraints below reads
@@ -3899,16 +3902,25 @@ def _apply_dfm_table(
 
     profile = get_profile(mfr)
     if profile.dfm_thresholds is None:
+        copper_weights["dfm_table"] = {
+            "version": None,
+            "stackup": None,
+            "entry": None,
+            "reason": f"no table for {mfr}",
+        }
         return False
     n_layers = layers if layers is not None else len(checker.pcb.copper_layers)
     base = profile.get_design_rules(n_layers, preset_oz)
     eff_outer = outer if outer is not None else (preset_oz if preset_oz else 1.0)
+    assumed = outer is None or (n_layers > 2 and inner is None)
     if n_layers <= 2:
         eff_inner = 0.0
     else:
         eff_inner = inner if inner is not None else base.inner_copper_oz
     entry = profile.get_dfm_entry(n_layers, eff_outer, eff_inner)
     stackup = f"{n_layers}-layer, {eff_outer:g}oz outer / {eff_inner:g}oz inner"
+    if assumed:
+        stackup += " (assumed: no stackup/--copper weight declared)"
     table_version = profile.dfm_thresholds.version
     if entry is None:
         copper_weights["dfm_table"] = {
@@ -3930,7 +3942,9 @@ def _apply_dfm_table(
         min_clearance_mm=max(r.min_clearance_mm, t["trace_spacing"].danger_mm),
         min_smd_pad_clearance_mm=max(r.min_smd_pad_clearance_mm or 0.0, t["pad_spacing"].danger_mm),
         min_annular_ring_mm=max(r.min_annular_ring_mm, t["annular_ring_via"].danger_mm),
-        min_pth_annular_ring_mm=max(r.min_pth_annular_ring_mm or 0.0, t["annular_ring_pth"].danger_mm),
+        min_pth_annular_ring_mm=max(
+            r.min_pth_annular_ring_mm or 0.0, t["annular_ring_pth"].danger_mm
+        ),
         min_solder_mask_dam_mm=max(r.min_solder_mask_dam_mm, t["mask_bridge"].danger_mm),
     )
     copper_weights["dfm_table"] = {
@@ -3941,6 +3955,9 @@ def _apply_dfm_table(
             name: {
                 "danger_mm": th.danger_mm,
                 "warning_mm": th.warning_mm,
+                "warning_basis": (th.warning_basis or th.basis)
+                if th.warning_mm is not None
+                else None,
                 "basis": th.basis,
                 "source_url": th.source_url,
                 "retrieved": th.retrieved,
@@ -3998,8 +4015,11 @@ def output_table(
         print(f"Copper (ampacity): {_format_copper_weights(copper_weights)}")
         dfm = copper_weights.get("dfm_table")
         if dfm:
-            used = dfm["entry"] or "NO ENTRY (incomplete)"
-            print(f"DFM thresholds: table v{dfm['version']}, {dfm['stackup']} -> {used}")
+            if dfm.get("reason"):
+                print(f"DFM thresholds: {dfm['reason']}")
+            else:
+                used = dfm["entry"] or "NO ENTRY (incomplete)"
+                print(f"DFM thresholds: table v{dfm['version']}, {dfm['stackup']} -> {used}")
     print(f"Rules checked: {results.rules_checked}")
 
     print("\nResults:")

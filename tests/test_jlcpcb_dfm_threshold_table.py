@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -58,16 +60,6 @@ def test_missing_stackup_has_no_fallback(stackup):
     assert get_profile("jlcpcb").get_dfm_entry(*stackup) is None
 
 
-@dataclass
-class _Rules:
-    inner_copper_oz: float = 0.5
-    min_clearance_mm: float = 0.1
-    min_smd_pad_clearance_mm: float = 0.1
-    min_annular_ring_mm: float = 0.1
-    min_pth_annular_ring_mm: float = 0.1
-    min_solder_mask_dam_mm: float = 0.1
-
-
 def _checker(n_layers=4):
     return SimpleNamespace(
         pcb=SimpleNamespace(copper_layers=list(range(n_layers))),
@@ -118,3 +110,84 @@ def test_verdict_incomplete_when_dfm_missing(tmp_path):
     assert ok.verdict == "incomplete" and ok.exit_code == 0
     clean = evaluate_check_verdict(tmp_path / "x.kicad_pcb", results, drc_only=True)
     assert clean.verdict == "pass"
+
+
+_REPO = Path(__file__).resolve().parent.parent
+_BOARD_4L = _REPO / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
+
+
+@pytest.mark.parametrize("inner", [0.5, 0.434286, 0.45])
+def test_lookup_snaps_stock_inner_copper(inner):
+    """KiCad's stock 0.0152 mm inner copper is the fab's 0.5 oz (review item 1)."""
+    assert get_profile("jlcpcb").get_dfm_entry(4, 1.0, inner).key == "4layer_1oz"
+
+
+@pytest.mark.parametrize("stackup", [(4, 2.5, 0.5), (4, 1.0, 0.25), (6, 1.0, 2.0)])
+def test_lookup_snap_does_not_reach_unoffered_weights(stackup):
+    assert get_profile("jlcpcb").get_dfm_entry(*stackup) is None
+
+
+def test_real_4layer_board_is_not_incomplete(capsys):
+    """Regression: a committed 4L board with a stock stackup must not go incomplete."""
+    from kicad_tools.cli.check_cmd import main
+
+    main([str(_BOARD_4L), "--mfr", "jlcpcb", "--format", "json"])
+    out = capsys.readouterr().out
+    data = json.loads(out[out.index("{") :])
+    assert data.get("verdict") != "incomplete"
+
+
+def test_real_board_3oz_is_incomplete_and_allow_incomplete(capsys):
+    from kicad_tools.cli.check_cmd import main
+
+    args = [str(_BOARD_4L), "--mfr", "jlcpcb", "--copper", "3"]
+    assert main(args) != 0
+    assert main([*args, "--allow-incomplete"]) == 0
+
+
+def test_table_floors_not_looser_than_profile_outer_floor():
+    """Table danger floors may only tighten the profile's outer floors."""
+    p = get_profile("jlcpcb")
+    for key, rules in p.design_rules.items():
+        layers = int(key.split("layer_")[0])
+        e = p.get_dfm_entry(layers, rules.outer_copper_oz, rules.inner_copper_oz)
+        assert e.thresholds["annular_ring_pth"].danger_mm >= (rules.min_pth_annular_ring_mm or 0)
+        assert e.thresholds["mask_bridge"].danger_mm >= rules.min_solder_mask_dam_mm - 1e-9
+
+
+def test_observed_warning_basis_recorded():
+    e = get_profile("jlcpcb").get_dfm_entry(4, 2.0, 0.5)
+    assert e.thresholds["annular_ring_via"].warning_basis == "observed_jlcdfm"
+    assert e.thresholds["pad_spacing"].warning_mm == pytest.approx(0.13)
+
+
+# Bump ``version`` in jlcpcb.yaml AND this digest together when any number changes.
+_PINNED = (1, "40c90941f294a40e")
+
+
+def _digest(table) -> str:
+    rows = [
+        (
+            e.key,
+            e.layers,
+            e.outer_oz,
+            e.inner_oz,
+            n,
+            t.danger_mm,
+            t.warning_mm,
+            t.basis,
+            t.warning_basis,
+            t.source_url,
+            t.retrieved,
+        )
+        for e in table.entries
+        for n, t in sorted(e.thresholds.items())
+    ]
+    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()[:16]
+
+
+def test_version_pinned_to_content_digest(table):
+    assert (table.version, _digest(table)) == _PINNED, (
+        f"dfm_thresholds changed: bump version and set _PINNED = ({table.version + 1}, "
+        f"{_digest(table)!r})"
+    )
