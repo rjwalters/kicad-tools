@@ -175,7 +175,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
     def _check_net_bodies(
         self, pcb: PCB, rf: Any, net: str, resolutions: list, results: DRCResults
     ) -> None:
-        from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[import-untyped]
+        from shapely.geometry import LineString, Point, Polygon, box
 
         from kicad_tools.core.geometry import rotate_pad_offset
         from kicad_tools.physics.wire_gauge import anchor_drill_for_awg, bare_copper_diameter_mm
