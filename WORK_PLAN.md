@@ -35,17 +35,14 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8801**: Board 06: fresh assembled-demo/build.py no longer reproduces the committed routed copper (one via moves)
-- **#8818**: tapeout-sign-off is recorded before the fab gerber-viewer review it should attest to
-- **#8820**: Wire-reinforced runs are not checked against same-side component courtyards
+- **#8821**: pcb reinforce: avoid same-side courtyards when planning wire runs (split from #8820)
+- **#8831**: Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8819**: feat: require a fab-view sign-off before the JLCPCB cart can be saved
-- **#8822**: feat: flag wire runs and end holes that collide with component courtyards
-- **#8824**: chore(board-06): regenerate committed routed board from recipe and re-pin evidence
+- **#8829**: feat: reinforce refuses runs under same-side courtyards
 
 ## Approved (Awaiting Merge)
 
@@ -69,9 +66,8 @@ Issues carrying `loom:curated`.
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
-- **#8801**: Board 06: fresh assembled-demo/build.py no longer reproduces the committed routed copper (one via moves) *(curated)*
-- **#8818**: tapeout-sign-off is recorded before the fab gerber-viewer review it should attest to *(curated)*
-- **#8820**: Wire-reinforced runs are not checked against same-side component courtyards *(curated)*
+- **#8821**: pcb reinforce: avoid same-side courtyards when planning wire runs (split from #8820) *(curated)*
+- **#8831**: Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -91,10 +87,10 @@ _None._
 | Very important | 0 |
 | Important | 1 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 3 |
-| PRs awaiting review | 3 |
+| In Progress (`loom:building`) | 2 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 15 |
+| Curated | 14 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 3 |
 <!-- guide:plan-body:end -->
