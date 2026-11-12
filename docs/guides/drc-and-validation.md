@@ -148,6 +148,14 @@ kct check board.kicad_pcb --mfr jlcpcb --layers 4
 kct check board.kicad_pcb --mfr jlcpcb --layers 2 --copper 2.0
 ```
 
+A scalar `--copper` applies to **both** outer and inner layers. On a
+multi-layer board use the keyed form (`--copper outer=2,inner=0.5`) or omit the
+flag when the board declares a stackup. The effective weights and their source
+(`flag` / `stackup` / `profile`) are printed in the header and stored as
+`copper_weights` in the JSON report; a stale ampacity waiver caused by a
+`--copper` that contradicts the stackup reports
+`stale_waiver_cause: copper_flag_overrides_stackup`.
+
 Output:
 ```
 ============================================================
