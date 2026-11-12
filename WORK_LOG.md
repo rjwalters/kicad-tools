@@ -14,6 +14,13 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-12
+
+- **PR #8822**: feat: flag wire runs and end holes that collide with component courtyards
+- **PR #8819**: feat: require a fab-view sign-off before the JLCPCB cart can be saved
+- **Issue #8820** (closed): Wire-reinforced runs are not checked against same-side component courtyards
+- **Issue #8818** (closed): tapeout-sign-off is recorded before the fab gerber-viewer review it should attest to
+
 ### 2026-11-11
 
 - **PR #8816**: feat(boards): add fiducials and board ID to board 02
