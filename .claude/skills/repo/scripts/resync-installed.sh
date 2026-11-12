@@ -38,7 +38,8 @@
 #   .claude/skills/repo/scripts/resync-installed.sh     <- scripts/repo/resync-installed.sh
 #   .claude/commands/repo/<cmd>.md                      <- commands/repo/<cmd>.md
 #   .agents/skills/repo/SKILL.md                        <- skills/repo/SKILL.md (Codex form)
-#   .agents/skills/repo/references/<cmd>.md             <- commands/repo/<cmd>.md
+#   .agents/skills/repo-<cmd>/SKILL.md                  <- commands/repo/<cmd>.md (Codex form)
+#   (.agents/skills/repo/references/ is removed: pre-#676 layout, marker-gated)
 #   CLAUDE.md (REPO-SKILLS block, restamped to $VERSION) <- targeted field edit, not a copy
 #
 # The Codex half is refreshed ONLY when it is already installed and carries this
@@ -450,14 +451,13 @@ done <<<"$COMMANDS"
 # The Codex surface, when this install actually has one (see the header). The
 # SKILL.md is emitted by the same lib/codex-skill.sh function install.sh used, so
 # an untouched install reports "unchanged" rather than phantom drift; the
-# references/ files are ordinary rendered copies of the command procedures.
+# legacy references/ directory is migrated away (repo#676).
 CODEX_ROOT=""
 if [[ "$CODEX_EMITTER" == true ]] && codex_skill_is_managed "$TARGET/$CODEX_SKILL_REL/SKILL.md"; then
   CODEX_ROOT="$TARGET/$CODEX_SKILL_REL"
   plan "skills/repo/SKILL.md" "$CODEX_SKILL_REL/SKILL.md" 0 codex-skill
   while IFS= read -r cmd; do
     [[ -n "$cmd" ]] || continue
-    plan "commands/repo/$cmd.md" "$CODEX_REFERENCES_REL/$cmd.md" 0
     # Per-command skills (repo#676). A repo-<verb> dir someone else authored
     # (SKILL.md present, no marker) is never planned, so never overwritten.
     _cmd_dir="$(codex_command_skill_rel "$cmd")"
@@ -698,6 +698,17 @@ while [[ $i -lt ${#PLAN_SRC[@]} ]]; do
   i=$((i + 1))
 done
 
+# Legacy umbrella references/ (pre-#676): redundant with the repo-<verb> skills.
+# Removed only while repo/SKILL.md is marker-managed (CODEX_ROOT implies that).
+if [[ -n "$CODEX_ROOT" && -d "$TARGET/$CODEX_REFERENCES_REL" ]]; then
+  if [[ "$DRY_RUN" == true ]]; then
+    report "would drop" "$YELLOW" "$CODEX_REFERENCES_REL/" "pre-#676 layout; now the repo-<verb> skills"
+  else
+    codex_migrate_references "$TARGET" >/dev/null
+    report "removed" "$YELLOW" "$CODEX_REFERENCES_REL/" "pre-#676 layout; now the repo-<verb> skills"
+  fi
+fi
+
 # Stale per-command Codex skills (repo#676): a marker-managed repo-<verb>/ whose
 # verb is no longer in this install's command set (a filtered install, or a verb
 # retired upstream) is removed. Unmarked directories are someone else's and stay.
@@ -724,7 +735,7 @@ fi
 # ---------------------------------------------------------------------------
 ORPHANS=()
 ORPHAN_DIRS=("$TARGET/.claude/commands/repo" "$SKILL_ROOT" "$SKILL_ROOT/hooks" "$SKILL_ROOT/scripts")
-[[ -n "$CODEX_ROOT" ]] && ORPHAN_DIRS+=("$CODEX_ROOT" "$CODEX_ROOT/references")
+[[ -n "$CODEX_ROOT" ]] && ORPHAN_DIRS+=("$CODEX_ROOT")
 for d in "${ORPHAN_DIRS[@]}"; do
   [[ -d "$d" ]] || continue
   for f in "$d"/*; do
