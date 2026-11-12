@@ -24,11 +24,13 @@ if TYPE_CHECKING:
     from .fiducials import FiducialsRule
     from .impedance import ImpedanceRule, NetImpedanceSpec
     from .match_group_length_skew import MatchGroupLengthSkewRule
+    from .missing_plated_hole import MissingPlatedHoleRule
     from .pin1_marker import Pin1MarkerRule
     from .pour_slot import PourSlotRule
     from .redundant_copper import RedundantCopperRule
     from .schematic_fields import check_schematic_fields
     from .schematic_wire_symbol import check_schematic_wire_symbol
+    from .sharp_trace_corner import SharpTraceCornerRule
     from .silkscreen import (
         check_all_silkscreen,
         check_silk_edge_clearance,
@@ -66,6 +68,8 @@ _EXPORT_MODULES: dict[str, str] = {
     "ImpedanceRule": ".impedance",
     "NetImpedanceSpec": ".impedance",
     "MatchGroupLengthSkewRule": ".match_group_length_skew",
+    "MissingPlatedHoleRule": ".missing_plated_hole",
+    "SharpTraceCornerRule": ".sharp_trace_corner",
     "Pin1MarkerRule": ".pin1_marker",
     "PourSlotRule": ".pour_slot",
     "RedundantCopperRule": ".redundant_copper",
@@ -106,6 +110,8 @@ __all__ = [
     "ImpedanceRule",
     "IsolatedCopperRule",
     "MatchGroupLengthSkewRule",
+    "MissingPlatedHoleRule",
+    "SharpTraceCornerRule",
     "NetImpedanceSpec",
     "Pin1MarkerRule",
     "PourSlotRule",
