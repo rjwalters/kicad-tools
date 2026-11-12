@@ -133,6 +133,17 @@ case "$HRC $HC" in
   "0 "*" state=clear "*|"0 "*" state=champion-hold "*|"2 ") ;;
   "0 "*" state=stray-operator "*) gh pr edit "$PR_NUMBER" --remove-label "loom:operator" ;;
   "0 "*" state=contradiction "*) OTHER_VERDICT_LABEL=${HC##* detail=} ;;
+  "0 "*" state=stacked-on-loom-branch "*)
+    # Stacked child (#12761): never merged; say why once per head (#13737).
+    # The work finder passes these as `stacked`, so only a targeted run lands here.
+    STACK_BASE=${HC##* detail=}
+    STACK_HEAD=$("$GH_READ" pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+    STACK_MARKER="<!-- champion:stacked-skip base=$STACK_BASE head=$STACK_HEAD -->"
+    if [ "$("$GH_READ" pr view "$PR_NUMBER" --json comments --jq "[.comments[].body] | any(startswith(\"$STACK_MARKER\"))")" != "true" ]; then
+      ./.loom/scripts/post-comment.sh "$PR_NUMBER" --pr --body "$STACK_MARKER
+**Champion**: not merging. This PR is stacked on \`$STACK_BASE\`, a Loom stack branch. It merges after its parent lands and the base is retargeted to the default branch."
+    fi
+    echo "SKIP #$PR_NUMBER: stacked on $STACK_BASE"; continue ;;  # outcome=skipped reason=janitor_rc3
   *) echo "SKIP #$PR_NUMBER: ${HC:-rc=$HRC} — no merge, no comment"; continue ;;  # single-PR step: outcome=skipped reason=janitor_rc3
 esac
 
