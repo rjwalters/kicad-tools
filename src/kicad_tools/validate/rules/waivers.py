@@ -243,6 +243,30 @@ def _physical_gap_candidates(entry: Waiver, findings: Iterable[DRCViolation]) ->
     return sorted(keys)
 
 
+# Issue #8867: ``path_ampacity`` findings gained a per-layer key (#8797/#8798),
+# so a waiver keyed with an empty layer field matches nothing.
+_PATH_AMPACITY_RULE = "path_ampacity"
+PATH_AMPACITY_PER_LAYER_CAUSE = "path_ampacity_per_layer_key"
+
+
+def _path_ampacity_layer_candidates(entry: Waiver, findings: Iterable[DRCViolation]) -> list[str]:
+    """Per-layer ``path_ampacity`` keys an empty-layer keyed ``entry`` would have matched."""
+    if entry.key is None:
+        return []
+    parts = entry.key.split(KEY_SEPARATOR)
+    if len(parts) != 4 or parts[0] != _PATH_AMPACITY_RULE or parts[3]:
+        return []
+    keys: list[str] = []
+    for v in findings:
+        if v.waived or not isinstance(v, DRCViolation) or v.rule_id != _PATH_AMPACITY_RULE:
+            continue
+        key = getattr(v, "key", "")
+        vparts = key.split(KEY_SEPARATOR)
+        if len(vparts) == 4 and vparts[3] and vparts[:3] == parts[:3] and key not in keys:
+            keys.append(key)
+    return sorted(keys)
+
+
 def _rewaive_candidates(entry: Waiver, findings: Iterable[DRCViolation]) -> list[str]:
     """Keys of active findings this unused ``entry`` named before geometry keys.
 
@@ -769,16 +793,26 @@ def apply_waivers(
             )
             continue
         tracking = f" (tracking {entry.issue})" if entry.issue else ""
-        candidates = _rewaive_candidates(entry, findings)
+        layer_candidates = _path_ampacity_layer_candidates(entry, findings)
+        candidates = layer_candidates or _rewaive_candidates(entry, findings)
+        unused_cause: str | None = None
         if candidates:
             shown = candidates[:_MAX_REWAIVE_HINT_KEYS]
             more = len(candidates) - len(shown)
             listed = ", ".join(repr(k) for k in shown) + (f" (+{more} more)" if more else "")
-            hint = (
-                " This rule now names silk lines, tracks and vias by their geometry,"
-                " so the old item name no longer matches; review and re-waive the"
-                f" matching finding(s) with {waive_command} KEY: {listed}."
-            )
+            if layer_candidates:
+                unused_cause = PATH_AMPACITY_PER_LAYER_CAUSE
+                hint = (
+                    " path_ampacity findings are now keyed per layer (Issues #8797/#8798),"
+                    " so a waiver key with an empty layer no longer matches; review each"
+                    f" layer's finding and re-waive with {waive_command} KEY: {listed}."
+                )
+            else:
+                hint = (
+                    " This rule now names silk lines, tracks and vias by their geometry,"
+                    " so the old item name no longer matches; review and re-waive the"
+                    f" matching finding(s) with {waive_command} KEY: {listed}."
+                )
         else:
             hint = ""
         rebuilt.append(
@@ -792,6 +826,7 @@ def apply_waivers(
                 ),
                 items=tuple(sorted(entry.items)),
                 nets=tuple(sorted(entry.nets)),
+                unused_waiver_cause=unused_cause,
             )
         )
 
