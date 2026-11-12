@@ -321,7 +321,7 @@ class DRCChecker:
 
         # Load manufacturer profile and design rules
         profile = get_profile(manufacturer)
-        self.design_rules: DesignRules = profile.get_design_rules(layers, copper_oz)
+        self.design_rules: DesignRules = profile.get_design_rules(layers, copper_oz, strict=True)
 
         # Issue #4326: override the ampacity copper weights ONLY.
         #
