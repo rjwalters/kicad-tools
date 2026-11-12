@@ -50,6 +50,7 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "ampacity",
         "path_ampacity",
         "reinforcement_incomplete",
+        "wire_run_courtyard_overlap",
         "clearance",
         "physical_copper_gap",
         "connectivity",
@@ -207,7 +208,7 @@ def precheck(
         return skipped(category, "no_declared_targets")
     if category == "path_ampacity" and not getattr(checker, "current_path_specs", None):
         return skipped(category, "no_declared_current_paths")
-    if category == "reinforcement_incomplete" and not any(
+    if category in ("reinforcement_incomplete", "wire_run_courtyard_overlap") and not any(
         getattr(s, "reinforcement_eligible", False)
         for s in getattr(checker, "current_path_specs", None) or []
     ):
