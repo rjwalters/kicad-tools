@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-12
 
+- **PR #8833**: feat: flag short-jog staircases and let compress_staircase absorb trailing legs
+- **Issue #8831** (closed): Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free
+- **PR #8829**: feat: reinforce refuses runs under same-side courtyards
+- **Issue #8821** (closed): pcb reinforce: avoid same-side courtyards when planning wire runs (split from #8820)
 - **PR #8827**: feat: report ampacity copper weights and name copper-flag stale cause
 - **Issue #8826** (closed): kct check --copper applies the outer weight to inner layers; waivers go stale between check and readiness
 - **PR #8824**: chore(board-06): regenerate committed routed board from recipe and re-pin evidence
