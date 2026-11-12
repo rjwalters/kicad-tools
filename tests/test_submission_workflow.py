@@ -567,16 +567,38 @@ def test_signoff_refuses_receipt_for_a_different_board_file(env):
 
 # --- fab-dfm attestation (issue #8841) ---------------------------------------
 
-DFM = {
-    "silkscreen_to_pad": {"danger": 3, "warning": 1, "good": 5},  # covered by silk_over_copper
-    "tht_to_smd": {"danger": 5, "warning": 5, "good": 0},  # no kct rule
-}
-KCT = {"violations": [{"rule_id": "silk_over_copper", "severity": "warning"}]}
+
+def _full(**over):
+    """All 14 categories attested clean (0/0/N), with ``over`` replacing rows."""
+    out = {c: {"danger": 0, "warning": 0, "good": 1} for c in wf.DFM_CATEGORY_RULES}
+    out.update(over)
+    return out
 
 
-def _dfm(env, board, counts=DFM, report=KCT, reviewer="Bob"):
+DFM = _full(
+    silkscreen_to_pad={"danger": 3, "warning": 1, "good": 5},  # covered by silk_over_copper
+    tht_to_smd={"danger": 5, "warning": 5, "good": 0},  # no kct rule
+)
+
+
+def _kct(board, violations=None):
+    sha = hashlib.sha256(Path(board).read_bytes()).hexdigest()
+    v = (
+        [{"rule_id": "silk_over_copper", "severity": "warning"}]
+        if violations is None
+        else violations
+    )
+    return {"pcb_sha256": sha, "violations": v}
+
+
+def _dfm(env, board, counts=DFM, report=None, reviewer="Bob"):
     return wf.sign_off_bundle(
-        env["bundle"], board, reviewer, stage="fab-dfm", dfm_counts=counts, kct_report=report
+        env["bundle"],
+        board,
+        reviewer,
+        stage="fab-dfm",
+        dfm_counts=counts,
+        kct_report=_kct(board) if report is None else report,
     )
 
 
@@ -589,24 +611,32 @@ def test_fab_dfm_records_counts_and_lists_uncovered_mismatch(env):
     assert rec["kct_counts"] == {"silk_over_copper": 1}
     assert [m["category"] for m in rec["mismatches"]] == ["tht_to_smd"]
     assert rec["gerber_sha256"] and rec["board_sha256"]
+    assert rec["kct_report_pcb_sha256"] == rec["board_sha256"]
+    assert rec["source"] == "JLCDFM, manual attestation"
     assert receipt.read_bytes() == before
     assert wf.preflight(env["bundle"], board).fab_dfm["reviewer"] == "Bob"
 
 
 def test_fab_dfm_covered_category_with_zero_kct_is_mismatch(env):
     board = _released(env)
-    rec = _dfm(env, board, report={"violations": []})["fab_dfm"]
+    rec = _dfm(env, board, report=_kct(board, []))["fab_dfm"]
     assert {m["category"] for m in rec["mismatches"]} == {"silkscreen_to_pad", "tht_to_smd"}
+
+
+_ROW = {"danger": 1, "warning": 0, "good": 0}
 
 
 @pytest.mark.parametrize(
     "counts",
     [
-        {"nope": {"danger": 1, "warning": 0, "good": 0}},
-        {"tht_to_smd": {"danger": -1}},
-        {"tht_to_smd": {"danger": 1.5}},
-        {"tht_to_smd": {"danger": True}},
-        {"tht_to_smd": {"bad": 1}},
+        _full(nope=_ROW),
+        _full(tht_to_smd={"danger": -1, "warning": 0, "good": 0}),
+        _full(tht_to_smd={"danger": 1.5, "warning": 0, "good": 0}),
+        _full(tht_to_smd={"danger": True, "warning": 0, "good": 0}),
+        _full(tht_to_smd={"bad": 1, "danger": 0, "warning": 0, "good": 0}),
+        _full(trace_spacing={}),  # no levels: never zero-filled
+        _full(trace_spacing={"warning": 4}),  # danger/good omitted
+        {"fiducial": {"danger": 0, "warning": 0, "good": 2}},  # 1 of 14 categories
         {},
     ],
 )
@@ -616,6 +646,55 @@ def test_fab_dfm_invalid_input_refused_and_manifest_untouched(env, counts):
     with pytest.raises(wf.WorkflowError):
         _dfm(env, board, counts=counts)
     assert (env["bundle"] / "manifest.json").read_bytes() == before
+
+
+def test_fab_dfm_partial_categories_name_the_missing_ones(env):
+    board = _released(env)
+    with pytest.raises(wf.WorkflowError, match="missing: .*trace_spacing"):
+        _dfm(env, board, counts={"fiducial": _ROW})
+
+
+def test_fab_dfm_refuses_kct_report_for_another_board(env):
+    board = _released(env)
+    before = (env["bundle"] / "manifest.json").read_bytes()
+    other = _kct(board)
+    other["pcb_sha256"] = "0" * 64
+    for bad in (other, {"violations": []}):  # wrong board; no pcb_sha256 at all
+        with pytest.raises(wf.WorkflowError, match="not for this --board"):
+            _dfm(env, board, report=bad)
+    assert (env["bundle"] / "manifest.json").read_bytes() == before
+
+
+def test_fab_dfm_invalidated_by_gerber_change(env):
+    board = _released(env)
+    _dfm(env, board)
+    m = json.loads((env["bundle"] / "manifest.json").read_text())
+    m["tapeout"]["fab_dfm"]["gerber_sha256"] = "1" * 64
+    (env["bundle"] / "manifest.json").write_text(json.dumps(m))
+    with pytest.raises(wf.WorkflowError):
+        wf.preflight(env["bundle"], board)
+
+
+@pytest.mark.parametrize(
+    "breakage", ["counts_str", "row_str", "mismatch_missing_key", "no_mismatches"]
+)
+def test_fab_dfm_hand_edited_record_is_clean_error(env, breakage):
+    board = _released(env)
+    _dfm(env, board)
+    path = env["bundle"] / "manifest.json"
+    m = json.loads(path.read_text())
+    rec = m["tapeout"]["fab_dfm"]
+    if breakage == "counts_str":
+        rec["counts"] = "x"
+    elif breakage == "row_str":
+        rec["counts"]["fiducial"] = "x"
+    elif breakage == "mismatch_missing_key":
+        rec["mismatches"] = [{"fab_danger": 1}]
+    else:
+        del rec["mismatches"]
+    path.write_text(json.dumps(m))
+    with pytest.raises(wf.WorkflowError, match="Malformed tapeout.fab_dfm"):
+        wf.preflight(env["bundle"], board)
 
 
 def test_fab_dfm_requires_release_signoff(env):

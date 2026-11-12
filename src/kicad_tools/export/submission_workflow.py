@@ -363,20 +363,31 @@ _DFM_LEVELS = ("danger", "warning", "good")
 
 
 def parse_dfm_counts(raw: Any) -> dict[str, dict[str, int]]:
-    """Validate attested JLCDFM counts ``{category: {danger, warning, good}}``."""
+    """Validate attested JLCDFM counts ``{category: {danger, warning, good}}``.
+
+    Every one of the 14 categories and all three levels must be present: a
+    missing value is never filled with zero (it would record a count nobody read).
+    """
     if not isinstance(raw, dict) or not raw:
         raise WorkflowError("DFM counts must be a non-empty JSON object of categories")
+    missing = sorted(set(DFM_CATEGORY_RULES) - set(raw))
+    if missing and not (set(raw) - set(DFM_CATEGORY_RULES)):
+        raise WorkflowError(
+            f"DFM counts must attest all {len(DFM_CATEGORY_RULES)} categories; missing: {missing}"
+        )
     out: dict[str, dict[str, int]] = {}
     for cat, levels in raw.items():
         if cat not in DFM_CATEGORY_RULES:
             raise WorkflowError(
                 f"Unknown DFM category {cat!r} (expected one of {sorted(DFM_CATEGORY_RULES)})"
             )
-        if not isinstance(levels, dict) or set(levels) - set(_DFM_LEVELS):
-            raise WorkflowError(f"DFM category {cat!r} must hold only {list(_DFM_LEVELS)}")
+        if not isinstance(levels, dict) or set(levels) != set(_DFM_LEVELS):
+            raise WorkflowError(
+                f"DFM category {cat!r} must hold exactly {list(_DFM_LEVELS)} (none omitted)"
+            )
         row: dict[str, int] = {}
         for level in _DFM_LEVELS:
-            n = levels.get(level, 0)
+            n = levels[level]
             if isinstance(n, bool) or not isinstance(n, int) or n < 0:
                 raise WorkflowError(f"DFM count {cat}.{level} must be a non-negative integer")
             row[level] = n
@@ -384,10 +395,19 @@ def parse_dfm_counts(raw: Any) -> dict[str, dict[str, int]]:
     return out
 
 
-def kct_rule_counts(report: Any) -> dict[str, int]:
-    """Per-rule violation counts (all severities) from a ``kct check --output`` report."""
+def kct_rule_counts(report: Any, board_sha: str | None = None) -> dict[str, int]:
+    """Per-rule violation counts (all severities) from a ``kct check --output`` report.
+
+    With ``board_sha`` the report must carry a matching ``pcb_sha256`` so the
+    counts cannot come from another board or revision.
+    """
     if not isinstance(report, dict) or not isinstance(report.get("violations"), list):
         raise WorkflowError("kct check report must be a JSON object with a 'violations' list")
+    if board_sha is not None and report.get("pcb_sha256") != board_sha:
+        raise WorkflowError(
+            "kct check report is not for this --board: its pcb_sha256 "
+            f"({report.get('pcb_sha256')!r}) does not match the board's sha256"
+        )
     counts: dict[str, int] = {}
     for v in report["violations"]:
         if isinstance(v, dict):
@@ -477,7 +497,7 @@ def sign_off_bundle(
     if stage == "fab-dfm":
         # Validate input before any manifest change.
         counts = parse_dfm_counts(dfm_counts)
-        kct_counts = kct_rule_counts(kct_report)
+        kct_counts = kct_rule_counts(kct_report, board_sha)
         tapeout = manifest.get("tapeout")
         release = tapeout.get("human_signoff") if isinstance(tapeout, dict) else None
         if not isinstance(release, dict):
@@ -491,8 +511,10 @@ def sign_off_bundle(
             "attested_at": record["signed_at"],
             "gerber_sha256": gerber_sha,
             "board_sha256": board_sha,
+            "source": "JLCDFM, manual attestation",
             "counts": counts,
             "kct_counts": kct_counts,
+            "kct_report_pcb_sha256": board_sha,
             "mismatches": dfm_mismatches(counts, kct_counts),
         }
     elif stage == "fab-review":
@@ -586,7 +608,20 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
         _check_signoff_binding(tapeout, fab_review, board_sha, gerber_sha, "fab_review_signoff")
     fab_dfm = tapeout.get("fab_dfm")
     if fab_dfm is not None:
-        if not isinstance(fab_dfm, dict) or not str(fab_dfm.get("reviewer", "")).strip():
+        if (
+            not isinstance(fab_dfm, dict)
+            or not str(fab_dfm.get("reviewer", "")).strip()
+            or not isinstance(fab_dfm.get("counts"), dict)
+            or not all(
+                isinstance(r, dict) and all(isinstance(r.get(lv), int) for lv in _DFM_LEVELS)
+                for r in fab_dfm["counts"].values()
+            )
+            or not isinstance(fab_dfm.get("mismatches"), list)
+            or not all(
+                isinstance(m, dict) and {"category", "fab_danger", "kct_rules"} <= set(m)
+                for m in fab_dfm["mismatches"]
+            )
+        ):
             raise WorkflowError("Malformed tapeout.fab_dfm in the manifest")
         _check_signoff_binding(tapeout, fab_dfm, board_sha, gerber_sha, "fab_dfm")
     bom = _pick(files, r"bom.*\.csv$", "BOM")

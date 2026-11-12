@@ -3,6 +3,7 @@
 Offline: the website, the API and Chrome are all replaced; any contact fails.
 """
 
+import hashlib
 import json
 import os
 import platform
@@ -268,7 +269,8 @@ def _dfm_args(env, tmp_path, counts):
 
     cfile, kfile = tmp_path / "dfm.json", tmp_path / "kct.json"
     cfile.write_text(json.dumps(counts))
-    kfile.write_text(json.dumps({"violations": []}))
+    board_sha = hashlib.sha256((env["src"] / "b.kicad_pcb").read_bytes()).hexdigest()
+    kfile.write_text(json.dumps({"pcb_sha256": board_sha, "violations": []}))
     parser = argparse.ArgumentParser()
     so.add_arguments(parser)
     args = parser.parse_args(
@@ -293,7 +295,9 @@ def test_fab_dfm_cli_prints_mismatch_and_exits_zero(env, tmp_path, capsys):
     from tests.test_submission_workflow import _released
 
     _released(env)
-    so, args = _dfm_args(env, tmp_path, {"tht_to_smd": {"danger": 2, "warning": 0, "good": 1}})
+    from tests.test_submission_workflow import _full
+
+    so, args = _dfm_args(env, tmp_path, _full(tht_to_smd={"danger": 2, "warning": 0, "good": 1}))
     assert so.run(args) == 0
     out = capsys.readouterr().out
     assert "MISMATCH" in out and "tht_to_smd" in out and "no mapped kct rule" in out
@@ -306,3 +310,15 @@ def test_fab_dfm_cli_refuses_unknown_category(env, tmp_path, capsys):
     so, args = _dfm_args(env, tmp_path, {"bogus": {"danger": 1}})
     assert so.run(args) == 2
     assert "Unknown DFM category" in capsys.readouterr().err
+
+
+def test_fab_dfm_cli_refuses_partial_attestation(env, tmp_path, capsys):
+    from tests.test_submission_workflow import _released
+
+    _released(env)
+    so, args = _dfm_args(env, tmp_path, {"fiducial": {"danger": 0, "warning": 0, "good": 2}})
+    before = (env["bundle"] / "manifest.json").read_bytes()
+    assert so.run(args) == 2
+    err = capsys.readouterr().err
+    assert "REFUSED" in err and "all 14 categories" in err
+    assert (env["bundle"] / "manifest.json").read_bytes() == before
