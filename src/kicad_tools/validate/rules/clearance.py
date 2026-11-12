@@ -1434,6 +1434,20 @@ def _rect_circle_clearance(
     return dist - radius
 
 
+def _layer_min_clearance(design_rules: DesignRules, layer_name: str) -> float:
+    """Same-layer clearance floor for ``layer_name`` (Issue #8836).
+
+    Outer layers (``F.Cu`` / ``B.Cu``) use ``min_clearance_mm``; inner layers
+    use ``min_inner_clearance_mm`` when the profile sets one (e.g. JLCPCB 2 oz
+    outer vs 0.5 oz inner), matching the ``(layer inner)`` rule the DRU
+    generator emits.
+    """
+    inner = getattr(design_rules, "min_inner_clearance_mm", None)
+    if inner is not None and layer_name not in ("F.Cu", "B.Cu"):
+        return inner
+    return design_rules.min_clearance_mm
+
+
 class ClearanceRule(DRCRule):
     """Check minimum clearance between copper elements.
 
@@ -1475,7 +1489,6 @@ class ClearanceRule(DRCRule):
             DRCResults containing any clearance violations found
         """
         results = DRCResults()
-        min_clearance = design_rules.min_clearance_mm
 
         # Build the diff-pair set once for the whole board (suffix
         # inference is cheap; we scan the net table once).  Used to
@@ -1487,6 +1500,7 @@ class ClearanceRule(DRCRule):
         # Process each copper layer
         for layer in pcb.copper_layers:
             layer_name = layer.name
+            min_clearance = _layer_min_clearance(design_rules, layer_name)
             violations = self._check_layer(
                 pcb,
                 layer_name,
@@ -2101,10 +2115,10 @@ class SegmentZoneClearanceRule(DRCRule):
         from shapely import STRtree
         from shapely.geometry import LineString
 
-        min_clearance = design_rules.min_clearance_mm
         origin = board_origin(pcb)
 
         for layer, fills in fills_by_layer.items():
+            min_clearance = _layer_min_clearance(design_rules, layer)
             tree = STRtree([f.polygon for f in fills])
             for seg in pcb.segments_on_layer(layer):
                 if seg.net_number == 0:
@@ -2294,10 +2308,10 @@ class ViaZoneClearanceRule(DRCRule):
         from shapely import STRtree
         from shapely.geometry import Point
 
-        min_clearance = design_rules.min_clearance_mm
         origin = board_origin(pcb)
 
         for layer, fills in fills_by_layer.items():
+            min_clearance = _layer_min_clearance(design_rules, layer)
             tree = STRtree([f.polygon for f in fills])
 
             # --- Vias: a barrel is copper on every layer it spans. ---
