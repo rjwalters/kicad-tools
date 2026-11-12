@@ -167,3 +167,60 @@ def test_registered():
     assert "wire_run_courtyard_overlap" in CHECK_CATEGORIES
     assert "wire_run_courtyard_overlap" in BLOCKING_CATEGORIES
     assert "check_wire_run_courtyard_overlap" in DRCChecker.CHECK_ALL_METHODS
+
+
+# --- reinforce consults the same overlap geometry (Issue #8821) -------------
+
+
+def _bare_board() -> PCB:
+    pcb = _straight_run_pcb(length=100.0)
+    _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=NET, drill=1.0, size=2.0)
+    _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=NET, drill=1.0, size=2.0)
+    return pcb
+
+
+def test_reinforce_refuses_run_under_same_side_courtyard():
+    pcb = _bare_board()
+    _body(pcb, "R1", 70.0, 50.0)
+    before = len(pcb.vias)
+    res = reinforce_net(pcb, NET, design_rules=_rules())
+    assert res.placed_count == 0
+    assert len(pcb.vias) == before
+    leg = res.legs[0]
+    assert leg.status == "unanchored"
+    assert "R1" in leg.reason and "courtyard" in leg.reason
+
+
+def test_reinforce_dry_run_reports_footprint():
+    pcb = _bare_board()
+    _body(pcb, "R1", 70.0, 50.0)
+    res = reinforce_net(pcb, NET, design_rules=_rules(), dry_run=True)
+    assert "R1" in res.legs[0].reason
+
+
+def test_reinforce_clean_when_courtyard_on_other_side():
+    pcb = _bare_board()
+    _body(pcb, "R1", 70.0, 50.0, side="B")
+    res = reinforce_net(pcb, NET, design_rules=_rules())
+    assert res.legs[0].status == "full"
+    assert not [v for v in _run(pcb) if "[run]" in v.message]
+
+
+def test_reinforce_prefers_unobstructed_side():
+    pcb = _bare_board()
+    # Longer copper on F.Cu (blocked) plus a shorter run on B.Cu (clear).
+    for x0 in (30.0, 50.0):
+        pcb.add_trace((x0, 80.0), (x0 + 10.0, 80.0), width=2.0, layer="B.Cu", net=NET)
+    _body(pcb, "R1", 70.0, 50.0)
+    res = reinforce_net(pcb, NET, design_rules=_rules(), all_runs=True)
+    assert res.layer == "B.Cu"
+
+
+def test_reinforce_both_sides_blocked_refused_with_reason():
+    pcb = _bare_board()
+    pcb.add_trace((30.0, 80.0), (60.0, 80.0), width=2.0, layer="B.Cu", net=NET)
+    _body(pcb, "R1", 70.0, 50.0)
+    _body(pcb, "R2", 45.0, 80.0, side="B")
+    res = reinforce_net(pcb, NET, design_rules=_rules(), all_runs=True, layer="B.Cu")
+    assert res.placed_count == 0
+    assert any("R2" in leg.reason for leg in res.legs if leg.layer == "B.Cu")
