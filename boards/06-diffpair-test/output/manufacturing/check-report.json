@@ -1,7 +1,7 @@
 {
   "file": "output/diffpair_test_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "67c61dd5d189b8dff012eda4ce0a27b74dda4b5cb387e51eb2b0199c1c30fd05",
+  "pcb_sha256": "3903f0c51534fab299a99e6ce624cfa7841e883fd3e19d1dad52a5bed05cfcc7",
   "layers": 4,
   "summary": {
     "errors": 0,
@@ -484,18 +484,18 @@
     "schematic_missing": false
   },
   "routing_quality": {
-    "total_segments": 182,
+    "total_segments": 183,
     "nets_with_copper": 18,
-    "segments_per_net": 10.11111111111111,
+    "segments_per_net": 10.166666666666666,
     "zero_length_count": 0,
     "median_length_mm": 1.1999999999999886,
-    "fragment_count": 31,
-    "fragment_fraction": 0.17032967032967034,
-    "orthogonal_count": 134,
+    "fragment_count": 34,
+    "fragment_fraction": 0.18579234972677597,
+    "orthogonal_count": 135,
     "diagonal_45_count": 48,
     "off_axis_count": 0,
     "staircase_step_count": 2,
-    "staircase_fraction": 0.01098901098901099
+    "staircase_fraction": 0.01092896174863388
   },
   "fabrication_process": {
     "process_id": "jlcpcb-tier1-pofv-4l",
