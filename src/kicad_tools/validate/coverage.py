@@ -72,6 +72,8 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "routing_policy",
         "solder_mask",
         "mask_to_copper",
+        "mask_negative_expansion",
+        "mask_multi_segment",
         "via_in_pad",
         "via_type",
         "zones",
@@ -247,6 +249,14 @@ def precheck(
         unevaluated, total = _unevaluated_courtyards(checker)
         if unevaluated:
             return unknown(category, f"no_courtyard_geometry ({unevaluated} of {total} footprints)")
+    if category in ("mask_negative_expansion", "mask_multi_segment"):
+        # Issue #8847: an unsaved board or unmodelled mask feature means the
+        # opening geometry is partial, so zero findings is not a pass.
+        snap_fn = getattr(checker, "mask_geometry_snapshot", None)
+        if snap_fn is not None:
+            _snap, reason = snap_fn()
+            if reason:
+                return unknown(category, reason)
     if category == "sch_fields":
         if drc_only:
             return skipped(category, "drc_only")

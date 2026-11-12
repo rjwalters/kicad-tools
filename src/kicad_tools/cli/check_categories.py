@@ -47,6 +47,8 @@ CHECK_CATEGORIES = [
     "solder_mask",
     "spec_conformance",
     "mask_to_copper",
+    "mask_negative_expansion",
+    "mask_multi_segment",
     "thermal_asymmetry",
     "via_in_pad",
     "via_type",
