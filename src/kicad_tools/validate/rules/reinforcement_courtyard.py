@@ -94,6 +94,41 @@ def _body_polygon(fp: Footprint, side: str, Polygon: Any, box: Any) -> Any | Non
     return box(min(xs), min(ys), max(xs), max(ys))
 
 
+def run_courtyard_overlaps(
+    points: list[_Point],
+    side: str,
+    footprints: Any,
+    inflate: float,
+    body: Any | None = None,
+) -> list[tuple[Footprint, float]]:
+    """Same-side bodies a run's envelope overlaps: ``[(footprint, overlap_mm), ...]``.
+
+    The single run-vs-courtyard test shared by :class:`ReinforcementCourtyardRule`
+    and ``kct pcb reinforce`` (Issue #8821), so the generator can never plan a
+    run the check then rejects. ``inflate`` is wire radius + :data:`RUN_CLEARANCE_MM`;
+    ``body(fp, side)`` optionally supplies a cached polygon lookup.
+    """
+    from shapely.geometry import LineString, Polygon, box  # type: ignore[import-untyped]
+
+    if body is None:
+
+        def body(fp: Footprint, s: str) -> Any | None:
+            return _body_polygon(fp, s, Polygon, box)
+
+    line = LineString(points)
+    found: list[tuple[Footprint, float]] = []
+    for fp in footprints:
+        if _fp_side(fp) != side:
+            continue
+        poly = body(fp, side)
+        if poly is None:
+            continue
+        zone = poly.buffer(inflate)
+        if line.intersects(zone):
+            found.append((fp, zone.intersection(line).length))
+    return found
+
+
 class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
     """Flag wire runs and end holes that collide with component bodies (#8820).
 
@@ -140,7 +175,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
     def _check_net_bodies(
         self, pcb: PCB, rf: Any, net: str, resolutions: list, results: DRCResults
     ) -> None:
-        from shapely.geometry import LineString, Point, Polygon, box  # type: ignore[import-untyped]
+        from shapely.geometry import LineString, Point, Polygon, box
 
         from kicad_tools.core.geometry import rotate_pad_offset
         from kicad_tools.physics.wire_gauge import anchor_drill_for_awg, bare_copper_diameter_mm
@@ -199,16 +234,12 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
             # ---- run vs same-side bodies / opposite-side THT pins ----------
             if side is not None:
                 inflate = wire_r + RUN_CLEARANCE_MM
+                for fp, length in run_courtyard_overlaps(
+                    leg.points, side, pcb.footprints, inflate, body
+                ):
+                    self._emit_run(results, net, leg.layer, desc, fp, side, length)
                 for fp in pcb.footprints:
-                    if _fp_side(fp) == side:
-                        poly = body(fp, side)
-                        if poly is None:
-                            continue
-                        zone = poly.buffer(inflate)
-                        if line.intersects(zone):
-                            length = zone.intersection(line).length
-                            self._emit_run(results, net, leg.layer, desc, fp, side, length)
-                    else:
+                    if _fp_side(fp) != side:
                         for pad in fp.pads:
                             if pad.type != "thru_hole" or pad.net_number == net_number:
                                 continue

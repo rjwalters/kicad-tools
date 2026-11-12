@@ -2059,6 +2059,31 @@ def _plan_mask_opening(
     leg.mask_status = MASK_OPENED
 
 
+def _courtyard_overlaps(
+    pcb: PCB, layer: str, points: list[tuple[float, float]], gauge_awg: int
+) -> list[tuple[str, float]]:
+    """Same-side bodies a wire along ``points`` would cross: ``[(ref, mm), ...]``.
+
+    Reuses the geometry of the ``wire_run_courtyard_overlap`` check (Issue
+    #8821) -- no second implementation -- so reinforce never plans a run the
+    check then rejects. Empty for an inner layer or a degenerate polyline.
+    """
+    side = "F" if layer == "F.Cu" else "B" if layer == "B.Cu" else None
+    if side is None or len(points) < 2:
+        return []
+    from kicad_tools.physics.wire_gauge import bare_copper_diameter_mm
+    from kicad_tools.validate.rules.reinforcement_courtyard import (
+        RUN_CLEARANCE_MM,
+        run_courtyard_overlaps,
+    )
+
+    inflate = bare_copper_diameter_mm(gauge_awg) / 2.0 + RUN_CLEARANCE_MM
+    return [
+        (fp.reference, length)
+        for fp, length in run_courtyard_overlaps(points, side, pcb.footprints, inflate)
+    ]
+
+
 def _reinforce_ends(
     pcb: PCB,
     result: ReinforceResult,
@@ -2119,7 +2144,22 @@ def _reinforce_ends(
             candidates.extend(legs)
     else:
         if target_layer is None:
-            target_layer = max(by_layer, key=lambda lay: sum(_seg_length(s) for s in by_layer[lay]))
+            # Prefer a side whose runs cross no same-side courtyard (#8821);
+            # among equals, the layer with the most copper, as before.
+            def _layer_key(lay: str) -> tuple[bool, float]:
+                blocked = any(
+                    _courtyard_overlaps(
+                        pcb,
+                        lay,
+                        _run_points(c.run),
+                        result.wire_gauge_awg,
+                    )
+                    for c in _derive_legs(by_layer[lay], lay, {})
+                    if c.status is None
+                )
+                return (blocked, -sum(_seg_length(s) for s in by_layer[lay]))
+
+            target_layer = min(by_layer, key=_layer_key)
         for lay in sorted(by_layer):
             legs = _derive_legs(by_layer[lay], lay, original_ids)
             if lay != target_layer:
@@ -2302,6 +2342,14 @@ def _reinforce_ends(
             leg.status, leg.reason = cand.status, cand.reason
         elif index in not_selected:
             leg.status, leg.reason = LEG_UNANCHORED, not_selected[index]
+        elif overlaps := _courtyard_overlaps(pcb, cand.layer, g.points, result.wire_gauge_awg):
+            attempted_here = True
+            leg.status = LEG_UNANCHORED
+            leg.reason = (
+                "refused: wire run would overlap the same-side courtyard of "
+                + ", ".join(f"{ref} ({mm:.2f} mm)" for ref, mm in overlaps)
+                + " (wire_run_courtyard_overlap)"
+            )
         else:
             attempted_here = True
             points = g.points
