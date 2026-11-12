@@ -136,3 +136,60 @@ def test_covered_negatives():
 def test_narrower_container_not_covering():
     res = _run([_Seg((0, 0), (10, 0), width=0.1), _Seg((2, 0), (5, 0), width=0.2)])
     assert "redundant_copper_covered" not in _ids(res)
+
+
+# --- redundant_copper_staircase (Issue #8831) -------------------------------
+
+_STAIR_PTS = [
+    (0, 0),
+    (4, 0),
+    (6, 2),
+    (10, 2),
+    (12, 4),
+    (16, 4),
+    (18, 6),
+    (22, 6),
+    (22, 8),
+    (24, 10),
+]
+
+
+def _staircase(width=2.6):
+    return [
+        _Seg(a, b, width=width, net_name="PWR")
+        for a, b in zip(_STAIR_PTS, _STAIR_PTS[1:], strict=False)
+    ]
+
+
+def _stair_findings(res):
+    return [v for v in res.violations if v.rule_id == "redundant_copper_staircase"]
+
+
+def test_staircase_with_free_straight_path_is_flagged_once():
+    found = _stair_findings(_run(_staircase()))
+    assert len(found) == 1
+    assert found[0].severity == "warning"
+    assert found[0].location == (0, 0)
+    assert "(24.00, 10.00)" in found[0].message and "saves" in found[0].message
+
+
+def test_staircase_not_flagged_when_alternative_hits_foreign_copper():
+    # Foreign track sits on the diagonal/horizontal replacement, clear of the
+    # original staircase's own legs.
+    blocker = _Seg((12, 9), (20, 9), width=0.2, net_number=2, net_name="OTHER")
+    # replacement diag (0,0)->(10,10) then H to (24,10): blocker at y=9 is hit
+    # by the H leg's 2.6 mm width; the orthogonal-first path hits it too.
+    blocker2 = _Seg((5, 0.5), (5, 3), width=0.2, net_number=2, net_name="OTHER")
+    res = _run([*_staircase(), blocker, blocker2])
+    assert _stair_findings(res) == []
+
+
+def test_serpentine_is_not_a_staircase():
+    pts = [(0, 0), (0, 5), (2, 5), (2, 1), (4, 1), (4, 6)]
+    segs = [_Seg(a, b) for a, b in zip(pts, pts[1:], strict=False)]
+    assert _stair_findings(_run(segs)) == []
+
+
+def test_already_optimal_path_is_not_a_staircase():
+    res = _run([_Seg((0, 0), (3, 3)), _Seg((3, 3), (9, 3)), _Seg((9, 3), (12, 3))])
+    assert _stair_findings(res) == []

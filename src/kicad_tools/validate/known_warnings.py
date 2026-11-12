@@ -42,6 +42,7 @@ LOCATED_WARNING_RULES: frozenset[str] = frozenset(
         "redundant_copper_detour",
         "redundant_copper_duplicate",
         "redundant_copper_fragments",
+        "redundant_copper_staircase",
         "redundant_copper_via_offcentre",
     }
 )
