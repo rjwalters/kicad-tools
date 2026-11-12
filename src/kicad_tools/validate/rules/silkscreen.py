@@ -1285,6 +1285,199 @@ def check_silk_over_copper(
     return results
 
 
+def _mask_circle_geometry(
+    graphic: FootprintGraphic | BoardGraphic, xf: _Transform
+) -> _Geometry | None:
+    """Mask opening drawn as a circle: filled disc, or a ring of stroke width."""
+    from shapely.geometry import Point
+
+    center = getattr(graphic, "center", None)
+    if center is None:
+        return None
+    c = xf(center)
+    e = xf(graphic.end)
+    radius = math.hypot(e[0] - c[0], e[1] - c[1])
+    width = graphic.stroke_width
+    if radius <= 0:
+        return None
+    disc = Point(c).buffer(radius + (width / 2.0 if width > 0 else 0.0))
+    if graphic.is_filled:
+        return disc
+    if width <= 0:
+        return None
+    return disc.difference(Point(c).buffer(max(radius - width / 2.0, 0.0)))
+
+
+def _mask_arc_geometry(
+    graphic: FootprintGraphic | BoardGraphic, xf: _Transform
+) -> _Geometry | None:
+    """Mask opening drawn as an arc: the 3-point arc stroked at its width."""
+    from shapely.geometry import LineString
+
+    mid = getattr(graphic, "mid", None)
+    width = graphic.stroke_width
+    if mid is None or width <= 0:
+        return None
+    (x1, y1), (x2, y2), (x3, y3) = xf(graphic.start), xf(mid), xf(graphic.end)
+    d = 2.0 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2))
+    if abs(d) < 1e-12:  # collinear -> straight stroke
+        return LineString([(x1, y1), (x3, y3)]).buffer(width / 2.0)
+    s1, s2, s3 = x1 * x1 + y1 * y1, x2 * x2 + y2 * y2, x3 * x3 + y3 * y3
+    ux = (s1 * (y2 - y3) + s2 * (y3 - y1) + s3 * (y1 - y2)) / d
+    uy = (s1 * (x3 - x2) + s2 * (x1 - x3) + s3 * (x2 - x1)) / d
+    r = math.hypot(x1 - ux, y1 - uy)
+    a1 = math.atan2(y1 - uy, x1 - ux)
+    a2 = math.atan2(y2 - uy, x2 - ux)
+    a3 = math.atan2(y3 - uy, x3 - ux)
+    # Pick the sweep direction that passes through the midpoint.
+    ccw = (a2 - a1) % (2 * math.pi) < (a3 - a1) % (2 * math.pi)
+    sweep = (a3 - a1) % (2 * math.pi) if ccw else -((a1 - a3) % (2 * math.pi))
+    n = max(8, int(abs(sweep) / (math.pi / 32)))
+    pts = [
+        (ux + r * math.cos(a1 + sweep * i / n), uy + r * math.sin(a1 + sweep * i / n))
+        for i in range(n + 1)
+    ]
+    return LineString(pts).buffer(width / 2.0)
+
+
+def _mask_graphic_geometry(
+    graphic: FootprintGraphic | BoardGraphic, transform: _Transform | None
+) -> _Geometry | None:
+    """Shapely geometry of the mask removed by one graphic on a ``*.Mask`` layer."""
+    from shapely.geometry import LineString, Polygon
+
+    def xf(p: tuple[float, float]) -> tuple[float, float]:
+        return transform(p) if transform is not None else p
+
+    gtype = graphic.graphic_type
+    width = graphic.stroke_width
+    if gtype == "circle":
+        return _mask_circle_geometry(graphic, xf)
+    if gtype == "arc":
+        return _mask_arc_geometry(graphic, xf)
+    if gtype == "poly":
+        return _poly_geometry(graphic, xf, width)
+    if gtype == "line":
+        if width <= 0:
+            return None
+        coords = [xf(graphic.start), xf(graphic.end)]
+        if coords[0] == coords[1]:
+            return None
+        return LineString(coords).buffer(width / 2.0)
+    if gtype == "rect":
+        sx, sy = graphic.start
+        ex, ey = graphic.end
+        ring = [xf(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey), (sx, sy))]
+        if graphic.is_filled:
+            poly = Polygon(ring)
+            return poly.buffer(width / 2.0) if width > 0 else poly
+        return LineString(ring).buffer(width / 2.0) if width > 0 else None
+    return None
+
+
+def _iter_graphic_mask_apertures(pcb: PCB) -> Iterator[tuple[str, _Geometry, str]]:
+    """Yield ``(side, geom, label)`` for mask openings drawn as graphics (#8861).
+
+    Covers ``gr_*`` and ``fp_*`` shapes on ``F.Mask`` / ``B.Mask``; each one
+    removes solder mask whether or not copper lies beneath it.  Coordinates are
+    in the same board-relative frame as :func:`_iter_silk_elements`.
+    """
+    sides = {"F.Mask": "F", "B.Mask": "B"}
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+
+    def to_board(p: tuple[float, float]) -> tuple[float, float]:
+        return (p[0] - ox, p[1] - oy)
+
+    board_xf = to_board if (ox or oy) else None
+    for footprint in pcb.footprints:
+        transform = _fp_transform(footprint)
+        for graphic in footprint.graphics:
+            side = sides.get(graphic.layer)
+            if side is None:
+                continue
+            geom = _mask_graphic_geometry(graphic, transform)
+            if geom is None or geom.is_empty:
+                continue
+            c = geom.centroid
+            yield (
+                side,
+                geom,
+                (
+                    f"mask opening (fp_{graphic.graphic_type} on {graphic.layer} of "
+                    f"{footprint.reference}) at ({c.x:.3f}, {c.y:.3f})"
+                ),
+            )
+    for board_graphic in pcb.graphics:
+        side = sides.get(board_graphic.layer)
+        if side is None:
+            continue
+        geom = _mask_graphic_geometry(board_graphic, board_xf)
+        if geom is None or geom.is_empty:
+            continue
+        c = geom.centroid
+        yield (
+            side,
+            geom,
+            (
+                f"mask opening (gr_{board_graphic.graphic_type} on {board_graphic.layer}) "
+                f"at ({c.x:.3f}, {c.y:.3f})"
+            ),
+        )
+
+
+def check_silk_over_mask_opening(
+    pcb: PCB,
+    design_rules: DesignRules,
+) -> DRCResults:
+    """Silk inside a solder-mask opening drawn as board/footprint graphics (#8861).
+
+    ``check_silk_over_copper`` only knows pad and untented-via openings.  A
+    deliberate bare strip drawn as ``gr_line`` / ``gr_circle`` / ``gr_poly`` ...
+    on ``F.Mask`` / ``B.Mask`` is invisible to it, yet silk printed there lands
+    on bare copper or laminate.  Each (silk item, opening) pair yields one
+    ``silk_over_mask_opening`` **error** naming the opening kind and the
+    overlap area.  Pad/via hits stay ``silk_over_copper`` warnings.
+    """
+    require_shapely("silk-over-mask-opening geometry")
+    from shapely import STRtree
+
+    results = DRCResults(rules_checked=1)
+    openings: dict[str, list[tuple[_Geometry, str]]] = {"F": [], "B": []}
+    for side, geom, label in _iter_graphic_mask_apertures(pcb):
+        openings[side].append((geom, label))
+    trees = {s: STRtree([g for g, _ in e]) for s, e in openings.items() if e}
+    if not trees:
+        return results
+
+    found: list[DRCViolation] = []
+    for side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
+        entries = openings.get(side)
+        if not entries:
+            continue
+        for idx in trees[side].query(geom):
+            ap_geom, ap_label = entries[int(idx)]
+            if not geom.intersects(ap_geom):
+                continue
+            area = geom.intersection(ap_geom).area
+            if area < _MIN_OVERLAP_AREA_MM2:
+                continue
+            found.append(
+                DRCViolation(
+                    rule_id="silk_over_mask_opening",
+                    severity="error",
+                    message=(
+                        f"Silkscreen {silk_label} lies in {ap_label} (overlap {area:.2f} mm2)"
+                    ),
+                    location=location,
+                    layer=layer,
+                    items=(silk_label, ap_label),
+                )
+            )
+    for violation in sorted(found, key=lambda v: (v.items[0], v.items[1])):
+        results.add(violation)
+    return results
+
+
 def check_silk_overlap(
     pcb: PCB,
     design_rules: DesignRules,
@@ -1759,6 +1952,7 @@ def check_all_silkscreen(
     )
     results.merge(check_silkscreen_over_pads(pcb, design_rules))
     results.merge(check_silk_over_copper(pcb, design_rules))
+    results.merge(check_silk_over_mask_opening(pcb, design_rules))
     from .factory_clearance import check_silk_pad_clearance
 
     results.merge(check_silk_pad_clearance(pcb, design_rules))
