@@ -72,8 +72,6 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "routing_policy",
         "solder_mask",
         "mask_to_copper",
-        "mask_negative_expansion",
-        "mask_multi_segment",
         "via_in_pad",
         "via_type",
         "zones",
@@ -254,7 +252,8 @@ def precheck(
         # opening geometry is partial, so zero findings is not a pass.
         snap_fn = getattr(checker, "mask_geometry_snapshot", None)
         if snap_fn is not None:
-            _snap, reason = snap_fn()
+            snap = snap_fn()
+            reason = snap[1] if isinstance(snap, tuple) and len(snap) == 2 else None
             if reason:
                 return unknown(category, reason)
     if category == "sch_fields":

@@ -1715,7 +1715,7 @@ class DRCChecker:
         from an unsaved or modified PCB object reports coverage as unknown
         rather than a clean pass (Issue #8847).
         """
-        cached = getattr(self, "_mask_snapshot_cache", None)
+        cached: tuple[Any, str | None] | None = getattr(self, "_mask_snapshot_cache", None)
         if cached is not None:
             return cached
         from .mask_geometry import inspect_mask_geometry
