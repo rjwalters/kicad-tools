@@ -622,7 +622,7 @@ def resolve_clearance(
     :attr:`MfrLimits.min_clearance` is layer- and copper-agnostic (jlcpcb
     0.127mm everywhere), which was stricter than the fab on 4-/6-layer
     boards (0.1016 / 0.0889mm) and, worse, *looser* than it on 2-layer 2oz
-    (0.1524mm).  The profile is the single source of truth; the flat value
+    (0.16mm).  The profile is the single source of truth; the flat value
     is only the fallback.
 
     With ``layers=None`` (the caller does not know the stackup) the result
@@ -713,7 +713,7 @@ def resolve_min_trace_width(
     every configuration), whereas the DRC that ``kct check`` runs resolves
     ``get_profile(mfr).get_design_rules(layers, copper_oz).min_trace_width_mm``
     -- a per-``<layers>layer_<oz>oz`` value that is *higher* than
-    ``min_trace`` on heavy copper (jlcpcb ``4layer_2oz`` = 0.1524mm vs
+    ``min_trace`` on heavy copper (jlcpcb ``4layer_2oz`` = 0.15mm vs
     ``min_trace`` = 0.127mm).  Flooring at ``min_trace`` would be a silent
     no-op for exactly the configuration that reported this bug.
 
