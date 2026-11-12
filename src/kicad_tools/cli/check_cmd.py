@@ -3591,6 +3591,8 @@ def run_selected_checks(
         "solder_mask": checker.check_solder_mask_pads,
         "spec_conformance": _spec_conformance_check,
         "mask_to_copper": checker.check_mask_to_copper,
+        "mask_negative_expansion": checker.check_mask_negative_expansion,
+        "mask_multi_segment": checker.check_mask_multi_segment,
         "thermal_asymmetry": checker.check_thermal_asymmetry,
         "via_in_pad": checker.check_via_in_pad,
         "via_type": checker.check_via_type_capability,
