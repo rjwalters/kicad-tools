@@ -224,3 +224,56 @@ def test_reinforce_both_sides_blocked_refused_with_reason():
     res = reinforce_net(pcb, NET, design_rules=_rules(), all_runs=True, layer="B.Cu")
     assert res.placed_count == 0
     assert any("R2" in leg.reason for leg in res.legs if leg.layer == "B.Cu")
+
+
+# --- finding location and doubled copper (Issue #8866) ----------------------
+
+
+def test_run_finding_is_located_on_the_run_not_origin():
+    pcb = _board()
+    _body(pcb, "R1", 70.0, 50.0)
+    runs = [v for v in _run(pcb) if "[run]" in v.message]
+    assert runs
+    for v in runs:
+        x, y = v.location
+        assert (x, y) != (0.0, 0.0)
+        assert abs(y - 50.0) < 1e-6  # on the straight F.Cu run at y=50
+        assert 20.0 <= x <= 120.0
+        assert abs(x - 70.0) <= 3.0 + 1.0 + 1.0 + 1.5  # near the courtyard
+
+
+def test_pin_finding_is_located_on_the_run():
+    pcb = _board()
+    pcb.add_net("OTHER")
+    pad = Pad(
+        number="1",
+        type="thru_hole",
+        shape="circle",
+        position=(0.0, 0.0),
+        size=(2.0, 2.0),
+        layers=["*.Cu"],
+        net_number=pcb.get_net_by_name("OTHER").number,
+        net_name="OTHER",
+        drill=1.0,
+    )
+    _body(pcb, "Q1", 70.0, 51.0, side="B", pads=[pad])
+    pcb._footprints[-1].graphics = []
+    pins = [v for v in _run(pcb) if "pin 1" in v.message]
+    assert pins
+    assert abs(pins[0].location[1] - 50.0) < 1e-6
+    assert abs(pins[0].location[0] - 70.0) < 1e-6
+
+
+def test_doubled_copper_routed_around_body_is_clean():
+    """Stitched F.Cu/B.Cu copper that detours around a body: the run follows
+    the copper, never the endpoint chord, so no overlap is reported."""
+    pcb = PCB.create(width=200, height=100, center=False)
+    detour = [(20.0, 50.0), (60.0, 50.0), (60.0, 70.0), (80.0, 70.0), (80.0, 50.0), (120.0, 50.0)]
+    for layer in ("F.Cu", "B.Cu"):
+        for a, b in zip(detour, detour[1:], strict=False):
+            pcb.add_trace(a, b, width=2.6, layer=layer, net=NET)
+    _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=NET, drill=1.0, size=2.0)
+    _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=NET, drill=1.0, size=2.0)
+    # Body sits on the chord between the ends, inside the detour.
+    _body(pcb, "R1", 70.0, 50.0, half=3.0)
+    assert not [v for v in _run(pcb) if "[run]" in v.message and "R1" in v.message]

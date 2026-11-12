@@ -30,6 +30,7 @@ class _Via:
 class _PCB:
     segments: list = field(default_factory=list)
     vias: list = field(default_factory=list)
+    board_origin: tuple[float, float] = (0.0, 0.0)
 
 
 def _run(segments=(), vias=()):
@@ -193,3 +194,25 @@ def test_serpentine_is_not_a_staircase():
 def test_already_optimal_path_is_not_a_staircase():
     res = _run([_Seg((0, 0), (3, 3)), _Seg((3, 3), (9, 3)), _Seg((9, 3), (12, 3))])
     assert _stair_findings(res) == []
+
+
+def test_staircase_message_uses_sheet_absolute_coordinates_with_origin():
+    """Issue #8868: message coordinates share the frame of ``location``."""
+    from kicad_tools.validate.checker import DRCChecker
+
+    origin = (68.5, 55.0)
+    pcb = _PCB(_staircase(), [], origin)
+    # Same path DRCChecker.check_redundant_copper takes.
+    checker = DRCChecker.__new__(DRCChecker)
+    checker.pcb = pcb
+    res = checker._absolutize(RedundantCopperRule().check(pcb, None))
+    (v,) = _stair_findings(res)
+    assert v.location == (68.5, 55.0)
+    assert f"from ({v.location[0]:.2f}, {v.location[1]:.2f})" in v.message
+    assert "(92.50, 65.00)" in v.message
+    assert "(24.00, 10.00)" not in v.message
+
+
+def test_staircase_message_unchanged_at_zero_origin():
+    (v,) = _stair_findings(_run(_staircase()))
+    assert "from (0.00, 0.00) to (24.00, 10.00)" in v.message

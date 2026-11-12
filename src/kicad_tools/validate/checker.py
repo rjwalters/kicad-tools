@@ -148,6 +148,7 @@ class DRCChecker:
         authored_min_clearance_mm: float | None = None,
         require_routing_policy: bool = False,
         routing_policy_defer_pair_vias: bool = True,
+        strict_copper: bool = True,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -252,6 +253,13 @@ class DRCChecker:
                 ``routing_policy`` leaves the via cap of engaged diff-pair
                 nets to ``diffpair_uncoupled_length`` so it is not reported
                 twice.  Pass False when that category does not run.
+            strict_copper: When True (default), a heavier-than-1oz outer
+                weight with no profile entry raises
+                ``UnsupportedCopperWeightError`` instead of silently using
+                1 oz floors (Issue #8836).  Only pass False from a caller
+                that applies the DFM threshold table's fail-closed
+                ``incomplete`` verdict right after construction
+                (``kct check``, Issue #8839).
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -329,7 +337,13 @@ class DRCChecker:
 
         # Load manufacturer profile and design rules
         profile = get_profile(manufacturer)
-        self.design_rules: DesignRules = profile.get_design_rules(layers, copper_oz, strict=True)
+        # Strict by default (Issue #8836) so every caller fails closed on an
+        # unsupported copper weight; ``kct check`` opts out via
+        # ``strict_copper=False`` because ``_apply_dfm_table`` yields the
+        # ``incomplete`` verdict instead (Issue #8839).
+        self.design_rules: DesignRules = profile.get_design_rules(
+            layers, copper_oz, strict=strict_copper
+        )
 
         # Issue #4326: override the ampacity copper weights ONLY.
         #
