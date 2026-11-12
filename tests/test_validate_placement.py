@@ -34,8 +34,10 @@ class _FakePCB:
         footprints: list[_FakeFootprint],
         outline_polygon: list[tuple[float, float]],
         outline_segments: list[tuple[tuple[float, float], tuple[float, float]]] | None = None,
+        board_origin: tuple[float, float] = (0.0, 0.0),
     ) -> None:
         self.footprints = footprints
+        self.board_origin = board_origin
         self._outline_polygon = outline_polygon
         # Derive segments from consecutive polygon vertices if not given.
         if outline_segments is not None:
@@ -232,6 +234,25 @@ class TestFootprintOutsideBoardRule:
 
         assert len(results.violations) == 1
         assert results.violations[0].items == ("R1",)
+
+    def test_message_coordinates_are_sheet_absolute(self):
+        """Message shows footprint.position + board_origin, matching the absolutized location."""
+        from kicad_tools.validate.checker import DRCChecker
+
+        pcb = _FakePCB(
+            footprints=[_FakeFootprint("R1", (-5.0, 5.0))],
+            outline_polygon=[(0, 0), (10, 0), (10, 10), (0, 10)],
+            board_origin=(100.0, 50.0),
+        )
+        raw = FootprintOutsideBoardRule().check(pcb, _DUMMY_RULES)
+        v = raw.violations[0]
+        assert v.location == (-5.0, 5.0)  # board-relative until _absolutize
+        assert "(95.00, 55.00)" in v.message
+
+        checker = DRCChecker.__new__(DRCChecker)
+        checker.pcb = pcb
+        shifted = checker._absolutize(raw).violations[0]
+        assert shifted.location == (95.0, 55.0)
 
     def test_no_footprints(self):
         """Empty footprint list produces no violations."""

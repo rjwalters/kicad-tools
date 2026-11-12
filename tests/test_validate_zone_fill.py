@@ -34,9 +34,10 @@ class _FakeZone:
 # ---------------------------------------------------------------------------
 
 
-def _make_pcb(zones: list[_FakeZone]) -> MagicMock:
+def _make_pcb(zones: list[_FakeZone], board_origin: tuple[float, float] = (0.0, 0.0)) -> MagicMock:
     pcb = MagicMock()
     pcb.zones = zones
+    pcb.board_origin = board_origin
     return pcb
 
 
@@ -231,3 +232,26 @@ def test_parsed_rule_area_is_not_an_unfinished_copper_pour():
     assert not rule.check(_make_pcb([keepout]), _make_design_rules()).violations
     result = rule.check(_make_pcb([keepout, unfinished]), _make_design_rules())
     assert sorted(v.rule_id for v in result.violations) == ["zone_fill_disabled", "zone_no_net"]
+
+
+def test_message_bbox_is_sheet_absolute_on_nonzero_origin():
+    """Message bbox shifts by board_origin; location is shifted once by _absolutize."""
+    from kicad_tools.validate.checker import DRCChecker
+
+    zone = _FakeZone(
+        is_filled=True,
+        filled_polygons=[],
+        polygon=[(0.0, 0.0), (10.0, 0.0), (10.0, 20.0), (0.0, 20.0)],
+    )
+    pcb = _make_pcb([zone], board_origin=(100.0, 50.0))
+    raw = ZoneFillRule().check(pcb, _make_design_rules())
+    v = raw.violations[0]
+    assert v.location == (5.0, 10.0)  # board-relative until _absolutize
+    assert "(100.00, 50.00) to (110.00, 70.00) mm" in v.message
+
+    checker = DRCChecker.__new__(DRCChecker)
+    checker.pcb = pcb
+    shifted = checker._absolutize(raw).violations[0]
+    assert shifted.location == (105.0, 60.0)
+    # message bbox centre equals the absolutized location
+    assert shifted.location == ((100.0 + 110.0) / 2, (50.0 + 70.0) / 2)
