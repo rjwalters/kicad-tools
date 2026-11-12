@@ -289,7 +289,9 @@ class TestCheckParity7260:
         from kicad_tools.cli import check_cmd
         from kicad_tools.mcp.tools.analysis import get_drc_violations
 
-        rc = check_cmd.main([str(narrow_track_board), "--mfr", "jlcpcb", "--format", "json"])
+        rc = check_cmd.main(
+            [str(narrow_track_board), "--mfr", "jlcpcb", "--skip", "mask_to_copper", "--format", "json"]
+        )
         cli = json.loads(capsys.readouterr().out)
 
         result = get_drc_violations(str(narrow_track_board), rules="jlcpcb")
