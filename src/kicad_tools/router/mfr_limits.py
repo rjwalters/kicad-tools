@@ -34,7 +34,7 @@ class MfrLimits:
             ``kct check --mfr`` and the emitted ``.kicad_dru`` enforce comes
             from the manufacturer profile via :func:`resolve_clearance`
             (Issue #6561), which differs on e.g. jlcpcb 4-layer (0.1016mm),
-            6-layer (0.0889mm) and 2-layer 2oz (0.1524mm).
+            6-layer (0.0889mm) and 2-layer 2oz (0.16mm).
         min_via_drill: Minimum via drill diameter
         min_via_annular: Minimum via annular ring width
         min_via_diameter: Computed minimum via diameter (drill + 2*annular)

@@ -1,9 +1,9 @@
 (version 1)
 (rule "Trace Width - JLCPCB"
   (condition "A.Type == 'track'")
-  (constraint track_width (min 0.1524mm)))
+  (constraint track_width (min 0.16mm)))
 (rule "Clearance - JLCPCB"
-  (constraint clearance (min 0.1524mm)))
+  (constraint clearance (min 0.16mm)))
 (rule "Silk to Pad - JLCPCB"
   (condition "A.Type == 'Pad' || B.Type == 'Pad'")
   (constraint silk_clearance (min 0.15mm)))

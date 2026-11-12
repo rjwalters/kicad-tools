@@ -38,8 +38,8 @@ design_rules:
     inner_copper_oz: 0.0            # No inner layers
 
   2layer_2oz:
-    min_trace_width_mm: 0.1524      # 6 mil (per JLCPCB published specs for 2oz copper)
-    min_clearance_mm: 0.1524        # 6 mil (per JLCPCB published specs for 2oz copper)
+    min_trace_width_mm: 0.16        # 6.5 mil; JLCPCB pcb-capabilities page, 2oz outer, verified 2026-11-12 (#8865): 2-layer 0.16/0.16 mm
+    min_clearance_mm: 0.16          # 6.5 mil; same source
     min_via_drill_mm: 0.3
     min_via_diameter_mm: 0.6
     min_annular_ring_mm: 0.15
@@ -125,8 +125,8 @@ design_rules:
     inner_copper_oz: 1.0
 
   4layer_2oz:
-    min_trace_width_mm: 0.1524      # 6 mil outer (per JLCPCB published specs for 2oz copper)
-    min_clearance_mm: 0.1524        # 6 mil OUTER floor for 2oz copper (JLCPCB capabilities page: 0.15 mm multilayer 2oz, per issue #8836; re-confirm on live page)
+    min_trace_width_mm: 0.15        # JLCPCB pcb-capabilities page, 2oz outer, verified 2026-11-12 (#8865): multilayer 0.15/0.15 mm (6/6 mil); page gives no separate inner-layer 2oz figure
+    min_clearance_mm: 0.15          # OUTER floor, same source (#8865: was 0.1524, stricter than the fab)
     min_inner_clearance_mm: 0.1016  # 4 mil inner-layer floor (inner copper is lighter)
     min_via_drill_mm: 0.2
     min_via_diameter_mm: 0.45
