@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-12
 
+- **PR #8827**: feat: report ampacity copper weights and name copper-flag stale cause
+- **Issue #8826** (closed): kct check --copper applies the outer weight to inner layers; waivers go stale between check and readiness
+- **PR #8824**: chore(board-06): regenerate committed routed board from recipe and re-pin evidence
+- **Issue #8801** (closed): Board 06: fresh assembled-demo/build.py no longer reproduces the committed routed copper (one via moves)
 - **PR #8822**: feat: flag wire runs and end holes that collide with component courtyards
 - **PR #8819**: feat: require a fab-view sign-off before the JLCPCB cart can be saved
 - **Issue #8820** (closed): Wire-reinforced runs are not checked against same-side component courtyards
