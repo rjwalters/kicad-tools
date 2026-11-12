@@ -1443,9 +1443,13 @@ def _layer_min_clearance(design_rules: DesignRules, layer_name: str) -> float:
     generator emits.
     """
     inner = getattr(design_rules, "min_inner_clearance_mm", None)
-    if inner is not None and layer_name not in ("F.Cu", "B.Cu"):
-        return inner
-    return design_rules.min_clearance_mm
+    if (
+        isinstance(inner, (int, float))
+        and not isinstance(inner, bool)
+        and layer_name not in ("F.Cu", "B.Cu")
+    ):
+        return float(inner)
+    return float(design_rules.min_clearance_mm)
 
 
 class ClearanceRule(DRCRule):
