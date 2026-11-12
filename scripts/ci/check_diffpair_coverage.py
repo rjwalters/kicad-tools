@@ -679,6 +679,10 @@ def count_errors_via_kct_check(
         str(pcb_path),
         "--mfr",
         "jlcpcb",
+        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
+        # in this gate; skipped until the #8839 threshold table lands.
+        "--skip",
+        "mask_to_copper",
         "--errors-only",
         "--format",
         "json",
