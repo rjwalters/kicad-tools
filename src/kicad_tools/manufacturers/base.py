@@ -171,6 +171,11 @@ class DesignRules:
 
     # Optional process-specific clearances; None preserves legacy profiles.
     min_silk_to_pad_clearance_mm: float | None = None
+    # Two-tier silk-to-pad bands (Issue #8844): error at/below ``danger``,
+    # warning at/below ``warning``.  None keeps the single-tier legacy
+    # behaviour driven by ``min_silk_to_pad_clearance_mm``.
+    silk_to_pad_danger_mm: float | None = None
+    silk_to_pad_warning_mm: float | None = None
     min_smd_pad_clearance_mm: float | None = None
     min_pth_hole_to_track_mm: float | None = None
     min_inner_pth_hole_to_copper_mm: float | None = None
@@ -268,6 +273,8 @@ class DesignRules:
             "min_solder_mask_clearance_mm": self.min_solder_mask_clearance_mm,
             "min_pad_size_mm": self.min_pad_size_mm,
             "min_silk_to_pad_clearance_mm": self.min_silk_to_pad_clearance_mm,
+            "silk_to_pad_danger_mm": self.silk_to_pad_danger_mm,
+            "silk_to_pad_warning_mm": self.silk_to_pad_warning_mm,
             "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
             "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
             "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,

@@ -566,6 +566,7 @@ class DRCChecker:
         "fiducials_missing": CATEGORY_ADVISORY,
         "board_id_missing": CATEGORY_ADVISORY,
         "silk_over_copper": CATEGORY_ADVISORY,
+        "silk_hole_overlap": CATEGORY_ADVISORY,
         "silk_edge_clearance": CATEGORY_ADVISORY,
         # Coverage advisory for silk primitives the geometry model does not
         # cover (Issue #5811).  Explicit entry REQUIRED -- category_for_rule

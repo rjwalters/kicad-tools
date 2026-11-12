@@ -115,6 +115,7 @@ REQUIRED_CHECKS = ("kct_check", "native_drc", "artifacts", "bom")
 ASSEMBLY_AFFECTING_RULES = frozenset(
     {
         "silk_over_copper",
+        "silk_hole_overlap",
         "silkscreen_line_width",
         "silk_edge_clearance",
         "silk_overlap",

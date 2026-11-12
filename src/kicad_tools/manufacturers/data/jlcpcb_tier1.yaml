@@ -56,6 +56,8 @@ design_rules:
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
     min_silk_to_pad_clearance_mm: 0.15
+    silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
+    silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -86,6 +88,8 @@ design_rules:
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
     min_silk_to_pad_clearance_mm: 0.15
+    silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
+    silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -116,6 +120,8 @@ design_rules:
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
     min_silk_to_pad_clearance_mm: 0.15
+    silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
+    silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -145,6 +151,8 @@ design_rules:
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
     min_silk_to_pad_clearance_mm: 0.15
+    silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
+    silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -174,6 +182,8 @@ design_rules:
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
     min_silk_to_pad_clearance_mm: 0.15
+    silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
+    silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
@@ -203,6 +213,8 @@ design_rules:
     min_solder_mask_clearance_mm: 0.05
     # JLC rigid PCB capabilities, verified 2026-09-10; distances in mm.
     min_silk_to_pad_clearance_mm: 0.15
+    silk_to_pad_danger_mm: 0.12   # JLCDFM silk-to-pad danger band, observed 2026-11-12 (epic #8838)
+    silk_to_pad_warning_mm: 0.18  # JLCDFM silk-to-pad warning band, observed 2026-11-12 (epic #8838)
     min_smd_pad_clearance_mm: 0.15  # Different-net SMD copper, not general clearance
     min_pth_hole_to_track_mm: 0.28 # PTH hole edge; 0.35 is recommended, not the floor
     min_inner_pth_hole_to_copper_mm: 0.30
