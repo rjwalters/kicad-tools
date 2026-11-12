@@ -210,7 +210,7 @@ class ReinforcementIncompleteRule(DRCRule):
                     severity="warning",
                     message=(
                         f"Reinforcement not checked [skipped] net {net!r}: current path "
-                        f"{res.spec.name!r} is {res.status}"
+                        f"{res.spec.name!r} (declared reinforcement_eligible) is {res.status}"
                         + (f" ({res.reason})" if res.reason else "")
                         + "; its anchors and mask openings were not verified"
                     ),
