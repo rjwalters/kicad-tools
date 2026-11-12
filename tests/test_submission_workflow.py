@@ -563,3 +563,76 @@ def test_signoff_refuses_receipt_for_a_different_board_file(env):
     other.write_text(PCB + "; a different board\n")
     with pytest.raises(wf.WorkflowError, match="not produced for this --board"):
         wf.sign_off_bundle(env["bundle"], other, "Ann", readiness=receipt)
+
+
+# --- fab-dfm attestation (issue #8841) ---------------------------------------
+
+DFM = {
+    "silkscreen_to_pad": {"danger": 3, "warning": 1, "good": 5},  # covered by silk_over_copper
+    "tht_to_smd": {"danger": 5, "warning": 5, "good": 0},  # no kct rule
+}
+KCT = {"violations": [{"rule_id": "silk_over_copper", "severity": "warning"}]}
+
+
+def _dfm(env, board, counts=DFM, report=KCT, reviewer="Bob"):
+    return wf.sign_off_bundle(
+        env["bundle"], board, reviewer, stage="fab-dfm", dfm_counts=counts, kct_report=report
+    )
+
+
+def test_fab_dfm_records_counts_and_lists_uncovered_mismatch(env):
+    board = _released(env)
+    receipt = env["src"] / "output" / "readiness.json"
+    before = receipt.read_bytes()
+    rec = _dfm(env, board)["fab_dfm"]
+    assert rec["counts"] == DFM
+    assert rec["kct_counts"] == {"silk_over_copper": 1}
+    assert [m["category"] for m in rec["mismatches"]] == ["tht_to_smd"]
+    assert rec["gerber_sha256"] and rec["board_sha256"]
+    assert receipt.read_bytes() == before
+    assert wf.preflight(env["bundle"], board).fab_dfm["reviewer"] == "Bob"
+
+
+def test_fab_dfm_covered_category_with_zero_kct_is_mismatch(env):
+    board = _released(env)
+    rec = _dfm(env, board, report={"violations": []})["fab_dfm"]
+    assert {m["category"] for m in rec["mismatches"]} == {"silkscreen_to_pad", "tht_to_smd"}
+
+
+@pytest.mark.parametrize(
+    "counts",
+    [
+        {"nope": {"danger": 1, "warning": 0, "good": 0}},
+        {"tht_to_smd": {"danger": -1}},
+        {"tht_to_smd": {"danger": 1.5}},
+        {"tht_to_smd": {"danger": True}},
+        {"tht_to_smd": {"bad": 1}},
+        {},
+    ],
+)
+def test_fab_dfm_invalid_input_refused_and_manifest_untouched(env, counts):
+    board = _released(env)
+    before = (env["bundle"] / "manifest.json").read_bytes()
+    with pytest.raises(wf.WorkflowError):
+        _dfm(env, board, counts=counts)
+    assert (env["bundle"] / "manifest.json").read_bytes() == before
+
+
+def test_fab_dfm_requires_release_signoff(env):
+    export_shaped_manifest(env)
+    with pytest.raises(wf.WorkflowError, match="release sign-off"):
+        _dfm(env, env["src"] / "b.kicad_pcb")
+
+
+def test_fab_dfm_invalidated_by_board_change(env):
+    board = _released(env)
+    _dfm(env, board)
+    board.write_bytes(board.read_bytes() + b"\n; changed")
+    with pytest.raises(wf.WorkflowError):
+        wf.preflight(env["bundle"], board)
+
+
+def test_fab_dfm_not_required_by_fab_review(env):
+    board = _released(env)
+    wf.sign_off_bundle(env["bundle"], board, "Bob", stage="fab-review")
+    assert wf.preflight(env["bundle"], board).fab_dfm is None

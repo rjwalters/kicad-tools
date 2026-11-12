@@ -149,6 +149,7 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
         stock=result.stock.as_dict(),
         site=site.as_dict(),
         fab_review_signoff=result.fab_review_signoff,
+        fab_dfm=result.fab_dfm,
     )
     print(f"cart: {site.cart_url}  (state: {site.state})")
     print(f"review page: {page_out.directory}")
