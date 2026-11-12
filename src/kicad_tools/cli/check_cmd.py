@@ -2777,6 +2777,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_incomplete=bool(getattr(args, "allow_incomplete", False)),
         drc_only=drc_only,
         strict_copper_disagreement=bool(args.strict and copper_disagreement),
+        mask_copper_default=mask_copper_default_applied,
     )
     meta = check_verdict.meta
     verdict, exit_code = check_verdict.verdict, check_verdict.exit_code
@@ -2910,6 +2911,7 @@ def evaluate_check_verdict(
     allow_incomplete: bool = False,
     drc_only: bool = False,
     strict_copper_disagreement: bool = False,
+    mask_copper_default: bool = False,
 ) -> CheckVerdict:
     """Turn DRC results into ``kct check``'s verdict + exit code (Issue #7260).
 
@@ -2936,11 +2938,24 @@ def evaluate_check_verdict(
     counted = list(results.violations) if violations is None else list(violations)
     error_count = sum(1 for v in counted if v.is_error)
     warning_count = sum(1 for v in counted if v.is_warning)
-    drc_passed = (
-        error_count == 0
-        and all(a.passed for a in results.mask_copper_assessments)
-        and not (warning_count > 0 and strict)
+    # Issue #8842: a default-applied (not explicitly requested) mask_to_copper
+    # that could not run (no native geometry) is "incomplete", not a failure,
+    # so ``--allow-incomplete`` keeps working; real findings still fail.
+    mask_failed = [
+        a
+        for a in results.mask_copper_assessments
+        if not a.passed
+        and not (
+            mask_copper_default
+            and not any(m.disposition in ("violation", "uncertain") for m in a.measurements)
+        )
+    ]
+    mask_incomplete = (
+        mask_copper_default
+        and any(not a.passed for a in results.mask_copper_assessments)
+        and not mask_failed
     )
+    drc_passed = error_count == 0 and not mask_failed and not (warning_count > 0 and strict)
     drc_sub = SubCheckResult(
         status="PASSED" if drc_passed else "FAILED",
         detail=(
@@ -2957,7 +2972,8 @@ def evaluate_check_verdict(
             strict=strict,
         )
     verdict, exit_code = _check_verdict(
-        mask_copper_failed=any(not a.passed for a in results.mask_copper_assessments),
+        mask_copper_failed=bool(mask_failed),
+        mask_copper_incomplete=mask_incomplete,
         strict_copper_disagreement=strict_copper_disagreement,
         drc_only=drc_only,
         error_count=error_count,
@@ -2978,6 +2994,7 @@ def evaluate_check_verdict(
 def _check_verdict(
     *,
     mask_copper_failed: bool,
+    mask_copper_incomplete: bool = False,
     strict_copper_disagreement: bool,
     drc_only: bool,
     error_count: int,
@@ -3000,7 +3017,10 @@ def _check_verdict(
         exit_code, verdict = gate_exit_code(1, 0, style="check")
     elif drc_only or meta is None:
         exit_code, verdict = gate_exit_code(
-            error_count, warning_count, strict=strict, style="check"
+            error_count,
+            warning_count,
+            strict=strict,
+            style="check",
         )
     else:
         # The meta rollup already folded DRC (incl. --strict warnings), ERC,
@@ -3008,7 +3028,7 @@ def _check_verdict(
         exit_code, verdict = gate_exit_code(
             1 if meta.overall == "FAILED" else 0,
             0,
-            incomplete=meta.overall == "INCOMPLETE",
+            incomplete=meta.overall == "INCOMPLETE" or mask_copper_incomplete,
             allow_incomplete=allow_incomplete,
             style="check",
         )
