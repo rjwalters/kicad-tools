@@ -492,6 +492,7 @@ files:
 git -C <source> pull --ff-only
 # Loom:        <this-repo>/.loom/scripts/resync-installed.sh --dry-run   # preview drift
 #              <this-repo>/.loom/scripts/resync-installed.sh             # apply once confirmed
+#              <this-repo>/.loom/scripts/resync-installed.sh --output <dir>  # stage into a disposable worktree (see below)
 # Repo Skills: <this-repo>/.claude/skills/repo/scripts/resync-installed.sh --dry-run
 #              <this-repo>/.claude/skills/repo/scripts/resync-installed.sh
 # Anvil:       <source>/scripts/install-anvil.sh <this-repo>
@@ -530,7 +531,7 @@ trailing `<this-repo>` is a positional argument that **selects** the repo the
 installer acts on. So do **not** "fix" a resync row to look like its siblings by
 appending a bare target path: Loom's script rejects a positional with exit `1`
 (its arg loop matches only `--dry-run`/`-n`, `--quiet`/`-q`, `--allow-worktree`,
-`--help`/`-h`), and so does Repo Skills' (which takes an explicit `--target
+`--output <dir>`, `--base <ref>`, `--help`/`-h`), and so does Repo Skills' (which takes an explicit `--target
 <path>` instead) — in both cases with an error that does not obviously point back
 to the cause.
 
@@ -548,6 +549,20 @@ they will silently resync whichever repo cwd happens to be.
   an update command for it: Loom's installer refuses a non-interactive reinstall
   over an existing `.loom/` and exits with an error, which is the only situation
   this step ever runs in.
+
+  **Prefer `--output <dir>`** whenever the update is landing on a branch or
+  worktree, or the host runs a Loom daemon. It creates a disposable detached
+  worktree at `<dir>` (which must not exist yet), resyncs into that, and never
+  touches the primary checkout — safe mid-sweep, from the primary or any linked
+  worktree. The staged commit is based on the **invoking checkout's HEAD**
+  (`--base <ref>` overrides), so to land it: run the `git add` / `git commit` /
+  `git push` sequence the script prints from `<dir>`, then `git worktree remove
+  <dir>`; the commit fast-forwards onto the branch you ran it from. With
+  `--base`, the script points at `git cherry-pick <sha>` instead.
+  `--allow-worktree` is the **fallback** for when you deliberately mean to write
+  the primary checkout from a linked worktree; it is unsafe while the fleet is
+  live, and it writes `.loom/install-metadata.json` there too, not on your
+  branch.
 - **Repo Skills** resolves its target via `git rev-parse --show-toplevel`, so
   writes land in the worktree you are standing in; there is no `--allow-worktree`
   because there is nothing to escape. It re-stamps `version` / `commit` into the

@@ -390,7 +390,7 @@ repo-owned by listing it — one target-relative path per line — in
 ```
 # keep our allowlist-drift wiring in /repo:scrub
 .claude/commands/repo/scrub.md
-.agents/skills/repo/references/scrub.md
+.agents/skills/repo-scrub/SKILL.md
 # a whole subtree of local helper forks (trailing slash)
 .claude/skills/repo/scripts/
 ```

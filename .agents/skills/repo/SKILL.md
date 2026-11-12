@@ -392,7 +392,7 @@ repo-owned by listing it — one target-relative path per line — in
 ```
 # keep our allowlist-drift wiring in /repo:scrub
 .claude/commands/repo/scrub.md
-.agents/skills/repo/references/scrub.md
+.agents/skills/repo-scrub/SKILL.md
 # a whole subtree of local helper forks (trailing slash)
 .claude/skills/repo/scripts/
 ```
@@ -411,34 +411,34 @@ the same contract; it exists because one consumer lost the same `/repo:scrub`
 customization four times to reinstalls before there was any way to say "this
 file is ours".
 
-## Command procedures
+## Command skills
 
-Every `[[verb]]` in the Commands table above has its full procedure in a
-file next to this one, under `references/`. Read the one the task needs —
-these are the same files Claude Code registers as `/repo:<verb>` slash
-commands, copied here unchanged, so the two runtimes run one procedure.
+This skill is a router. Every `[[verb]]` in the Commands table above is its own
+Codex skill, named `$repo-<verb>`, sitting beside this one under `.agents/skills/`.
+Invoke the one the task needs; it carries the full procedure, the same one Claude
+Code registers as the `/repo:<verb>` slash command.
 
-- `references/all.md`
-- `references/audit.md`
-- `references/branches.md`
-- `references/browser.md`
-- `references/decide.md`
-- `references/deps.md`
-- `references/docs.md`
-- `references/followups.md`
-- `references/gitignore.md`
-- `references/handoff.md`
-- `references/help.md`
-- `references/host-optimize.md`
-- `references/links.md`
-- `references/optimize-ci.md`
-- `references/org-policy.md`
-- `references/orphans.md`
-- `references/readme.md`
-- `references/release.md`
-- `references/remote.md`
-- `references/reset.md`
-- `references/scrub.md`
-- `references/sudo.md`
-- `references/tidy.md`
-- `references/update-tools.md`
+- `$repo-all`
+- `$repo-audit`
+- `$repo-branches`
+- `$repo-browser`
+- `$repo-decide`
+- `$repo-deps`
+- `$repo-docs`
+- `$repo-followups`
+- `$repo-gitignore`
+- `$repo-handoff`
+- `$repo-help`
+- `$repo-host-optimize`
+- `$repo-links`
+- `$repo-optimize-ci`
+- `$repo-org-policy`
+- `$repo-orphans`
+- `$repo-readme`
+- `$repo-release`
+- `$repo-remote`
+- `$repo-reset`
+- `$repo-scrub`
+- `$repo-sudo`
+- `$repo-tidy`
+- `$repo-update-tools`
