@@ -10,6 +10,7 @@ CHECK_CATEGORIES = [
     "ampacity",
     "path_ampacity",
     "reinforcement_incomplete",
+    "wire_run_courtyard_overlap",
     "clearance",
     "connectivity",
     "connector_access",

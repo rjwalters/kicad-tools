@@ -3521,6 +3521,7 @@ def run_selected_checks(
         "ampacity": checker.check_ampacity,
         "path_ampacity": checker.check_path_ampacity,
         "reinforcement_incomplete": checker.check_reinforcement_incomplete,
+        "wire_run_courtyard_overlap": checker.check_wire_run_courtyard_overlap,
         "clearance": checker.check_clearances,
         "physical_copper_gap": checker.check_physical_copper_gap,
         "connectivity": checker.check_connectivity,

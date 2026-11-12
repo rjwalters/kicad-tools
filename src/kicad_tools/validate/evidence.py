@@ -132,6 +132,7 @@ GLOBAL_NET_EVIDENCE_RULES = frozenset(
         "net_undeclared",
         "path_ampacity",
         "reinforcement_incomplete",
+        "wire_run_courtyard_overlap",
         "routing_policy",
         "single_pad_net",
         "track_dangling",

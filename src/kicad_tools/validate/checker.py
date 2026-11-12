@@ -29,6 +29,7 @@ from .rules.path_ampacity import PathAmpacityRule
 from .rules.placement import FootprintOutsideBoardRule
 from .rules.pour_slot import PourSlotRule
 from .rules.redundant_copper import RedundantCopperRule
+from .rules.reinforcement_courtyard import ReinforcementCourtyardRule
 from .rules.reinforcement_incomplete import ReinforcementIncompleteRule
 from .rules.silkscreen import check_all_silkscreen
 from .rules.via_in_pad import ViaInPadRule
@@ -363,6 +364,7 @@ class DRCChecker:
         "check_ampacity",
         "check_path_ampacity",
         "check_reinforcement_incomplete",
+        "check_wire_run_courtyard_overlap",
         "check_clearances",
         "check_physical_copper_gap",
         "check_connectivity",
@@ -480,6 +482,7 @@ class DRCChecker:
         # Buttress-wire completeness (Issue #8746): errors only on nets whose
         # ampacity waiver cites reinforcement, so it is not fab-bucket noise.
         "reinforcement_incomplete": CATEGORY_ADVISORY,
+        "wire_run_courtyard_overlap": CATEGORY_ADVISORY,
         # Connector mating / edge-access (Issue #4613): mechanical
         # accessibility advisories, not fab-blocking copper defects.
         # Explicit entries are REQUIRED -- category_for_rule defaults
@@ -1333,6 +1336,20 @@ class DRCChecker:
         .REINFORCEMENT_REASON_RE`), warnings elsewhere.
         """
         rule = ReinforcementIncompleteRule(
+            specs=self.current_path_specs,
+            wires=self.reinforcement_wires,
+            waived_nets=self.reinforcement_waived_nets,
+        )
+        return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_wire_run_courtyard_overlap(self) -> DRCResults:
+        """Flag wire runs / end holes that collide with component courtyards (#8820).
+
+        Active only when a current-paths file declares a
+        ``reinforcement_eligible`` path; otherwise a clean no-op. Findings
+        are errors.
+        """
+        rule = ReinforcementCourtyardRule(
             specs=self.current_path_specs,
             wires=self.reinforcement_wires,
             waived_nets=self.reinforcement_waived_nets,
