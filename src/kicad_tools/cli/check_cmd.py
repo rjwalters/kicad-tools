@@ -1141,6 +1141,12 @@ def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
         f"({pct(metrics.diagonal_45_count)}) / off-axis {metrics.off_axis_count} "
         f"({pct(metrics.off_axis_count)})"
     )
+    worst = metrics.worst_off_axis_layer
+    if metrics.off_axis_count and worst is not None:
+        print(
+            f"  Off-axis length: {metrics.off_axis_length_fraction:.0%} of length "
+            f"(worst layer {worst[0]} {worst[1]:.0%})"
+        )
     print(
         f"  Staircase steps (<{STAIRCASE_STEP_MM} mm legs): "
         f"{metrics.staircase_step_count} ({pct(metrics.staircase_step_count)})"
@@ -1776,6 +1782,22 @@ def main(argv: list[str] | None = None) -> int:
             "(advisory-only metrics, no gating)."
         ),
     )
+    parser.add_argument(
+        "--max-off-axis-fraction",
+        dest="max_off_axis_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #8884): fail the check when "
+            "the worst single layer's length-weighted off-axis fraction "
+            "(off-axis straight copper length / total straight copper length "
+            "on that layer) exceeds this ceiling (0.0-1.0). Exceeding emits "
+            "an error-severity routing_quality_off_axis_fraction violation "
+            "and exits 2; a fraction exactly equal to the ceiling passes. "
+            "Default: unset (advisory-only)."
+        ),
+    )
 
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
@@ -1815,6 +1837,7 @@ def main(argv: list[str] | None = None) -> int:
     for _flag, _value in (
         ("--max-fragment-fraction", args.max_fragment_fraction),
         ("--max-staircase-fraction", args.max_staircase_fraction),
+        ("--max-off-axis-fraction", args.max_off_axis_fraction),
     ):
         if _value is not None and not (0.0 <= _value <= 1.0):
             print(
@@ -2660,7 +2683,11 @@ def main(argv: list[str] | None = None) -> int:
     # crash IS fatal (exit 1) -- an explicitly requested gate must never
     # silently pass because it could not measure.
     drc_only = getattr(args, "drc_only", False)
-    rq_gating = args.max_fragment_fraction is not None or args.max_staircase_fraction is not None
+    rq_gating = (
+        args.max_fragment_fraction is not None
+        or args.max_staircase_fraction is not None
+        or args.max_off_axis_fraction is not None
+    )
     routing_quality: RoutingQualityMetrics | None = None
     if not drc_only or rq_gating:
         try:
@@ -2670,7 +2697,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"Error: routing-quality metrics unavailable ({exc}); "
                     "cannot evaluate --max-fragment-fraction / "
-                    "--max-staircase-fraction",
+                    "--max-staircase-fraction / --max-off-axis-fraction",
                     file=sys.stderr,
                 )
                 return 1
@@ -2698,6 +2725,7 @@ def main(argv: list[str] | None = None) -> int:
             routing_quality,
             max_fragment_fraction=args.max_fragment_fraction,
             max_staircase_fraction=args.max_staircase_fraction,
+            max_off_axis_fraction=args.max_off_axis_fraction,
         )
         for rq_breach in rq_breaches:
             results.add(
@@ -2715,6 +2743,7 @@ def main(argv: list[str] | None = None) -> int:
                 rq_breaches,
                 max_fragment_fraction=args.max_fragment_fraction,
                 max_staircase_fraction=args.max_staircase_fraction,
+                max_off_axis_fraction=args.max_off_axis_fraction,
             ),
         }
 

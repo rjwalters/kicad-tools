@@ -390,6 +390,8 @@ def run_check_command(args) -> int:
         sub_argv.extend(["--max-fragment-fraction", str(args.max_fragment_fraction)])
     if getattr(args, "max_staircase_fraction", None) is not None:
         sub_argv.extend(["--max-staircase-fraction", str(args.max_staircase_fraction)])
+    if getattr(args, "max_off_axis_fraction", None) is not None:
+        sub_argv.extend(["--max-off-axis-fraction", str(args.max_off_axis_fraction)])
     return check_main(sub_argv)
 
 

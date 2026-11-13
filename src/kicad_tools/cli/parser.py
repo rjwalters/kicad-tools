@@ -1318,6 +1318,20 @@ def _add_check_parser(subparsers) -> None:
             "metrics, no gating)."
         ),
     )
+    check_parser.add_argument(
+        "--max-off-axis-fraction",
+        dest="max_off_axis_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #8884): fail the check when "
+            "the worst single layer's length-weighted off-axis fraction "
+            "exceeds this ceiling (0.0-1.0). Exceeding emits an "
+            "error-severity routing_quality_off_axis_fraction violation and "
+            "exits 2; equal-to-ceiling passes. Default: unset (advisory-only)."
+        ),
+    )
 
 
 def _add_sch_parser(subparsers) -> None:
