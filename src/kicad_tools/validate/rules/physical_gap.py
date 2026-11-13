@@ -519,7 +519,7 @@ def check_physical_copper_gap(
     not a guarantee about acute notches, etching chemistry or stale zone fills.
     """
     import numpy as np
-    import shapely  # type: ignore[import-untyped]
+    import shapely
     from shapely import STRtree, union_all
     from shapely.geometry import LineString
     from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
