@@ -88,7 +88,7 @@ class DigiKeyClient:
             token = resp.json().get("access_token")
         except ValueError:
             token = None
-        if not token:
+        if not isinstance(token, str) or not token:
             raise DistributorError("DigiKey auth response had no access token")
         return token
 
