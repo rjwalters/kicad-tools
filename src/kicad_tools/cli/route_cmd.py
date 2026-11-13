@@ -11104,7 +11104,7 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     route floored at the layer/copper-agnostic
     :attr:`MfrLimits.min_trace` (jlcpcb 0.127mm) while check enforces the
     per-``<layers>layer_<oz>oz`` ``min_trace_width_mm`` (jlcpcb 4-layer 2oz:
-    0.1524mm).  This runs once in ``_main_impl`` -- before every route sub-flow
+    0.15mm).  This runs once in ``_main_impl`` -- before every route sub-flow
     dispatch, next to the #4568 ``--edge-clearance`` auto-fill -- and:
 
     1. resolves the copper weights (``--copper`` > board stackup > profile)
@@ -11188,7 +11188,7 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     if explicit_min_trace is None:
         # ``get_relaxation_tiers`` clamps with ``max(min_trace_floor,
         # mfr.min_trace)``, so handing it the check-side floor can only RAISE
-        # the ladder (jlcpcb 4-layer 2oz: 0.127 -> 0.1524mm) and never lowers
+        # the ladder (jlcpcb 4-layer 2oz: 0.127 -> 0.15mm) and never lowers
         # it below the fab capability minimum on the tiers where the
         # check-side value is the looser of the two (4-layer 1oz: 0.1016).
         args.min_trace = floor
@@ -11501,7 +11501,7 @@ def _resolve_route_clearance(args, pcb_path, argv=None, *, quiet: bool = False) 
     if fab_floor is not None and getattr(args, "min_clearance_floor", None) is None:
         # ``get_relaxation_tiers`` clamps with ``max(min_clearance_floor,
         # MfrLimits.min_clearance)``, so this can only RAISE the ladder floor
-        # (jlcpcb 2-layer 2oz: 0.127 -> 0.1524mm), never lower it -- the same
+        # (jlcpcb 2-layer 2oz: 0.127 -> 0.16mm), never lower it -- the same
         # contract #4700 gives ``--min-trace``.
         args.min_clearance_floor = fab_floor
 
@@ -14498,7 +14498,7 @@ def route_with_rule_relaxation(
 
     mfr = get_mfr_limits(args.manufacturer)
     # Issue #6561: the ladder bottoms out at the higher of the flat and the
-    # stackup-aware floor (jlcpcb 2-layer 2oz: 0.1524mm).
+    # stackup-aware floor (jlcpcb 2-layer 2oz: 0.16mm).
     clearance_floor = max(mfr.min_clearance, getattr(args, "_mfr_clearance_floor", None) or 0.0)
     at_minimum = (
         final_result.trace_width <= mfr.min_trace + 0.001
@@ -17040,7 +17040,7 @@ def route_with_combined_escalation(
 
     mfr = get_mfr_limits(args.manufacturer)
     # Issue #6561: the ladder bottoms out at the higher of the flat and the
-    # stackup-aware floor (jlcpcb 2-layer 2oz: 0.1524mm).
+    # stackup-aware floor (jlcpcb 2-layer 2oz: 0.16mm).
     clearance_floor = max(mfr.min_clearance, getattr(args, "_mfr_clearance_floor", None) or 0.0)
     at_minimum = (
         final_result.trace_width <= mfr.min_trace + 0.001
@@ -19763,7 +19763,8 @@ def _route_parser() -> argparse.ArgumentParser:
         help=(
             "Trace width in mm (default: 0.2, raised to the manufacturer's "
             "minimum trace width when that floor is higher -- e.g. jlcpcb "
-            "with --copper 2 has a 0.1524mm floor). Issue #4700: the floor "
+            "with --copper 2 has a 0.15mm (4-layer) / 0.16mm (2-layer) "
+            "floor). Issue #4700: the floor "
             "is the SAME per-<layers>layer_<oz>oz value `kct check --mfr` "
             "enforces, so route never emits copper its own check rejects. "
             "An explicit value BELOW the resolved floor is honored (for "
@@ -21050,7 +21051,7 @@ def _route_parser() -> argparse.ArgumentParser:
             "layer class independently. Precedence: explicit --copper > the "
             "board's declared (setup (stackup ...)) copper weight > 1oz. "
             "Heavy copper RAISES the minimum trace width (jlcpcb 4-layer: "
-            "0.1016mm at 1oz, 0.1524mm at 2oz), so passing the weight you "
+            "0.1016mm at 1oz, 0.15mm at 2oz), so passing the weight you "
             "will actually order keeps route and `kct check --mfr` in "
             "agreement on dimension_trace_width."
         ),

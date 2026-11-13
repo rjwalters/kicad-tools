@@ -29,8 +29,17 @@ from kicad_tools.router.rules import DesignRules, NetClassRouting
 RULES_DIR = Path(__file__).resolve().parents[1] / "src" / "kicad_tools" / "manufacturers" / "rules"
 
 _KEY_RE = re.compile(r"^(\d+)layer_(\d+)oz$")
+# Unscoped ``Clearance - <mfr>`` or, when outer/inner floors differ (Issue #8836),
+# the ``Clearance (outer) - <mfr>`` rule.  The router has one floor for every
+# layer, so it takes the outer (stricter) value; the inner rule is checked
+# separately to be no tighter than it.
 _CLEARANCE_RE = re.compile(
-    r'\(rule "Clearance - [^"]*"\s*\(constraint clearance \(min ([0-9.]+)mm\)\)\)'
+    r'\(rule "Clearance(?: \(outer\))? - [^"]*"\s*(?:\(layer outer\)\s*)?'
+    r"\(constraint clearance \(min ([0-9.]+)mm\)\)\)"
+)
+_INNER_CLEARANCE_RE = re.compile(
+    r'\(rule "Clearance \(inner\) - [^"]*"\s*\(layer inner\)\s*'
+    r"\(constraint clearance \(min ([0-9.]+)mm\)\)\)"
 )
 
 
@@ -46,6 +55,9 @@ def _stackup_keys(mfr: str) -> list[tuple[int, int]]:
 def _dru_clearance(text: str) -> float:
     match = _CLEARANCE_RE.search(text)
     assert match, "no general 'Clearance - <mfr>' rule in the .kicad_dru"
+    inner = _INNER_CLEARANCE_RE.search(text)
+    if inner:
+        assert float(inner.group(1)) <= float(match.group(1)), "inner floor above outer floor"
     return float(match.group(1))
 
 
@@ -89,9 +101,9 @@ def test_router_floor_equals_generated_dru(mfr: str, layers: int, oz: int) -> No
 
 @pytest.mark.parametrize("mfr", ["jlcpcb", "jlcpcb-tier1", "jlcpcb_tier1"])
 def test_two_layer_two_oz_never_below_dru(mfr: str) -> None:
-    """The unsafe row: 2-layer 2oz must not resolve below 0.1524mm."""
-    assert resolve_clearance(mfr, 2, 2) == pytest.approx(0.1524)
-    assert resolve_clearance(mfr, 2, 2.0) >= 0.1524 - 1e-9
+    """The unsafe row: 2-layer 2oz must not resolve below 0.16mm."""
+    assert resolve_clearance(mfr, 2, 2) == pytest.approx(0.16)
+    assert resolve_clearance(mfr, 2, 2.0) >= 0.16 - 1e-9
 
 
 @pytest.mark.parametrize(("layers", "expected"), [(4, 0.1016), (6, 0.0889)])
@@ -132,7 +144,7 @@ def test_pair_gap_raises_to_two_oz_floor() -> None:
     rules = DesignRules(
         manufacturer="jlcpcb", mfr_clearance_floor=resolve_clearance("jlcpcb", 2, 2)
     )
-    assert rules.pair_gap(_diff_class(0.13)).gap_mm == pytest.approx(0.1524)
+    assert rules.pair_gap(_diff_class(0.13)).gap_mm == pytest.approx(0.16)
 
 
 def test_pair_gap_without_stackup_keeps_flat_floor() -> None:
@@ -172,7 +184,7 @@ def test_route_cli_floor_honours_copper_flag(tmp_path: Path) -> None:
 
     pcb = _write_board(tmp_path, 2)
     args = SimpleNamespace(manufacturer="jlcpcb", layers="auto", copper="2")
-    assert _resolve_route_clearance_floor(args, pcb) == pytest.approx(0.1524)
+    assert _resolve_route_clearance_floor(args, pcb) == pytest.approx(0.16)
 
 
 def test_route_auto_resolver_reports_stackup_floor(tmp_path: Path) -> None:

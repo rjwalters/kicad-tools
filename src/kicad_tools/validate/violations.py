@@ -73,6 +73,9 @@ class DRCViolation:
     evidence_hash: str | None = None
     stale_waiver_hash: str | None = None
     stale_waiver_reason: str | None = None
+    # Issue #8867: why an *unused* waiver advisory matched nothing, when the
+    # cause is a known key migration (e.g. ``path_ampacity_per_layer_key``).
+    unused_waiver_cause: str | None = None
 
     def __post_init__(self) -> None:
         """Validate severity value."""
@@ -164,6 +167,8 @@ class DRCViolation:
                 if is_outdated_evidence_hash(self.stale_waiver_hash)
                 else "evidence_changed"
             )
+        elif self.unused_waiver_cause is not None:
+            data["stale_waiver_cause"] = self.unused_waiver_cause
         return data
 
 

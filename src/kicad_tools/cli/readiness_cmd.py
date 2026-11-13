@@ -265,6 +265,19 @@ def _run_kct_check(
     return EngineRun(ok=True, detail=invocation, returncode=code)
 
 
+def _declared_copper_weights(pcb_path: Path) -> dict[str, float | None]:
+    """Outer/inner copper weight (oz) the manufacturer floors derive from (Issue #8836)."""
+    try:
+        from kicad_tools.schema.pcb import PCB
+
+        from .check_cmd import stackup_copper_oz
+
+        outer, inner = stackup_copper_oz(PCB.load(str(pcb_path)))
+    except Exception:  # noqa: BLE001 - receipt metadata must not fail readiness
+        return {"outer_oz": None, "inner_oz": None}
+    return {"outer_oz": outer, "inner_oz": inner}
+
+
 def _run_native_drc(pcb: Path, report_path: Path) -> EngineRun:
     """Inspect exactly the saved candidate; independent refill has its own gate."""
     from kicad_tools.drc import DRCReport
@@ -2343,6 +2356,7 @@ def _write_full_manifest(options: ReadinessOptions, warning_counts: dict[str, in
             "acknowledged_warning_rules": sorted(options.ack_warnings),
             "acknowledged_trace_quality": dict(sorted(options.ack_trace_quality.items())),
             "copper_cleanup": options.cleanup_record,
+            "copper_weights": _declared_copper_weights(options.pcb),
         }
     )
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

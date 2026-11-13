@@ -114,6 +114,7 @@ PUBLIC_EXPORTS = {
         "check_silk_edge_clearance": ".silkscreen",
         "check_silk_hole_overlap": ".silkscreen",
         "check_silk_over_copper": ".silkscreen",
+        "check_silk_over_mask_opening": ".silkscreen",
         "check_silkscreen_line_width": ".silkscreen",
         "check_silkscreen_over_pads": ".silkscreen",
         "check_silkscreen_text_height": ".silkscreen",

@@ -25,6 +25,13 @@ fab's rendering of the uploaded bytes; only it lets the cart be saved. Both
 bind the gerber zip sha256, and a change to the board or the gerbers
 invalidates both.
 
+A third, advisory record (issue #8841), ``tapeout.fab_dfm``, holds the operator's
+attested JLCDFM per-category danger/warning/good counts next to the kct per-rule
+counts they were compared against, plus ``mismatches`` (fab danger, kct nothing).
+It lives in the manifest, never in the hash-pinned ``readiness.json``; it binds the
+board and gerber sha256 like the sign-offs, is recommended before ``fab-review``
+but not required by it, and never gates anything.
+
 Nothing here calls checkout, payment or parts purchase, and "ordered" is never
 set by code: the states it reports stop at ``stock-checked`` / ``uploaded``.
 """
@@ -82,6 +89,8 @@ class Preflight:
     board_sha256: str
     #: The valid fab-review attestation (issue #8818), or ``None`` (release-only).
     fab_review_signoff: dict[str, Any] | None = None
+    #: The advisory fab-DFM attestation (issue #8841), or ``None``.
+    fab_dfm: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -125,6 +134,8 @@ class WorkflowResult:
     upload: dict[str, Any] | None = None
     states: dict[str, str] = field(default_factory=dict)
     fab_review_signoff: dict[str, Any] | None = None
+    #: The advisory fab-DFM attestation (issue #8841), or ``None``.
+    fab_dfm: dict[str, Any] | None = None
 
 
 def _sha(data: bytes) -> str:
@@ -328,7 +339,96 @@ def _load_readiness(
     return _sha(raw)
 
 
-SIGNOFF_STAGES = ("release", "fab-review")
+SIGNOFF_STAGES = ("release", "fab-review", "fab-dfm")
+
+#: JLCDFM categories (epic #8838 table) -> kct rule ids covering them. A category
+#: mapped to ``()`` has no kct rule today and is counted as kct 0 (never skipped).
+DFM_CATEGORY_RULES: dict[str, tuple[str, ...]] = {
+    "trace_spacing": (),
+    "pad_spacing": (),
+    "solder_mask_opening_exposing_trace": ("mask_to_copper",),
+    "tht_to_smd": (),
+    "silkscreen_to_pad": ("silk_over_copper",),
+    "silkscreen_to_hole": (),
+    "annular_ring": (),
+    "negative_soldermask_expansion": (),
+    "soldermask_opening_multiple_segments": (),
+    "unconnected_trace_end": ("track_dangling",),
+    "sharp_trace_corner": (),
+    "missing_plated_through_hole": (),
+    "silkscreen_line_width": ("min_text_thickness",),
+    "fiducial": ("fiducials",),
+}
+_DFM_LEVELS = ("danger", "warning", "good")
+
+
+def parse_dfm_counts(raw: Any) -> dict[str, dict[str, int]]:
+    """Validate attested JLCDFM counts ``{category: {danger, warning, good}}``.
+
+    Every one of the 14 categories and all three levels must be present: a
+    missing value is never filled with zero (it would record a count nobody read).
+    """
+    if not isinstance(raw, dict) or not raw:
+        raise WorkflowError("DFM counts must be a non-empty JSON object of categories")
+    missing = sorted(set(DFM_CATEGORY_RULES) - set(raw))
+    if missing and not (set(raw) - set(DFM_CATEGORY_RULES)):
+        raise WorkflowError(
+            f"DFM counts must attest all {len(DFM_CATEGORY_RULES)} categories; missing: {missing}"
+        )
+    out: dict[str, dict[str, int]] = {}
+    for cat, levels in raw.items():
+        if cat not in DFM_CATEGORY_RULES:
+            raise WorkflowError(
+                f"Unknown DFM category {cat!r} (expected one of {sorted(DFM_CATEGORY_RULES)})"
+            )
+        if not isinstance(levels, dict) or set(levels) != set(_DFM_LEVELS):
+            raise WorkflowError(
+                f"DFM category {cat!r} must hold exactly {list(_DFM_LEVELS)} (none omitted)"
+            )
+        row: dict[str, int] = {}
+        for level in _DFM_LEVELS:
+            n = levels[level]
+            if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+                raise WorkflowError(f"DFM count {cat}.{level} must be a non-negative integer")
+            row[level] = n
+        out[cat] = row
+    return out
+
+
+def kct_rule_counts(report: Any, board_sha: str | None = None) -> dict[str, int]:
+    """Per-rule violation counts (all severities) from a ``kct check --output`` report.
+
+    With ``board_sha`` the report must carry a matching ``pcb_sha256`` so the
+    counts cannot come from another board or revision.
+    """
+    if not isinstance(report, dict) or not isinstance(report.get("violations"), list):
+        raise WorkflowError("kct check report must be a JSON object with a 'violations' list")
+    if board_sha is not None and report.get("pcb_sha256") != board_sha:
+        raise WorkflowError(
+            "kct check report is not for this --board: its pcb_sha256 "
+            f"({report.get('pcb_sha256')!r}) does not match the board's sha256"
+        )
+    counts: dict[str, int] = {}
+    for v in report["violations"]:
+        if isinstance(v, dict):
+            rule = str(v.get("rule_id") or "unknown")
+            counts[rule] = counts.get(rule, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def dfm_mismatches(
+    counts: dict[str, dict[str, int]], kct_counts: dict[str, int]
+) -> list[dict[str, Any]]:
+    """Categories where the fab reports danger and kct's mapped rules found nothing."""
+    out = []
+    for cat, row in counts.items():
+        rules = DFM_CATEGORY_RULES[cat]
+        kct_n = sum(kct_counts.get(r, 0) for r in rules)
+        if row["danger"] > 0 and kct_n == 0:
+            out.append(
+                {"category": cat, "fab_danger": row["danger"], "kct_rules": list(rules), "kct": 0}
+            )
+    return out
 
 
 def _gerber_sha(files: dict[str, Any]) -> str:
@@ -343,6 +443,8 @@ def sign_off_bundle(
     readiness: Path | None = None,
     signed_at: str | None = None,
     stage: str = "release",
+    dfm_counts: Any = None,
+    kct_report: Any = None,
 ) -> dict[str, Any]:
     """Record an explicit human sign-off in ``manifest.json`` (the one producer of it).
 
@@ -357,7 +459,13 @@ def sign_off_bundle(
     uploaded bytes". It needs a valid release sign-off for the same board and
     gerber zip, and writes ``tapeout.fab_review_signoff``.
 
-    Both bind the gerber zip sha256. Re-running is idempotent apart from
+    ``stage="fab-dfm"`` records the attested JLCDFM counts (``dfm_counts``) with
+    the kct per-rule counts from ``kct_report`` (a parsed ``kct check`` report)
+    and the resulting ``mismatches`` as ``tapeout.fab_dfm`` (issue #8841). It
+    needs a valid release sign-off, is advisory (nothing requires it) and never
+    touches ``readiness.json``.
+
+    All bind the gerber zip sha256. Re-running is idempotent apart from
     ``signed_at``. The reviewer is never invented: a blank name is refused.
     """
     bundle_root, board = Path(bundle_root), Path(board)
@@ -386,7 +494,30 @@ def sign_off_bundle(
         "signed_at": signed_at or datetime.now(timezone.utc).isoformat(),
         "gerber_sha256": gerber_sha,
     }
-    if stage == "fab-review":
+    if stage == "fab-dfm":
+        # Validate input before any manifest change.
+        counts = parse_dfm_counts(dfm_counts)
+        kct_counts = kct_rule_counts(kct_report, board_sha)
+        tapeout = manifest.get("tapeout")
+        release = tapeout.get("human_signoff") if isinstance(tapeout, dict) else None
+        if not isinstance(release, dict):
+            raise WorkflowError(
+                "No release sign-off to build on: run kct tapeout-sign-off (release stage) first"
+            )
+        assert isinstance(tapeout, dict)
+        _check_signoff_binding(tapeout, release, board_sha, gerber_sha, "human_signoff")
+        tapeout["fab_dfm"] = {
+            "reviewer": record["reviewer"],
+            "attested_at": record["signed_at"],
+            "gerber_sha256": gerber_sha,
+            "board_sha256": board_sha,
+            "source": "JLCDFM, manual attestation",
+            "counts": counts,
+            "kct_counts": kct_counts,
+            "kct_report_pcb_sha256": board_sha,
+            "mismatches": dfm_mismatches(counts, kct_counts),
+        }
+    elif stage == "fab-review":
         tapeout = manifest.get("tapeout")
         release = tapeout.get("human_signoff") if isinstance(tapeout, dict) else None
         if not isinstance(release, dict):
@@ -475,6 +606,24 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
         ):
             raise WorkflowError("Malformed tapeout.fab_review_signoff in the manifest")
         _check_signoff_binding(tapeout, fab_review, board_sha, gerber_sha, "fab_review_signoff")
+    fab_dfm = tapeout.get("fab_dfm")
+    if fab_dfm is not None:
+        if (
+            not isinstance(fab_dfm, dict)
+            or not str(fab_dfm.get("reviewer", "")).strip()
+            or not isinstance(fab_dfm.get("counts"), dict)
+            or not all(
+                isinstance(r, dict) and all(isinstance(r.get(lv), int) for lv in _DFM_LEVELS)
+                for r in fab_dfm["counts"].values()
+            )
+            or not isinstance(fab_dfm.get("mismatches"), list)
+            or not all(
+                isinstance(m, dict) and {"category", "fab_danger", "kct_rules"} <= set(m)
+                for m in fab_dfm["mismatches"]
+            )
+        ):
+            raise WorkflowError("Malformed tapeout.fab_dfm in the manifest")
+        _check_signoff_binding(tapeout, fab_dfm, board_sha, gerber_sha, "fab_dfm")
     bom = _pick(files, r"bom.*\.csv$", "BOM")
     cpl = _pick(files, r"(cpl|pos|placement).*\.csv$", "CPL")
     sides = _cpl_sides((bundle_root / cpl).read_bytes())
@@ -486,6 +635,7 @@ def preflight(bundle_root: Path, board: Path) -> Preflight:
         assembly_sides=sides,
         board_sha256=board_sha,
         fab_review_signoff=dict(fab_review) if fab_review is not None else None,
+        fab_dfm=dict(fab_dfm) if fab_dfm is not None else None,
     )
 
 
@@ -632,13 +782,16 @@ def run_submission(
         destination=output_dir / "review-page",
         stock=report.as_dict(),
         upload=upload_info,
+        fab_dfm=facts.fab_dfm,
     )
     states = {
         "prepared": "prepared",
         "stock_check": "blocked" if report.blocked else "stock-checked",
         "upload": (upload_info or {}).get("state", "not-performed"),
     }
-    return WorkflowResult(plan, report, page, upload_info, states, facts.fab_review_signoff)
+    return WorkflowResult(
+        plan, report, page, upload_info, states, facts.fab_review_signoff, facts.fab_dfm
+    )
 
 
 def _upload_leg(

@@ -57,6 +57,112 @@ def load_design_rules_from_yaml(manufacturer_id: str) -> dict[str, DesignRules]:
     return rules
 
 
+#: Threshold names every DFM table entry must carry (Issue #8839).
+DFM_THRESHOLD_NAMES: tuple[str, ...] = (
+    "trace_spacing",
+    "pad_spacing",
+    "annular_ring_via",
+    "annular_ring_pth",
+    "mask_bridge",
+)
+
+
+#: Max |declared - offered| oz still treated as the offered weight (0.434 -> 0.5).
+DFM_OZ_SNAP_TOLERANCE = 0.1
+
+
+@dataclass(frozen=True)
+class DfmThreshold:
+    """One DFM threshold with its provenance (Issue #8839)."""
+
+    danger_mm: float
+    source_url: str
+    retrieved: str  # ISO date
+    basis: str  # "capability_page" | "observed_jlcdfm"
+    warning_mm: float | None = None
+    warning_basis: str | None = None  # defaults to ``basis`` when None
+
+
+@dataclass(frozen=True)
+class DfmEntry:
+    """Thresholds for one (layers, outer oz, inner oz) stackup."""
+
+    key: str
+    layers: int
+    outer_oz: float
+    inner_oz: float
+    thresholds: dict[str, DfmThreshold]
+
+
+@dataclass(frozen=True)
+class DfmThresholdTable:
+    """Versioned per-stackup DFM threshold table for one manufacturer."""
+
+    version: int
+    entries: tuple[DfmEntry, ...]
+
+    def lookup(self, layers: int, outer_oz: float, inner_oz: float) -> DfmEntry | None:
+        """Lookup that snaps to the fab's offered weights, else ``None``.
+
+        A declared weight within ``DFM_OZ_SNAP_TOLERANCE`` of an offered weight
+        matches it (KiCad's stock 0.0152 mm inner copper is 0.434 oz, i.e. the
+        fab's 0.5 oz).  A weight the fab does not offer (3 oz, 2.5 oz) never
+        falls back to another weight.
+        """
+        for e in self.entries:
+            if (
+                e.layers == layers
+                and abs(e.outer_oz - outer_oz) <= DFM_OZ_SNAP_TOLERANCE
+                and abs(e.inner_oz - inner_oz) <= DFM_OZ_SNAP_TOLERANCE
+            ):
+                return e
+        return None
+
+
+def load_dfm_thresholds(manufacturer_id: str) -> DfmThresholdTable | None:
+    """Load the ``dfm_thresholds:`` section of a fab's YAML (None if absent).
+
+    Raises ``ValueError`` if an entry lacks a threshold name, a ``source_url``
+    or a ``retrieved`` date: provenance is mandatory per number.
+    """
+    yaml_path = _DATA_DIR / f"{manufacturer_id}.yaml"
+    if not yaml_path.exists():
+        return None
+    section = _load_yaml(yaml_path).get("dfm_thresholds")
+    if not section:
+        return None
+    entries = []
+    for key, raw in section.get("entries", {}).items():
+        ths: dict[str, DfmThreshold] = {}
+        for name in DFM_THRESHOLD_NAMES:
+            t = (raw.get("thresholds") or {}).get(name)
+            if t is None:
+                raise ValueError(f"{manufacturer_id} dfm_thresholds[{key}] missing '{name}'")
+            for req in ("source_url", "retrieved", "danger_mm", "basis"):
+                if not t.get(req):
+                    raise ValueError(
+                        f"{manufacturer_id} dfm_thresholds[{key}].{name} missing {req}"
+                    )
+            ths[name] = DfmThreshold(
+                danger_mm=float(t["danger_mm"]),
+                warning_mm=None if t.get("warning_mm") is None else float(t["warning_mm"]),
+                source_url=str(t["source_url"]),
+                retrieved=str(t["retrieved"]),
+                basis=str(t["basis"]),
+                warning_basis=t.get("warning_basis"),
+            )
+        entries.append(
+            DfmEntry(
+                key=key,
+                layers=int(raw["layers"]),
+                outer_oz=float(raw["outer_oz"]),
+                inner_oz=float(raw["inner_oz"]),
+                thresholds=ths,
+            )
+        )
+    return DfmThresholdTable(version=int(section["version"]), entries=tuple(entries))
+
+
 def load_capability_flags(manufacturer_id: str) -> dict[str, Any]:
     """Load the profile-level ``capabilities:`` mapping from a fab's YAML.
 
@@ -125,6 +231,10 @@ def match_rotation_correction(
     return 0.0
 
 
+class UnsupportedCopperWeightError(ValueError):
+    """The profile has no floor table entry for the requested copper weight."""
+
+
 @dataclass
 class DesignRules:
     """PCB design constraints for a specific layer count and copper weight."""
@@ -179,6 +289,12 @@ class DesignRules:
     min_smd_pad_clearance_mm: float | None = None
     min_pth_hole_to_track_mm: float | None = None
     min_inner_pth_hole_to_copper_mm: float | None = None
+
+    # Inner-layer copper clearance floor (Issue #8836).  ``min_clearance_mm`` is
+    # the OUTER-layer floor (it scales with outer copper weight); when inner
+    # copper is lighter the fab's inner floor is looser.  ``None`` means the
+    # same floor applies to every copper layer.
+    min_inner_clearance_mm: float | None = None
 
     # Pad constraints
     min_pad_size_mm: float = 0.25
@@ -278,6 +394,7 @@ class DesignRules:
             "min_smd_pad_clearance_mm": self.min_smd_pad_clearance_mm,
             "min_pth_hole_to_track_mm": self.min_pth_hole_to_track_mm,
             "min_inner_pth_hole_to_copper_mm": self.min_inner_pth_hole_to_copper_mm,
+            "min_inner_clearance_mm": self.min_inner_clearance_mm,
             "board_thickness_mm": self.board_thickness_mm,
             "outer_copper_oz": self.outer_copper_oz,
             "inner_copper_oz": self.inner_copper_oz,
@@ -449,12 +566,41 @@ class ManufacturerProfile:
     # unknown, which is never treated as "unsupported".
     supports_vscore: bool | None = None
 
-    def get_design_rules(self, layers: int = 4, copper_oz: float = 1.0) -> DesignRules:
-        """Get design rules for a specific configuration."""
+    # Versioned per-stackup DFM threshold table with per-number provenance
+    # (Issue #8839).  ``None`` => this fab has no table (checks unchanged).
+    dfm_thresholds: DfmThresholdTable | None = None
+
+    def get_dfm_entry(self, layers: int, outer_oz: float, inner_oz: float) -> DfmEntry | None:
+        """Strict DFM-table lookup; ``None`` for an uncovered stackup (fail closed)."""
+        if self.dfm_thresholds is None:
+            return None
+        return self.dfm_thresholds.lookup(layers, outer_oz, inner_oz)
+
+    def get_design_rules(
+        self, layers: int = 4, copper_oz: float = 1.0, *, strict: bool = False
+    ) -> DesignRules:
+        """Get design rules for a specific configuration.
+
+        With ``strict=True`` (used by ``kct check`` / ``kct readiness``), a
+        heavier-than-1oz outer weight with no profile entry raises
+        :class:`UnsupportedCopperWeightError` instead of silently falling back
+        to the 1 oz floors (Issue #8836).
+        """
         # Try exact match first
         key = f"{layers}layer_{copper_oz:.0f}oz"
         if key in self.design_rules:
             return self.design_rules[key]
+
+        # Never silently substitute a LIGHTER copper weight's floors for a
+        # heavier board (Issue #8836): 2 oz floors are looser-to-tighter than
+        # 1 oz, so a 1 oz fallback would pass boards the fab rejects.
+        if strict and copper_oz > 1.0 + 1e-6:
+            have = sorted({k for k in self.design_rules if k.startswith(f"{layers}layer_")})
+            raise UnsupportedCopperWeightError(
+                f"{self.name}: no design-rule floors for {layers}-layer boards with "
+                f"{copper_oz:g} oz outer copper (profile has: {', '.join(have) or 'none'}). "
+                "Add a profile entry with a cited source instead of using 1 oz floors."
+            )
 
         # Try without copper weight
         key = f"{layers}layer_1oz"

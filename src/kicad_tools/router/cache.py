@@ -265,7 +265,7 @@ class CacheKey:
                 for (net_a, net_b), required in pairwise.required_by_pair.items()
             )
         # Issue #4700: the fab minimum trace width RAISES the built-in
-        # net-class widths (``Differential`` 0.15 -> jlcpcb 2oz 0.1524), so it
+        # net-class widths (``Differential`` 0.15 -> jlcpcb 2oz 0.16), so it
         # changes the emitted copper.  Without it in the key, a ``--copper 1``
         # run and a ``--copper 2`` run of the same board share an entry and the
         # second silently gets the first's narrower traces back.  Absent floor

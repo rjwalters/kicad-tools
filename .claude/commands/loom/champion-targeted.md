@@ -39,7 +39,7 @@ release (`--reason <gate>`), from this closed list, so the lease comment and
 | `reason=` | Stopped at |
 |---|---|
 | `facts_unread` | "0. PR facts" could not be read (or comments unauthenticated) |
-| `janitor_rc3` | Verdict-State Janitor Part 1 (`champion-hold classify`) exit 3: a foreign park or a failed read |
+| `janitor_rc3` | Verdict-State Janitor Part 1 (`champion-hold classify`) exit 3: a foreign park, a failed read, or a PR stacked on a Loom stack branch (`state=stacked-on-loom-branch`; the work finder passes those as `stacked`, #13737) |
 | `verdict_rc11` | Verdict-State Janitor Part 2 (`verdict-staleness-guard.sh`) exit 11: UNVERIFIABLE approval |
 | `ci_pending` | CI checks were still running when you read them (say it only if that is what you saw) |
 | `mergeable_unknown` | `mergeable` read `UNKNOWN` (GitHub still computing) |

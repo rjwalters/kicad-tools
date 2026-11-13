@@ -129,6 +129,21 @@ def run_courtyard_overlaps(
     return found
 
 
+def _first_point(geom: Any) -> _Point:
+    """First coordinate of a (multi)line intersection: a point on the run."""
+    if hasattr(geom, "geoms"):
+        geom = next(iter(geom.geoms))
+    c = geom.coords[0] if hasattr(geom, "coords") and len(geom.coords) else (0.0, 0.0)
+    return (float(c[0]), float(c[1]))
+
+
+def _nearest_on_line(line: Any, p: _Point) -> _Point:
+    from shapely.geometry import Point
+
+    q = line.interpolate(line.project(Point(p)))
+    return (float(q.x), float(q.y))
+
+
 class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
     """Flag wire runs and end holes that collide with component bodies (#8820).
 
@@ -237,7 +252,12 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                 for fp, length in run_courtyard_overlaps(
                     leg.points, side, pcb.footprints, inflate, body
                 ):
-                    self._emit_run(results, net, leg.layer, desc, fp, side, length)
+                    poly = body(fp, side)
+                    hit = line.intersection(poly.buffer(inflate)) if poly is not None else None
+                    where = (
+                        _first_point(hit) if hit is not None and not hit.is_empty else leg.points[0]
+                    )
+                    self._emit_run(results, net, leg.layer, desc, fp, side, length, where=where)
                 for fp in pcb.footprints:
                     if _fp_side(fp) != side:
                         for pad in fp.pads:
@@ -247,7 +267,15 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                             pr = self._pad_radius(pad)
                             if line.distance(Point(ppos)) < inflate + pr + HOLE_FILLET_MM:
                                 self._emit_run(
-                                    results, net, leg.layer, desc, fp, side, 0.0, pin=pad.number
+                                    results,
+                                    net,
+                                    leg.layer,
+                                    desc,
+                                    fp,
+                                    side,
+                                    0.0,
+                                    pin=pad.number,
+                                    where=_nearest_on_line(line, ppos),
                                 )
                                 break
 
@@ -331,13 +359,14 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         side: str,
         length: float,
         pin: str | None = None,
+        where: _Point = (0.0, 0.0),
     ) -> None:
-        where = "front" if side == "F" else "back"
+        side_name = "front" if side == "F" else "back"
         what = (
             f"passes within the pin clearance of foreign-net pin {pin} of {fp.reference} "
-            f"({where} side, through-hole part on the opposite side)"
+            f"({side_name} side, through-hole part on the opposite side)"
             if pin is not None
-            else f"overlaps the {where}-side courtyard of {fp.reference} by {length:.2f} mm "
+            else f"overlaps the {side_name}-side courtyard of {fp.reference} by {length:.2f} mm "
             "(wire radius + soldering clearance included)"
         )
         results.add(
@@ -345,7 +374,7 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
                 rule_id=self.rule_id,
                 severity="error",
                 message=f"Wire run courtyard overlap [run] net {net!r} on {layer}, {desc}: {what}",
-                location=(0.0, 0.0),
+                location=where,
                 layer=layer,
                 actual_value=length if pin is None else None,
                 items=(net, f"run@{desc}", fp.reference),

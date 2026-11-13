@@ -33,7 +33,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from kicad_tools.analysis.routing_quality import (
     FRAGMENT_LENGTH_MM,
@@ -2299,10 +2299,17 @@ def main(argv: list[str] | None = None) -> int:
     # Preset selection still keys on the scalar/outer ``--copper`` (or the
     # historical 1oz default) -- only the ampacity copper weights follow the
     # declared stackup.
-    preset_copper_oz = cli_copper_outer if cli_copper_outer is not None else 1.0
-
     # Tier 1: derive copper weights from the board's declared stackup.
     stackup_outer, stackup_inner = stackup_copper_oz(pcb)
+
+    # Issue #8836: the manufacturer floors (clearance, width) scale with outer
+    # copper weight, so an undeclared ``--copper`` follows the declared stackup
+    # instead of silently using the 1oz floors.
+    preset_copper_oz = (
+        cli_copper_outer
+        if cli_copper_outer is not None
+        else (stackup_outer if stackup_outer is not None else 1.0)
+    )
 
     # Per-class resolution: explicit --copper wins, else the declared
     # stackup, else None (leave the profile default in place).
@@ -2354,6 +2361,8 @@ def main(argv: list[str] | None = None) -> int:
         stackup_inner,
         disagreement=copper_disagreement,
     )
+    # Issue #8836: name the outer weight the manufacturer floors were derived for.
+    copper_weights["floors_outer_oz"] = preset_copper_oz
 
     mask_copper_request = None
     if getattr(args, "mask_copper_config", None):
@@ -2436,11 +2445,31 @@ def main(argv: list[str] | None = None) -> int:
                 (only_set is None or "diffpair_uncoupled_length" in only_set)
                 and "diffpair_uncoupled_length" not in skip_set
             ),
+            # Issue #8839: _apply_dfm_table (below) fails closed with an
+            # ``incomplete`` verdict for fabs that have a table; other fabs
+            # keep the #8836 hard raise.
+            strict_copper=get_profile(effective_mfr).dfm_thresholds is None,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # Issue #8839: floors come from the versioned, provenance-carrying DFM
+    # threshold table; a stackup with no entry fails closed (verdict
+    # ``incomplete``) instead of silently using another copper weight.
+    dfm_incomplete = _apply_dfm_table(
+        checker,
+        effective_mfr,
+        layers,
+        resolved_copper_outer,
+        resolved_copper_inner,
+        preset_copper_oz,
+        copper_weights,
+    )
+
+    # NOTE (#8839): the #5006 per-board override below runs AFTER the table, so
+    # a cited board override may lower a table floor (it is the board's own
+    # cited exception); the table is the default, not a hard minimum.
     # Issue #5006: apply a validated, cited per-board fabrication-floor
     # override on top of the manufacturer profile's resolved DesignRules --
     # BEFORE any check runs and BEFORE --emit-drc-constraints below reads
@@ -2757,6 +2786,11 @@ def main(argv: list[str] | None = None) -> int:
         allow_incomplete=bool(getattr(args, "allow_incomplete", False)),
         drc_only=drc_only,
         strict_copper_disagreement=bool(args.strict and copper_disagreement),
+        dfm_incomplete=dfm_incomplete,
+        manufacturer=args.mfr,
+    )
+    fab_dfm_parity = (
+        check_verdict.fab_dfm_parity.to_dict() if check_verdict.fab_dfm_parity else None
     )
     meta = check_verdict.meta
     verdict, exit_code = check_verdict.verdict, check_verdict.exit_code
@@ -2795,6 +2829,7 @@ def main(argv: list[str] | None = None) -> int:
             scope=scope_record,
             project_rules=project_rules,
             copper_weights=copper_weights,
+            fab_dfm_parity=fab_dfm_parity,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -2823,6 +2858,10 @@ def main(argv: list[str] | None = None) -> int:
     # the JSON stream (the JSON carries the full ``coverage`` map).
     if not machine_output and not drc_only:
         print_coverage_stanza(coverage)
+        if check_verdict.fab_dfm_parity is not None:
+            from kicad_tools.validate.fab_dfm_parity import format_parity_stanza
+
+            print(format_parity_stanza(check_verdict.fab_dfm_parity))
 
     # Write JSON report to file if --output specified
     if args.output:
@@ -2843,6 +2882,7 @@ def main(argv: list[str] | None = None) -> int:
             exit_code=exit_code,
             scope=scope_record,
             copper_weights=copper_weights,
+            fab_dfm_parity=fab_dfm_parity,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -2878,6 +2918,8 @@ class CheckVerdict:
     meta: MetaCheckResult | None
     error_count: int
     warning_count: int
+    #: Issue #8845: fab DFM parity report (``--mfr jlcpcb`` only), else ``None``.
+    fab_dfm_parity: Any = None
 
 
 def evaluate_check_verdict(
@@ -2890,6 +2932,8 @@ def evaluate_check_verdict(
     allow_incomplete: bool = False,
     drc_only: bool = False,
     strict_copper_disagreement: bool = False,
+    dfm_incomplete: bool = False,
+    manufacturer: str | None = None,
 ) -> CheckVerdict:
     """Turn DRC results into ``kct check``'s verdict + exit code (Issue #7260).
 
@@ -2912,6 +2956,11 @@ def evaluate_check_verdict(
         drc_only: Skip the meta rollup.
         strict_copper_disagreement: ``--strict`` with a stackup-vs-``--copper``
             disagreement (always a fail).
+        dfm_incomplete: The stackup has no DFM-table entry (Issue #8839); a
+            would-be ``pass`` becomes ``incomplete``.
+        manufacturer: Manufacturer id; for the JLCPCB family a danger-capable
+            ``not_covered`` fab DFM parity row (Issue #8845) makes an otherwise
+            passing verdict ``incomplete``.
     """
     counted = list(results.violations) if violations is None else list(violations)
     error_count = sum(1 for v in counted if v.is_error)
@@ -2946,12 +2995,22 @@ def evaluate_check_verdict(
         allow_incomplete=allow_incomplete,
         meta=meta,
     )
+    from kicad_tools.validate.fab_dfm_parity import evaluate_parity
+
+    parity = evaluate_parity(manufacturer)
+    if (dfm_incomplete or (parity is not None and parity.incomplete)) and verdict == "pass":
+        from ._gate import gate_exit_code
+
+        exit_code, verdict = gate_exit_code(
+            0, 0, incomplete=True, allow_incomplete=allow_incomplete, style="check"
+        )
     return CheckVerdict(
         verdict=verdict,
         exit_code=exit_code,
         meta=meta,
         error_count=error_count,
         warning_count=warning_count,
+        fab_dfm_parity=parity,
     )
 
 
@@ -3232,7 +3291,7 @@ def build_check_rule_set(
         pcb,
         manufacturer=effective_mfr,
         layers=layers,
-        copper_oz=1.0,
+        copper_oz=copper_outer if copper_outer is not None else 1.0,
         copper_oz_outer=copper_outer,
         copper_oz_inner=copper_inner,
         net_class_map=net_class_map,
@@ -3582,6 +3641,8 @@ def run_selected_checks(
         "solder_mask": checker.check_solder_mask_pads,
         "spec_conformance": _spec_conformance_check,
         "mask_to_copper": checker.check_mask_to_copper,
+        "mask_negative_expansion": checker.check_mask_negative_expansion,
+        "mask_multi_segment": checker.check_mask_multi_segment,
         "thermal_asymmetry": checker.check_thermal_asymmetry,
         "via_in_pad": checker.check_via_in_pad,
         "via_type": checker.check_via_type_capability,
@@ -3857,6 +3918,91 @@ def _copper_weights_provenance(
     }
 
 
+def _apply_dfm_table(
+    checker: DRCChecker,
+    mfr: str,
+    layers: int | None,
+    outer: float | None,
+    inner: float | None,
+    preset_oz: float,
+    copper_weights: dict,
+) -> bool:
+    """Apply the DFM threshold table's floors to ``checker`` (Issue #8839).
+
+    Returns True when the manufacturer HAS a table but the board's stackup
+    (layers, outer oz, inner oz) has no entry -- the caller turns that into an
+    ``incomplete`` verdict.  Floors only tighten the profile's rules.
+    """
+    from dataclasses import replace
+
+    profile = get_profile(mfr)
+    if profile.dfm_thresholds is None:
+        copper_weights["dfm_table"] = {
+            "version": None,
+            "stackup": None,
+            "entry": None,
+            "reason": f"no table for {mfr}",
+        }
+        return False
+    n_layers = layers if layers is not None else len(checker.pcb.copper_layers)
+    base = profile.get_design_rules(n_layers, preset_oz)
+    eff_outer = outer if outer is not None else (preset_oz if preset_oz else 1.0)
+    assumed = outer is None or (n_layers > 2 and inner is None)
+    if n_layers <= 2:
+        eff_inner = 0.0
+    else:
+        eff_inner = inner if inner is not None else base.inner_copper_oz
+    entry = profile.get_dfm_entry(n_layers, eff_outer, eff_inner)
+    stackup = f"{n_layers}-layer, {eff_outer:g}oz outer / {eff_inner:g}oz inner"
+    if assumed:
+        stackup += " (assumed: no stackup/--copper weight declared)"
+    table_version = profile.dfm_thresholds.version
+    if entry is None:
+        copper_weights["dfm_table"] = {
+            "version": table_version,
+            "stackup": stackup,
+            "entry": None,
+        }
+        print(
+            f"INCOMPLETE: no {mfr} DFM threshold entry for {stackup} "
+            f"(table v{table_version}); fab floors for this stackup are unknown. "
+            "Add a sourced entry to the manufacturer YAML or use a covered stackup.",
+            file=sys.stderr,
+        )
+        return True
+    t = entry.thresholds
+    r = checker.design_rules
+    checker.design_rules = replace(
+        r,
+        min_clearance_mm=max(r.min_clearance_mm, t["trace_spacing"].danger_mm),
+        min_smd_pad_clearance_mm=max(r.min_smd_pad_clearance_mm or 0.0, t["pad_spacing"].danger_mm),
+        min_annular_ring_mm=max(r.min_annular_ring_mm, t["annular_ring_via"].danger_mm),
+        min_pth_annular_ring_mm=max(
+            r.min_pth_annular_ring_mm or 0.0, t["annular_ring_pth"].danger_mm
+        ),
+        min_solder_mask_dam_mm=max(r.min_solder_mask_dam_mm, t["mask_bridge"].danger_mm),
+    )
+    copper_weights["dfm_table"] = {
+        "version": table_version,
+        "stackup": stackup,
+        "entry": entry.key,
+        "thresholds": {
+            name: {
+                "danger_mm": th.danger_mm,
+                "warning_mm": th.warning_mm,
+                "warning_basis": (th.warning_basis or th.basis)
+                if th.warning_mm is not None
+                else None,
+                "basis": th.basis,
+                "source_url": th.source_url,
+                "retrieved": th.retrieved,
+            }
+            for name, th in t.items()
+        },
+    }
+    return False
+
+
 def _format_copper_weights(copper_weights: dict) -> str:
     """One-line header form of :func:`_copper_weights_provenance`."""
     parts = []
@@ -3864,6 +4010,8 @@ def _format_copper_weights(copper_weights: dict) -> str:
         entry = copper_weights[cls]
         oz = "profile default" if entry["oz"] is None else f"{entry['oz']:g}oz"
         parts.append(f"{cls} {oz} ({entry['source']})")
+    if copper_weights.get("floors_outer_oz") is not None:
+        parts.append(f"mfr floors for {copper_weights['floors_outer_oz']:g}oz outer")
     return ", ".join(parts)
 
 
@@ -3902,6 +4050,13 @@ def output_table(
     print(f"Layers: {layers}")
     if copper_weights:
         print(f"Copper (ampacity): {_format_copper_weights(copper_weights)}")
+        dfm = copper_weights.get("dfm_table")
+        if dfm:
+            if dfm.get("reason"):
+                print(f"DFM thresholds: {dfm['reason']}")
+            else:
+                used = dfm["entry"] or "NO ENTRY (incomplete)"
+                print(f"DFM thresholds: table v{dfm['version']}, {dfm['stackup']} -> {used}")
     print(f"Rules checked: {results.rules_checked}")
 
     print("\nResults:")
@@ -4249,6 +4404,7 @@ def output_json(
     scope: dict | None = None,
     project_rules: list[dict] | None = None,
     copper_weights: dict | None = None,
+    fab_dfm_parity: dict | None = None,
 ) -> None:
     """Output violations as JSON.
 
@@ -4342,6 +4498,9 @@ def output_json(
         data["fabrication_process"] = fabrication_process
     if coverage is not None:
         data["coverage"] = coverage
+    # Issue #8845: additive; present under --mfr jlcpcb only.
+    if fab_dfm_parity is not None:
+        data["fab_dfm_parity"] = fab_dfm_parity
     # Issue #7230: additive top-level verdict/exit_code from the same call
     # that decides the process exit.  ``summary.passed`` stays DRC-only.
     if verdict is not None:
@@ -4405,6 +4564,7 @@ def write_json_report(
     exit_code: int | None = None,
     scope: dict | None = None,
     copper_weights: dict | None = None,
+    fab_dfm_parity: dict | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
@@ -4479,6 +4639,9 @@ def write_json_report(
         data["fabrication_process"] = fabrication_process
     if coverage is not None:
         data["coverage"] = coverage
+    # Issue #8845: additive; present under --mfr jlcpcb only.
+    if fab_dfm_parity is not None:
+        data["fab_dfm_parity"] = fab_dfm_parity
     # Issue #7230: additive top-level verdict/exit_code from the same call
     # that decides the process exit.  ``summary.passed`` stays DRC-only.
     if verdict is not None:

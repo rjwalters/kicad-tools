@@ -1869,59 +1869,188 @@ def _silk_arc(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
     return graphic
 
 
-class TestSilkGeometryCoverage:
-    def test_circle_is_reported_as_unmodeled_not_clean(self):
-        """A silk circle over a pad: zero clearance findings, one coverage info.
+def _silk_unknown(*, uuid: str = "", layer: str = "F.SilkS") -> FootprintGraphic:
+    return FootprintGraphic(
+        graphic_type="curve",
+        layer=layer,
+        stroke_width=0.12,
+        start=(0.0, 0.0),
+        end=(1.0, 0.0),
+        uuid=uuid,
+    )
 
-        This is the whole point of the rule.  ``check_silk_over_copper`` cannot
-        see the circle (the geometry model has no circle branch), and the
-        pre-#5811 behaviour was to say nothing at all -- indistinguishable
-        from "checked and clean".  The ``info`` finding makes the gap a
-        reported fact.
-        """
+
+class TestSilkCircleArcGeometry:
+    """Circles and arcs are modeled (#8863): they reach the silk checks."""
+
+    def _pcb_with(self, graphic, *, pad_at=(0.0, 0.0), pad_size=(1.0, 1.0), **fp_kwargs):
         pcb = _empty_pcb()
         pcb._footprints.append(
             _make_footprint(
-                pads=[_smd_pad(position=(0.0, 0.0), size=(2.0, 2.0))],
-                graphics=[_silk_circle(uuid="circle-uuid")],
+                pads=[_smd_pad(position=pad_at, size=pad_size)],
+                graphics=[graphic],
+                **fp_kwargs,
             )
         )
+        return pcb
 
+    def test_filled_disc_over_pad_flags(self):
+        pcb = self._pcb_with(_silk_circle(uuid="c"))  # filled r=0.5 over 1x1 pad
+        assert len(check_silk_over_copper(pcb, _rules())) == 1
+
+    def test_unfilled_ring_crossing_pad_flags(self):
+        g = _silk_circle()
+        g.fill = "no"
+        g.end = (1.0, 0.0)  # ring r=1.0 passes through the 1x1 pad's aperture edge
+        pcb = self._pcb_with(g, pad_at=(1.0, 0.0))
+        assert len(check_silk_over_copper(pcb, _rules())) == 1
+
+    def test_unfilled_ring_enclosing_pad_does_not_flag(self):
+        g = _silk_circle()
+        g.fill = "no"
+        g.end = (3.0, 0.0)  # pad sits in the ring's interior, stroke misses it
+        pcb = self._pcb_with(g)
         assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+    def test_zero_width_filled_disc_still_prints(self):
+        g = _silk_circle()
+        g.stroke_width = 0.0
+        assert len(check_silk_over_copper(self._pcb_with(g), _rules())) == 1
+
+    def test_zero_radius_unfilled_circle_is_empty(self):
+        g = _silk_circle()
+        g.fill = "no"
+        g.end = (0.0, 0.0)
+        assert len(check_silk_over_copper(self._pcb_with(g), _rules())) == 0
+
+    def test_arc_crossing_pad_flags(self):
+        # Local arc (-1,0)->(0,1)->(1,0): upper semicircle, radius 1.
+        # A pad at the top of the arc is crossed.
+        pcb = self._pcb_with(_silk_arc(uuid="a"), pad_at=(0.0, 1.0))
+        assert len(check_silk_over_copper(pcb, _rules())) == 1
+
+    def test_arc_sweep_not_reaching_pad_does_not_flag(self):
+        # Same upper semicircle; a pad at the bottom lies on the full circle
+        # but not on the swept arc.
+        pcb = self._pcb_with(_silk_arc(), pad_at=(0.0, -1.0))
+        assert len(check_silk_over_copper(pcb, _rules())) == 0
+
+    def test_rotated_footprint_arc_follows_transform(self):
+        # Footprint rotated 90deg: the arc's top (0,1) maps to a side point
+        # of the board frame, so a pad there is hit and one at the old
+        # location is not.
+        from kicad_tools.validate.rules.silkscreen import _fp_transform, _stroke_geometry
+
+        fp = _make_footprint(rotation=90.0, graphics=[_silk_arc()])
+        xf = _fp_transform(fp)
+        geom = _stroke_geometry(fp.graphics[0], xf)
+        tx, ty = xf((0.0, 1.0))
+        assert geom.distance(__import__("shapely.geometry").geometry.Point(tx, ty)) < 0.07
+        assert (round(tx, 6), round(ty, 6)) != (10.0, 11.0)
+
+    def test_back_side_footprint_mirrors_arc(self):
+        from kicad_tools.validate.rules.silkscreen import _fp_transform, _stroke_geometry
+
+        g = _silk_arc(layer="B.SilkS")
+        fp = _make_footprint(layer="B.Cu", graphics=[g])
+        xf = _fp_transform(fp)
+        geom = _stroke_geometry(g, xf)
+        assert geom is not None and not geom.is_empty
+        # Mirrored endpoint (1,0) lands at the mirrored x.
+        ex, ey = xf((1.0, 0.0))
+        assert geom.distance(__import__("shapely.geometry").geometry.Point(ex, ey)) < 0.07
+
+    def test_collinear_arc_falls_back_to_chord(self):
+        g = _silk_arc()
+        g.mid = (0.0, 0.0)  # collinear with (-1,0)-(1,0)
+        assert len(check_silk_over_copper(self._pcb_with(g), _rules())) == 1
+
+    def test_degenerate_arc_is_none(self):
+        g = _silk_arc()
+        g.end = g.start
+        assert len(check_silk_over_copper(self._pcb_with(g), _rules())) == 0
+
+    def test_silk_overlap_sees_circle_and_arc(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(
+                graphics=[
+                    _silk_circle(uuid="c"),
+                    _silk_line(start=(0.0, -1.0), end=(0.0, 1.0)),
+                ]
+            )
+        )
+        assert len(check_silk_overlap(pcb, _rules())) >= 1
+
+    def test_silk_edge_clearance_sees_circle(self):
+        pcb = _empty_pcb()
+        _square_outline(pcb)
+        pcb._footprints.append(
+            _make_footprint(position=(0.0, 10.0), graphics=[_silk_circle(uuid="c")])
+        )
+        assert len(check_silk_edge_clearance(pcb, _rules())) == 1
+
+    def test_silk_pad_clearance_sees_circle(self):
+        # Disc r=0.5 centred 0.9mm from a 1x1 pad's centre: gap 0.9-0.5-0.5
+        # < 0, i.e. overlapping the pad copper.
+        pcb = self._pcb_with(_silk_circle(), pad_at=(0.9, 0.0))
+        assert len(check_silk_pad_clearance(pcb, _rules())) >= 1
+
+    def test_board_level_circle_without_radius_field(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(position=(5.0, 5.0), pads=[_smd_pad(position=(0.0, 0.0))])
+        )
+        pcb._graphics.append(
+            BoardGraphic(
+                graphic_type="circle",
+                layer="F.SilkS",
+                stroke_width=0.12,
+                start=(5.0, 5.0),
+                center=(5.0, 5.0),
+                end=(5.5, 5.0),
+                fill="yes",
+            )
+        )
+        assert len(check_silk_over_copper(pcb, _rules())) == 1
+
+
+class TestSilkGeometryCoverage:
+    def test_circle_and_arc_are_no_longer_reported_unmodeled(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(
+            _make_footprint(graphics=[_silk_circle(uuid="c"), _silk_arc(uuid="a")])
+        )
+        assert len(check_silk_coverage(pcb, _rules())) == 0
+
+    def test_unknown_type_is_reported_unmodeled_not_clean(self):
+        pcb = _empty_pcb()
+        pcb._footprints.append(_make_footprint(graphics=[_silk_unknown(uuid="u")]))
 
         coverage = check_silk_coverage(pcb, _rules())
         assert len(coverage) == 1
         violation = coverage.violations[0]
         assert violation.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID
         assert violation.severity == "info"
-        assert violation.items == ("U1 (fp_circle) {circle-uuid}",)
+        assert violation.items == ("U1 (fp_curve) {u}",)
         assert violation.layer == "F.SilkS"
-        assert "circle" in violation.message
-
-    def test_arc_is_reported_as_unmodeled(self):
-        pcb = _empty_pcb()
-        pcb._footprints.append(_make_footprint(graphics=[_silk_arc(uuid="arc-uuid")]))
-
-        coverage = check_silk_coverage(pcb, _rules())
-        assert len(coverage) == 1
-        assert coverage.violations[0].items == ("U1 (fp_arc) {arc-uuid}",)
 
     def test_coverage_item_omits_uuid_suffix_when_unset(self):
         pcb = _empty_pcb()
-        pcb._footprints.append(_make_footprint(graphics=[_silk_circle()]))
+        pcb._footprints.append(_make_footprint(graphics=[_silk_unknown()]))
 
-        assert check_silk_coverage(pcb, _rules()).violations[0].items == ("U1 (fp_circle)",)
+        assert check_silk_coverage(pcb, _rules()).violations[0].items == ("U1 (fp_curve)",)
 
     @pytest.mark.parametrize("layer", ["F.Fab", "F.CrtYd", "F.Cu"])
     def test_non_silk_layer_shapes_are_not_reported(self, layer):
         """Coverage is a statement about SILK geometry only."""
         pcb = _empty_pcb()
-        pcb._footprints.append(_make_footprint(graphics=[_silk_circle(layer=layer)]))
+        pcb._footprints.append(_make_footprint(graphics=[_silk_unknown(layer=layer)]))
 
         assert len(check_silk_coverage(pcb, _rules())) == 0
 
     def test_modeled_primitives_produce_no_coverage_finding(self):
-        """line / rect / poly are modeled, so they are not reported as gaps."""
+        """line / rect / poly / circle / arc are modeled, so they are not reported as gaps."""
         pcb = _empty_pcb()
         pcb._footprints.append(
             _make_footprint(
@@ -1935,6 +2064,8 @@ class TestSilkGeometryCoverage:
                         end=(1.0, 1.0),
                     ),
                     _silk_poly(points=_TRIANGLE_OVER_ORIGIN, stroke_width=0.0),
+                    _silk_circle(),
+                    _silk_arc(),
                 ]
             )
         )
@@ -1945,24 +2076,23 @@ class TestSilkGeometryCoverage:
         pcb = _empty_pcb()
         pcb._graphics.append(
             BoardGraphic(
-                graphic_type="circle",
+                graphic_type="curve",
                 layer="F.SilkS",
                 stroke_width=0.12,
                 start=(5.0, 5.0),
-                center=(5.0, 5.0),
                 end=(5.5, 5.0),
-                uuid="gr-circle-uuid",
+                uuid="gr-curve-uuid",
             )
         )
 
         coverage = check_silk_coverage(pcb, _rules())
         assert len(coverage) == 1
-        assert coverage.violations[0].items == ("gr_circle {gr-circle-uuid}",)
+        assert coverage.violations[0].items == ("gr_curve {gr-curve-uuid}",)
 
     def test_coverage_reachable_through_check_all_silkscreen(self):
         """``kct check --only silkscreen`` surfaces the coverage advisory."""
         pcb = _empty_pcb()
-        pcb._footprints.append(_make_footprint(graphics=[_silk_circle(uuid="circle-uuid")]))
+        pcb._footprints.append(_make_footprint(graphics=[_silk_unknown(uuid="u")]))
 
         results = check_all_silkscreen(pcb, _rules())
         unmodeled = [v for v in results.violations if v.rule_id == SILK_GEOMETRY_UNMODELED_RULE_ID]
@@ -1983,20 +2113,6 @@ class TestSilkGeometryCoverage:
             DRCChecker.category_for_rule(SILK_GEOMETRY_UNMODELED_RULE_ID)
             == DRCChecker.CATEGORY_ADVISORY
         )
-
-    def test_committed_board_02_arc_is_reported(self):
-        """Board 02's one F.SilkS ``fp_arc`` is the real-fleet instance."""
-        import os
-
-        path = os.path.join(
-            _BOARD_ROOT, "02-charlieplex-led/output/charlieplex_3x3_routed.kicad_pcb"
-        )
-        if not os.path.exists(path):
-            pytest.skip(f"board fixture not present: {path}")
-
-        coverage = check_silk_coverage(PCB.load(path), _rules())
-        assert len(coverage) == 1
-        assert "fp_arc" in coverage.violations[0].items[0]
 
 
 # ---------------------------------------------------------------------------

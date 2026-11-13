@@ -70,8 +70,8 @@ design_rules:
     # (issue #5009) -- 2-layer via-in-pad geometry has no eligible process.
 
   2layer_2oz:
-    min_trace_width_mm: 0.1524      # 6 mil (per JLCPCB published specs for 2oz copper)
-    min_clearance_mm: 0.1524        # 6 mil (per JLCPCB published specs for 2oz copper)
+    min_trace_width_mm: 0.16        # 6.5 mil; JLCPCB pcb-capabilities 2oz 2-layer, verified 2026-11-12 (#8865)
+    min_clearance_mm: 0.16          # 6.5 mil; same source
     min_via_drill_mm: 0.3
     min_via_diameter_mm: 0.6
     min_annular_ring_mm: 0.15
@@ -164,7 +164,7 @@ design_rules:
     via_in_pad_process_id: jlcpcb-tier1-pofv-4l  # #5009: real 4L POFV process
 
   4layer_2oz:
-    min_trace_width_mm: 0.1524      # 6 mil outer (per JLCPCB published specs for 2oz copper)
+    min_trace_width_mm: 0.15        # 6 mil outer; JLCPCB pcb-capabilities 2oz multilayer, verified 2026-11-12 (#8865)
     min_clearance_mm: 0.1016        # 4 mil
     min_via_drill_mm: 0.2
     min_via_diameter_mm: 0.45

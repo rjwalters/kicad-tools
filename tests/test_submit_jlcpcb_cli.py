@@ -3,6 +3,7 @@
 Offline: the website, the API and Chrome are all replaced; any contact fails.
 """
 
+import hashlib
 import json
 import os
 import platform
@@ -256,3 +257,83 @@ def test_guided_runs_with_blocked_stock_and_prints_state(env, monkeypatch, capsy
     out = capsys.readouterr().out
     assert rc == 0
     assert "stock gate: BLOCKED" in out and "STOCK:" in out and "Guided checklist" in out
+
+
+# --- tapeout-sign-off --stage fab-dfm (#8841) --------------------------------
+
+
+def _dfm_args(env, tmp_path, counts):
+    import argparse
+
+    from kicad_tools.cli import tapeout_signoff_cmd as so
+
+    cfile, kfile = tmp_path / "dfm.json", tmp_path / "kct.json"
+    cfile.write_text(json.dumps(counts))
+    board_sha = hashlib.sha256((env["src"] / "b.kicad_pcb").read_bytes()).hexdigest()
+    kfile.write_text(json.dumps({"pcb_sha256": board_sha, "violations": []}))
+    parser = argparse.ArgumentParser()
+    so.add_arguments(parser)
+    args = parser.parse_args(
+        [
+            str(env["bundle"]),
+            "--board",
+            str(env["src"] / "b.kicad_pcb"),
+            "--stage",
+            "fab-dfm",
+            "--reviewer",
+            "Bob",
+            "--dfm-counts",
+            str(cfile),
+            "--kct-report",
+            str(kfile),
+        ]
+    )
+    return so, args
+
+
+def test_fab_dfm_cli_prints_mismatch_and_exits_zero(env, tmp_path, capsys):
+    from tests.test_submission_workflow import _released
+
+    _released(env)
+    from tests.test_submission_workflow import _full
+
+    so, args = _dfm_args(env, tmp_path, _full(tht_to_smd={"danger": 2, "warning": 0, "good": 1}))
+    assert so.run(args) == 0
+    out = capsys.readouterr().out
+    assert "MISMATCH" in out and "tht_to_smd" in out and "no mapped kct rule" in out
+
+
+def test_fab_dfm_cli_refuses_unknown_category(env, tmp_path, capsys):
+    from tests.test_submission_workflow import _released
+
+    _released(env)
+    so, args = _dfm_args(env, tmp_path, {"bogus": {"danger": 1}})
+    assert so.run(args) == 2
+    assert "Unknown DFM category" in capsys.readouterr().err
+
+
+def test_fab_dfm_cli_refuses_partial_attestation(env, tmp_path, capsys):
+    from tests.test_submission_workflow import _released
+
+    _released(env)
+    so, args = _dfm_args(env, tmp_path, {"fiducial": {"danger": 0, "warning": 0, "good": 2}})
+    before = (env["bundle"] / "manifest.json").read_bytes()
+    assert so.run(args) == 2
+    err = capsys.readouterr().err
+    assert "REFUSED" in err and "all 14 categories" in err
+    assert (env["bundle"] / "manifest.json").read_bytes() == before
+
+
+def test_guided_contact_values_only_on_tty_and_never_in_output_tree(env, monkeypatch, capsys):
+    sentinel = "SENTINEL-8859-contact"
+    write_manifest(env)
+    _no_browser(monkeypatch)
+    _stock(monkeypatch, {"C1": 5})
+    monkeypatch.setenv("JLCPCB_CONTACT_LAST_NAME", sentinel)
+    assert cmd.main(_argv(env, "--guided")) == 0
+    cap = capsys.readouterr()
+    assert sentinel not in cap.out + cap.err  # non-TTY: key names only
+    assert "JLCPCB_CONTACT_LAST_NAME" in cap.out
+    for p in env["out"].rglob("*"):
+        if p.is_file():
+            assert sentinel.encode() not in p.read_bytes(), p

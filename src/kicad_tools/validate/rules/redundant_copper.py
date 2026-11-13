@@ -131,6 +131,9 @@ class RedundantCopperRule(DRCRule):
         for seg in segments:
             groups[(seg.net_number, seg.layer)].append(seg)
         self._pcb = pcb
+        # Messages quote sheet-absolute coordinates, matching the location
+        # ``DRCChecker._absolutize`` produces (Issue #8868).
+        self._origin = tuple(getattr(pcb, "board_origin", (0.0, 0.0)))
         self._clearance = (
             getattr(design_rules, "min_clearance_mm", None) or STAIRCASE_DEFAULT_CLEARANCE_MM
         )
@@ -441,15 +444,16 @@ class RedundantCopperRule(DRCRule):
             legs = list(zip(cand, cand[1:], strict=False))
             if not self._path_clear(legs, net, layer, width):
                 continue
-            via_pts = " -> ".join(f"({x:.2f}, {y:.2f})" for x, y in cand)
+            ox, oy = getattr(self, "_origin", (0.0, 0.0))
+            via_pts = " -> ".join(f"({x + ox:.2f}, {y + oy:.2f})" for x, y in cand)
             results.add(
                 DRCViolation(
                     rule_id="redundant_copper_staircase",
                     severity="warning",
                     message=(
                         f"Track staircase: [{label}] on {layer} uses {len(chain)} segments "
-                        f"({bends} bends) from ({start[0]:.2f}, {start[1]:.2f}) to "
-                        f"({end[0]:.2f}, {end[1]:.2f}); a clear path with {new_bends} "
+                        f"({bends} bends) from ({start[0] + ox:.2f}, {start[1] + oy:.2f}) to "
+                        f"({end[0] + ox:.2f}, {end[1] + oy:.2f}); a clear path with {new_bends} "
                         f"bend(s) saves {bends - new_bends}: {via_pts} "
                         f"(`kct optimize-traces` rewrites this)"
                     ),
