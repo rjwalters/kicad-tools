@@ -47,7 +47,8 @@ def _inside_pad(pad, centre: tuple[float, float], point: tuple[float, float]) ->
     # ``pad.rotation`` is absolute; undo it to reach the pad's own frame.
     lx, ly = rotate_pad_offset(point[0] - centre[0], point[1] - centre[1], -pad.rotation)
     tol = 1e-6
-    return abs(lx) <= pad.size[0] / 2 + tol and abs(ly) <= pad.size[1] / 2 + tol
+    half_w, half_h = float(pad.size[0]) / 2, float(pad.size[1]) / 2
+    return abs(lx) <= half_w + tol and abs(ly) <= half_h + tol
 
 
 class MissingPlatedHoleRule(DRCRule):
