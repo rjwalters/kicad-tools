@@ -1,6 +1,6 @@
 """Issue #8836: ``kct check`` applies the inner-layer clearance floor on inner layers.
 
-JLCPCB ``4layer_2oz`` is 0.1524 mm outer / 0.1016 mm inner.  The emitted
+JLCPCB ``4layer_2oz`` is 0.15 mm outer / 0.1016 mm inner.  The emitted
 ``.kicad_dru`` scopes them with ``(layer outer)`` / ``(layer inner)``; the
 Python checker must agree.
 """

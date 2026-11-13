@@ -594,6 +594,8 @@ class DRCChecker:
         "fiducials_missing": CATEGORY_ADVISORY,
         "board_id_missing": CATEGORY_ADVISORY,
         "silk_over_copper": CATEGORY_ADVISORY,
+        # Silk inside a graphic mask opening (#8861): an error, fab-blocking.
+        "silk_over_mask_opening": CATEGORY_MANUFACTURING,
         "silk_edge_clearance": CATEGORY_ADVISORY,
         # Coverage advisory for silk primitives the geometry model does not
         # cover (Issue #5811).  Explicit entry REQUIRED -- category_for_rule
