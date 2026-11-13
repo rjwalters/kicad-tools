@@ -133,7 +133,7 @@ def test_real_4layer_board_is_not_incomplete(capsys):
     """Regression: a committed 4L board with a stock stackup must not go incomplete."""
     from kicad_tools.cli.check_cmd import main
 
-    main([str(_BOARD_4L), "--mfr", "jlcpcb", "--format", "json"])
+    main([str(_BOARD_4L), "--mfr", "jlcpcb", "--skip", "mask_to_copper", "--format", "json"])
     out = capsys.readouterr().out
     data = json.loads(out[out.index("{") :])
     # The overall verdict can also be "incomplete" for an unrelated reason
@@ -147,7 +147,7 @@ def test_real_4layer_board_is_not_incomplete(capsys):
 def test_real_board_3oz_is_incomplete_and_allow_incomplete(capsys):
     from kicad_tools.cli.check_cmd import main
 
-    args = [str(_BOARD_4L), "--mfr", "jlcpcb", "--copper", "3"]
+    args = [str(_BOARD_4L), "--mfr", "jlcpcb", "--skip", "mask_to_copper", "--copper", "3"]
     assert main(args) != 0
     assert main([*args, "--allow-incomplete"]) == 0
 

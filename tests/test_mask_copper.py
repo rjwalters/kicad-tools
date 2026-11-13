@@ -398,3 +398,64 @@ def test_public_cli_forwards_mask_config_and_preserves_incomplete(tmp_path, caps
     assert assessment["coverage"] == "not_run"
     assert "explicit process-specific" in assessment["reasons"][0]
     assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "gap,expected,passed",
+    [
+        (0.05, "violation", False),
+        (0.12, "warning", True),
+        (0.2, None, True),
+    ],
+)
+def test_warning_tier_does_not_fail_verdict(gap, expected, passed):
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(conductor_x=1.1 + gap)
+    policy = MaskCopperPolicy(0.09, "order", "process", "rev", warning_clearance_mm=0.15)
+    result = assess_attributed_geometry(geometry, policy)
+    assert ([m.disposition for m in result.measurements] or [None]) == [expected]
+    assert result.passed is passed
+    severities = {v.severity for v in assessment_results(result).violations}
+    assert severities <= (
+        {"warning"} if expected == "warning" else {"error"} if expected else set()
+    )
+
+
+def test_warning_clearance_must_not_be_below_clearance():
+    with pytest.raises(ValueError):
+        MaskCopperPolicy(0.1, "s", "p", "r", warning_clearance_mm=0.05)
+
+
+def test_default_request_is_jlcpcb_only_and_cited():
+    from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+    request = default_request_for_manufacturer("jlcpcb")
+    assert request.policy.clearance_mm == 0.09
+    assert request.policy.warning_clearance_mm == 0.15
+    assert default_request_for_manufacturer("jlcpcb-tier1") is not None
+    assert default_request_for_manufacturer("pcbway") is None
+    assert default_request_for_manufacturer(None) is None
+
+
+def test_cli_mfr_runs_mask_to_copper_by_default_but_not_without_mfr(tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+
+    def run(*extra):
+        main(["check", str(board), "--drc-only", "--format", "json", *extra])
+        return json.loads(capsys.readouterr().out)
+
+    with_mfr = run("--mfr", "jlcpcb")
+    assessments = with_mfr.get("mask_copper_assessments")
+    assert assessments, "mask_to_copper must run by default under --mfr"
+    assert assessments[0]["policy"]["clearance_mm"] == 0.09
+    assert assessments[0]["coverage"] != "not_run" or assessments[0]["reasons"]
+
+    assert not run("--mfr", "jlcpcb", "--skip", "mask_to_copper").get("mask_copper_assessments")
+    assert not run().get("mask_copper_assessments")

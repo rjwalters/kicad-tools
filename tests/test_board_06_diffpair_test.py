@@ -737,6 +737,8 @@ class TestBoard06StrictGateGuard:
                 str(routed),
                 "--mfr",
                 "jlcpcb",
+                "--skip",
+                "mask_to_copper",
                 "--errors-only",
                 "--format",
                 "json",

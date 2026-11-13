@@ -61,6 +61,8 @@ def _recipe_dru(tmp_path: Path) -> str:
             str(routed),
             "--mfr",
             "jlcpcb",
+            "--skip",
+            "mask_to_copper",
             "--emit-dru",
             "--format",
             "json",
