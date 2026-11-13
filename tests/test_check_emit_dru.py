@@ -36,6 +36,7 @@ from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floo
 from kicad_tools.router.rules import NetClassRouting
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate import DRCChecker
+from tests._board03_check_cost import board03_check_timeout
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOARD_03 = REPO_ROOT / "boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb"
@@ -60,6 +61,7 @@ def _resolved_layers(pcb_path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
+@board03_check_timeout  # Issue #8901
 @pytest.mark.parametrize(
     ("mfr", "layers", "copper"),
     [
@@ -117,6 +119,7 @@ def test_emit_dru_matches_checker_resolved_rules(
     assert f"(min {rules.min_clearance_mm}mm)" in dru_path.read_text(encoding="utf-8")
 
 
+@board03_check_timeout  # Issue #8901
 def test_emit_dru_micro_via_exemption_present(board_copy: Path) -> None:
     """The emitted DRU keeps the micro-via exemption (#3118/#3734).
 
@@ -228,6 +231,7 @@ def test_emit_preserves_distinct_ampacity_classes(board_copy: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@board03_check_timeout  # Issue #8901
 def test_emit_dru_writes_only_dru(board_copy: Path) -> None:
     """``--emit-dru`` writes the ``.kicad_dru`` and NOT the ``.kicad_pro``."""
     main([str(board_copy), "--mfr", "jlcpcb", "--emit-dru", "--allow-incomplete"])
@@ -235,6 +239,7 @@ def test_emit_dru_writes_only_dru(board_copy: Path) -> None:
     assert not board_copy.with_suffix(".kicad_pro").exists()
 
 
+@board03_check_timeout  # Issue #8901
 def test_emit_drc_constraints_writes_both(board_copy: Path) -> None:
     """``--emit-drc-constraints`` writes both sidecars, and the ``.kicad_pro``
     Default netclass clearance is relaxed to the tier floor (#4097 parity)."""
@@ -260,6 +265,7 @@ def test_emit_drc_constraints_writes_both(board_copy: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@board03_check_timeout  # Issue #8901
 def test_emit_leaves_pcb_byte_identical(board_copy: Path) -> None:
     """Emission never mutates the ``.kicad_pcb`` (sidecars only)."""
     before = board_copy.read_bytes()
@@ -267,6 +273,7 @@ def test_emit_leaves_pcb_byte_identical(board_copy: Path) -> None:
     assert board_copy.read_bytes() == before
 
 
+@board03_check_timeout  # Issue #8901
 def test_emit_does_not_change_exit_code(board_copy: Path, tmp_path: Path) -> None:
     """The verdict/exit code is identical with and without the flag."""
     plain = tmp_path / "plain.kicad_pcb"
@@ -277,6 +284,7 @@ def test_emit_does_not_change_exit_code(board_copy: Path, tmp_path: Path) -> Non
     assert rc_plain == rc_emit
 
 
+@board03_check_timeout  # Issue #8901
 def test_emit_degrades_on_unwritable_dir(board_copy: Path, capsys, monkeypatch) -> None:
     """A sidecar write failure warns without failing the check (#4375).
 
@@ -311,6 +319,7 @@ def test_emit_degrades_on_unwritable_dir(board_copy: Path, capsys, monkeypatch) 
 # ---------------------------------------------------------------------------
 
 
+@board03_check_timeout  # Issue #8901
 def test_bare_check_leaves_board_directory_clean(board_copy: Path) -> None:
     """``kct check --mfr <tier>`` without ``--emit-*`` writes no sidecars.
 
@@ -334,6 +343,7 @@ def test_bare_check_leaves_board_directory_clean(board_copy: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+@board03_check_timeout  # Issue #8901
 def test_emit_dru_preserves_existing_creepage_and_user_rules(board_copy: Path) -> None:
     """``--emit-dru`` merges into the managed block instead of clobbering.
 
