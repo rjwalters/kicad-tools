@@ -628,8 +628,8 @@ class TestResolveMinTraceWidth:
     """
 
     def test_jlcpcb_4layer_2oz_is_the_reported_floor(self):
-        """jlcpcb 4-layer 2oz resolves 0.1524mm (the reporter's key)."""
-        assert resolve_min_trace_width("jlcpcb", 4, 2.0) == pytest.approx(0.1524)
+        """jlcpcb 4-layer 2oz resolves 0.15mm (the reporter's key)."""
+        assert resolve_min_trace_width("jlcpcb", 4, 2.0) == pytest.approx(0.15)
 
     def test_jlcpcb_2oz_floor_exceeds_mfr_limits_min_trace(self):
         """The 2oz floor is STRICTLY above MfrLimits.min_trace (no-op guard).
@@ -642,11 +642,11 @@ class TestResolveMinTraceWidth:
         floor = resolve_min_trace_width("jlcpcb", 4, 2.0)
         assert floor is not None
         assert floor > MFR_JLCPCB.min_trace
-        # And it is above the reported 0.150mm emission, so it binds.
-        assert floor > 0.150
+        # And it is at the reported 0.150mm emission (fab-published, #8865).
+        assert floor >= 0.150
 
     def test_jlcpcb_2layer_2oz_is_also_the_heavy_copper_floor(self):
-        assert resolve_min_trace_width("jlcpcb", 2, 2.0) == pytest.approx(0.1524)
+        assert resolve_min_trace_width("jlcpcb", 2, 2.0) == pytest.approx(0.16)
 
     def test_jlcpcb_1oz_floors_are_layer_keyed(self):
         """1oz floors differ per layer count -- 2-layer is the coarser one."""
@@ -687,7 +687,7 @@ class TestRelaxationLadderRespectsCheckSideFloor:
 
         This documents the second sub-floor emitter the fix has to close --
         ``MfrLimits.min_trace`` (0.127) lets tier interpolation walk right
-        through 0.1524mm.
+        through 0.15mm.
         """
         tiers = get_relaxation_tiers(
             initial_trace_width=0.2,
@@ -696,7 +696,7 @@ class TestRelaxationLadderRespectsCheckSideFloor:
             initial_via_diameter=0.6,
             manufacturer="jlcpcb",
         )
-        assert min(t.trace_width for t in tiers) < 0.1524
+        assert min(t.trace_width for t in tiers) < 0.15
 
     def test_resolved_floor_clamps_every_tier(self):
         """Threading the resolved floor keeps every tier at or above it."""

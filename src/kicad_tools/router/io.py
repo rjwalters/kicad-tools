@@ -5474,7 +5474,7 @@ def load_pcb_for_routing(
                 that ``kct check --mfr`` enforces.  The built-in and
                 auto-classified net classes assembled below carry library
                 default widths (e.g. ``Differential`` = 0.15mm) that are
-                below that floor on heavy copper (jlcpcb 2oz = 0.1524mm),
+                below that floor on heavy copper (jlcpcb 2oz = 0.15-0.16mm),
                 so route emitted copper its own check rejected with
                 ``dimension_trace_width``.  When given, those library
                 defaults are raised to the floor.  Caller-supplied net
@@ -5964,7 +5964,7 @@ def load_pcb_for_routing(
     # minimum trace width.  ``DEFAULT_NET_CLASS_MAP`` and the auto-classifier
     # carry fixed widths (``Differential`` = 0.15mm) that sit below the
     # per-<layers>layer_<oz>oz floor ``kct check --mfr`` enforces on heavy
-    # copper (jlcpcb 2oz = 0.1524mm) -- the source of the reported 63
+    # copper (jlcpcb 2oz = 0.15-0.16mm) -- the source of the reported 63
     # identical ``Trace width 0.150mm < minimum 0.152mm`` errors.  Only the
     # map built above is touched: a caller's own net-class map is merged into
     # ``router.net_class_map`` later and stays user data (the CLI warns about
