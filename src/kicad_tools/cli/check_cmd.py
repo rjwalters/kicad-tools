@@ -3933,8 +3933,6 @@ def _apply_dfm_table(
     (layers, outer oz, inner oz) has no entry -- the caller turns that into an
     ``incomplete`` verdict.  Floors only tighten the profile's rules.
     """
-    from dataclasses import replace
-
     profile = get_profile(mfr)
     if profile.dfm_thresholds is None:
         copper_weights["dfm_table"] = {
@@ -3971,17 +3969,7 @@ def _apply_dfm_table(
         )
         return True
     t = entry.thresholds
-    r = checker.design_rules
-    checker.design_rules = replace(
-        r,
-        min_clearance_mm=max(r.min_clearance_mm, t["trace_spacing"].danger_mm),
-        min_smd_pad_clearance_mm=max(r.min_smd_pad_clearance_mm or 0.0, t["pad_spacing"].danger_mm),
-        min_annular_ring_mm=max(r.min_annular_ring_mm, t["annular_ring_via"].danger_mm),
-        min_pth_annular_ring_mm=max(
-            r.min_pth_annular_ring_mm or 0.0, t["annular_ring_pth"].danger_mm
-        ),
-        min_solder_mask_dam_mm=max(r.min_solder_mask_dam_mm, t["mask_bridge"].danger_mm),
-    )
+    checker.design_rules = profile.apply_dfm_floors(checker.design_rules, entry)
     copper_weights["dfm_table"] = {
         "version": table_version,
         "stackup": stackup,
