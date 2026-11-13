@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Hashable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from statistics import median
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kicad_tools.schema.pcb import PCB, Segment
@@ -63,6 +63,14 @@ COORD_EPSILON_MM = 1e-6
 # consumer share a single source for the identifiers.
 RULE_FRAGMENT_FRACTION = "routing_quality_fragment_fraction"
 RULE_STAIRCASE_FRACTION = "routing_quality_staircase_fraction"
+RULE_OFF_AXIS_FRACTION = "routing_quality_off_axis_fraction"
+
+# Issue #8884: ``kct readiness`` raises this named, ack-required warning (one
+# per layer over the ceiling).  Measured worst-layer off-axis length share on
+# the committed ``boards/*`` outputs: 0.000 for every clean ``kct route``
+# board (max 0.001), 0.384 on 09-usbc-pd-power.
+RULE_OFF_AXIS_LENGTH_WARNING = "routing_quality_off_axis_length"
+READINESS_OFF_AXIS_CEILING = 0.25
 
 
 @dataclass(frozen=True)
@@ -92,6 +100,32 @@ class RoutingQualityMetrics:
     staircase_fraction: float
     copper_arc_count: int = 0
     copper_arc_length_mm: float = 0.0
+    # Issue #8884: length-weighted off-axis share.  Count shares hide long
+    # off-axis runs among many short orthogonal stubs, so also track length.
+    off_axis_length_mm: float = 0.0
+    straight_length_mm: float = 0.0
+    # Layer key -> off-axis length / total nonzero straight length on that layer.
+    # compare=False: router producers key by ``Layer`` enum, schema by string.
+    off_axis_length_fraction_by_layer: dict[Hashable, float] = field(
+        default_factory=dict, compare=False
+    )
+
+    @property
+    def off_axis_length_fraction(self) -> float:
+        """Board-wide off-axis length share of nonzero straight copper."""
+        if self.straight_length_mm <= 0.0:
+            return 0.0
+        return self.off_axis_length_mm / self.straight_length_mm
+
+    @property
+    def worst_off_axis_layer(self) -> tuple[Hashable, float] | None:
+        """``(layer, fraction)`` of the layer with the highest off-axis length share."""
+        if not self.off_axis_length_fraction_by_layer:
+            return None
+        return max(
+            self.off_axis_length_fraction_by_layer.items(),
+            key=lambda kv: (kv[1], str(kv[0])),
+        )
 
     @property
     def diagonal_45_fraction(self) -> float:
@@ -108,9 +142,9 @@ class RoutingQualityMetrics:
         nonzero = self.total_segments - self.zero_length_count
         return self.diagonal_45_count / nonzero if nonzero else 0.0
 
-    def to_dict(self) -> dict[str, int | float]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to the stable JSON contract emitted by ``kct check``."""
-        result: dict[str, int | float] = {
+        result: dict[str, Any] = {
             "total_segments": self.total_segments,
             "nets_with_copper": self.nets_with_copper,
             "segments_per_net": self.segments_per_net,
@@ -130,6 +164,15 @@ class RoutingQualityMetrics:
         if self.copper_arc_count:
             result["copper_arc_count"] = self.copper_arc_count
             result["copper_arc_length_mm"] = self.copper_arc_length_mm
+
+        # Issue #8884: additive keys only; existing keys are unchanged.
+        result["off_axis_length_fraction"] = self.off_axis_length_fraction
+        result["off_axis_length_fraction_by_layer"] = {
+            str(layer): frac
+            for layer, frac in sorted(
+                self.off_axis_length_fraction_by_layer.items(), key=lambda kv: str(kv[0])
+            )
+        }
         return result
 
 
@@ -166,6 +209,7 @@ def evaluate_routing_quality_thresholds(
     *,
     max_fragment_fraction: float | None = None,
     max_staircase_fraction: float | None = None,
+    max_off_axis_fraction: float | None = None,
 ) -> list[ThresholdBreach]:
     """Evaluate opt-in routing-quality ceilings over computed metrics.
 
@@ -212,6 +256,31 @@ def evaluate_routing_quality_thresholds(
                 ),
             )
         )
+    if max_off_axis_fraction is not None:
+        worst = metrics.worst_off_axis_layer
+        if worst is not None and worst[1] > max_off_axis_fraction:
+            layer, frac = worst
+            count_share = (
+                metrics.off_axis_count / (metrics.total_segments - metrics.zero_length_count)
+                if metrics.total_segments - metrics.zero_length_count
+                else 0.0
+            )
+            breaches.append(
+                ThresholdBreach(
+                    rule_id=RULE_OFF_AXIS_FRACTION,
+                    metric="off_axis_length_fraction",
+                    actual=frac,
+                    limit=max_off_axis_fraction,
+                    message=(
+                        f"Routing-quality gate: layer {layer} off-axis length share "
+                        f"{frac:.4f} exceeds the --max-off-axis-fraction ceiling "
+                        f"{max_off_axis_fraction:.4f} (board-wide: "
+                        f"{metrics.off_axis_count} off-axis segment(s), "
+                        f"{count_share:.1%} by count, "
+                        f"{metrics.off_axis_length_fraction:.1%} by length)"
+                    ),
+                )
+            )
     return breaches
 
 
@@ -220,6 +289,7 @@ def routing_quality_gate_dict(
     *,
     max_fragment_fraction: float | None,
     max_staircase_fraction: float | None,
+    max_off_axis_fraction: float | None = None,
 ) -> dict[str, object]:
     """Serialize the threshold-gate outcome for the ``routing_quality`` JSON.
 
@@ -233,6 +303,7 @@ def routing_quality_gate_dict(
         "thresholds": {
             "max_fragment_fraction": max_fragment_fraction,
             "max_staircase_fraction": max_staircase_fraction,
+            "max_off_axis_fraction": max_off_axis_fraction,
         },
         "gate_passed": not breaches,
         "gate_breaches": [
@@ -316,6 +387,10 @@ def compute_routing_quality_from_records(
     orthogonal_count = 0
     diagonal_45_count = 0
     off_axis_count = 0
+    off_axis_length_mm = 0.0
+    straight_length_mm = 0.0
+    layer_total: dict[Hashable, float] = {}
+    layer_off_axis: dict[Hashable, float] = {}
 
     # (net, layer, quantized endpoint) -> set of orientations of *short*
     # orthogonal segments touching that point.  Only a perpendicular
@@ -339,6 +414,8 @@ def compute_routing_quality_from_records(
             fragment_count += 1
 
         direction = _classify_direction(dx, dy)
+        straight_length_mm += length
+        layer_total[layer] = layer_total.get(layer, 0.0) + length
         if direction in ("horizontal", "vertical"):
             orthogonal_count += 1
             if length < STAIRCASE_STEP_MM:
@@ -352,6 +429,8 @@ def compute_routing_quality_from_records(
             diagonal_45_count += 1
         else:
             off_axis_count += 1
+            off_axis_length_mm += length
+            layer_off_axis[layer] = layer_off_axis.get(layer, 0.0) + length
 
     # Second pass: a short orthogonal segment is a staircase step when a
     # perpendicular short orthogonal segment of the same net and layer
@@ -382,4 +461,25 @@ def compute_routing_quality_from_records(
         off_axis_count=off_axis_count,
         staircase_step_count=staircase_step_count,
         staircase_fraction=staircase_fraction,
+        off_axis_length_mm=off_axis_length_mm,
+        straight_length_mm=straight_length_mm,
+        off_axis_length_fraction_by_layer={
+            layer: layer_off_axis.get(layer, 0.0) / total for layer, total in layer_total.items()
+        },
     )
+
+
+def off_axis_layer_warning_count(
+    routing_quality: object, ceiling: float = READINESS_OFF_AXIS_CEILING
+) -> int:
+    """Count layers whose off-axis length share exceeds ``ceiling`` (issue #8884).
+
+    Reads the ``routing_quality`` object from a ``kct check`` JSON report;
+    returns 0 when the object or the per-layer map is absent or malformed.
+    """
+    if not isinstance(routing_quality, dict):
+        return 0
+    by_layer = routing_quality.get("off_axis_length_fraction_by_layer")
+    if not isinstance(by_layer, dict):
+        return 0
+    return sum(1 for v in by_layer.values() if isinstance(v, (int, float)) and v > ceiling)

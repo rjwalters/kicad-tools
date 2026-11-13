@@ -728,6 +728,13 @@ else:
         print(f"  - {violation}")
 ```
 
+## Default-on under `--mfr jlcpcb`: Mask-to-Copper (Issue #8842)
+
+`kct check <board> --mfr jlcpcb` runs the native `mask_to_copper` check with an
+interim policy (error below 0.09 mm, warning at <=0.15 mm) and no extra config.
+Without native KiCad 10.0.5 it reports `incomplete`, never a silent pass; use
+`--skip mask_to_copper` to opt out. Details: [mask-to-copper](mask-to-copper.md).
+
 ## Advisory: Trace Width Consistency (`width_consistency`)
 
 A board can pass DRC and still be full of width steps that nobody chose,

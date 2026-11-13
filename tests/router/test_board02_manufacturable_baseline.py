@@ -11,9 +11,15 @@ Baseline measurement at HEAD (worst-of-3 across seeds 42/43/44 with
 - **Routed: 8/8 signal nets (100%)** -- LINE_A-D + NODE_A-D
 - **Connected pads: 34/34 (100%)** including GND/VCC via auto-pour
 - **DRC: 0 errors, 0 warnings** at ``jlcpcb-tier1`` profile
-- **Deterministic output**: 22 routes / 20 vias / 316.39mm total
+- **Deterministic output**: 22 routes / 20 vias / 315.15mm total
   length identical across seeds 42/43/44 -- this small 2-layer board
-  has fully converged.  (316.57mm before the Issue #8502 re-baseline:
+  has fully converged.  (315.21mm before the Issue #8901 re-baseline:
+  #8831 lets ``compress_staircase`` absorb a staircase's trailing
+  monotone legs, so the replacement swallows three more segments -- see
+  the #8901 note in
+  ``test_routing_output_deterministic_across_seeds``.)  (316.39mm before
+  the Issue #8505 re-baseline, which stopped emitting a shared
+  pad-to-via stub twice.)  (316.57mm before the Issue #8502 re-baseline:
   #8387 cuts optimizer chains at interior vias, which re-shortens
   NODE_A's leg past its through-via; no other net moved -- see the
   #8502 note in ``test_routing_output_deterministic_across_seeds``.)  (26 vias / 323.06mm before the Issue #6315
@@ -972,7 +978,21 @@ def test_routing_output_deterministic_across_seeds(unrouted_pcb_path: Path) -> N
     # counted twice.  ``optimize_routes_grid_synced`` now drops a segment a
     # same-net route already kept.  Routes (22), vias (20) UNCHANGED, length
     # 316.57 -> 315.21.  Prior pin 316.39 (#8502 / #8387).
-    EXPECTED_LENGTH = 315.21
+    #
+    # Re-baselined 2026-11-13 for Issue #8901 (#8831, commit b132392b9):
+    # ``compress_staircase`` now tries a longer *monotone* run before the
+    # strict two-direction one, so a staircase's trailing legs that keep
+    # descending the same diagonal are absorbed into the <=2-segment
+    # replacement instead of being left in place.  Seeds 42/43/44 all yield
+    # (22, 77, 20, 315.15) -- routes (22) and vias (20) UNCHANGED, length
+    # 315.21 -> 315.15 (-0.06 mm), segments 80 -> 77.  Absorbing a leg can
+    # only shorten the chain, so the direction is the expected one.
+    # Attributed by reverse-applying only b132392b9's
+    # src/kicad_tools/router/optimizer/algorithms.py change (no later commit
+    # touches that file): the old 315.21 pin then passes again, and restoring
+    # it reproduces 315.15.  Which net moved was NOT diffed per net.
+    # Prior pin (22, 80, 20, 315.21) (#8505).
+    EXPECTED_LENGTH = 315.15
     # Re-baselined 2026-09-14 for Issue #5201: the escape router
     # (``EscapeRouter.via_in_pad_supported``) previously resolved
     # via-in-pad eligibility from the bare ``MfrLimits`` capability

@@ -250,6 +250,10 @@ def count_errors(pcb_path: Path, mfr: str = DEFAULT_MANUFACTURER) -> tuple[int, 
         str(pcb_path),
         "--mfr",
         mfr,
+        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
+        # in this gate; skipped until the #8839 threshold table lands.
+        "--skip",
+        "mask_to_copper",
         "--errors-only",
         "--format",
         "json",

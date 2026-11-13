@@ -59,6 +59,17 @@ def run_drc(pcb_path: Path, *, refill: bool = False) -> tuple[bool, int, int]:
                 str(pcb_path),
                 "--mfr",
                 "jlcpcb-tier1",
+                # Issue #8842: mask_to_copper is default-on under --mfr but has
+                # no baseline in this gate; skipped until #8858 lands.
+                "--skip",
+                "mask_to_copper",
+                # Issue #8845: the JLCDFM fab-parity table makes any otherwise
+                # passing jlcpcb-family check "incomplete" (tht_to_smd and
+                # silkscreen_to_hole are danger-capable with no kct rule), which
+                # is a property of kct's rule coverage, not of this board.  Let
+                # it exit 0 -- error-level findings still fail the gate -- the
+                # way boards 00/01/02 already do.
+                "--allow-incomplete",
                 # Issue #3969: scope to geometric DRC so a fresh-route temp
                 # dir without ERC/LVS/Manifest artifacts does not exit
                 # INCOMPLETE (2) and get misread as a DRC failure with 0

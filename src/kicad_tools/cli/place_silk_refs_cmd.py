@@ -77,6 +77,7 @@ def _print_json(
         "total_unplaceable": len(result.unplaceable),
         "total_under_component_fallback": len(result.under_component_fallback),
         "placements": [p.to_dict() for p in result.placements],
+        "fixed_text_conflicts": [c.to_dict() for c in result.fixed_text_conflicts],
     }
     if drc_summary is not None:
         data["drc_verification"] = drc_summary
@@ -95,9 +96,27 @@ def _print_summary(result: PlaceSilkRefsResult, dry_run: bool) -> None:
     print(f"{'; '.join(parts)} (clearance: {result.clearance_mm:.2f}mm)")
 
 
+def _print_fixed_text_conflicts(result: PlaceSilkRefsResult) -> None:
+    if not result.fixed_text_conflicts:
+        return
+    print(
+        f"\n{len(result.fixed_text_conflicts)} board text item(s) sit over a mask opening "
+        "(not moved; relocate by hand):"
+    )
+    for c in result.fixed_text_conflicts:
+        x, y = c.position
+        print(f"  {c.text!r} at ({x:.3f}, {y:.3f}) over {c.opening}")
+        if c.candidates:
+            spots = ", ".join(f"({cx:.3f}, {cy:.3f})" for cx, cy in c.candidates)
+            print(f"    candidate clear positions: {spots}")
+        else:
+            print("    no clear position found within the search radius")
+
+
 def _print_text(result: PlaceSilkRefsResult, dry_run: bool) -> None:
     if not result.placements:
         print("No visible reference designators found.")
+        _print_fixed_text_conflicts(result)
         return
 
     action = "Would move" if dry_run else "Moved"
@@ -128,6 +147,8 @@ def _print_text(result: PlaceSilkRefsResult, dry_run: bool) -> None:
         print(f"\n{len(result.unplaceable)} reference(s) could not be placed cleanly:")
         for p in sorted(result.unplaceable, key=lambda p: p.footprint_ref):
             print(f"  {p.footprint_ref}: {p.reason}")
+
+    _print_fixed_text_conflicts(result)
 
 
 def _print_results(

@@ -172,6 +172,31 @@ def main(argv: list[str] | None = None) -> int:
     alt_parser.add_argument("--limit", type=int, default=5, help="Max results (default: 5)")
     add_format_flag(alt_parser)
 
+    # stock subcommand
+    stock_parser = subparsers.add_parser(
+        "stock",
+        help="Distributor stock/price/lead time (Mouser, DigiKey; BYO API keys)",
+        description=(
+            "Look up manufacturer part numbers at authorised distributors via their "
+            "official APIs. Credentials come from the environment only: "
+            "MOUSER_API_KEY; DIGIKEY_CLIENT_ID and DIGIKEY_CLIENT_SECRET. Sources "
+            "without credentials are skipped. Several MPNs give a comparison sorted "
+            "by availability, then unit price."
+        ),
+    )
+    stock_parser.add_argument("mpns", nargs="+", help="Manufacturer part number(s)")
+    stock_parser.add_argument(
+        "-q", "--quantity", type=int, default=1, help="Quantity to price (default: 1)"
+    )
+    stock_parser.add_argument("--no-cache", action="store_true", help="Bypass the local cache")
+    stock_parser.add_argument(
+        "--cache-ttl-minutes",
+        type=float,
+        default=60.0,
+        help="Reuse cached offers younger than this (default: 60)",
+    )
+    add_format_flag(stock_parser, choices=("text", "table", "json"))
+
     # cache subcommand
     cache_parser = subparsers.add_parser("cache", help="Cache management")
     add_format_flag(cache_parser)
@@ -208,6 +233,8 @@ def main(argv: list[str] | None = None) -> int:
         return _availability(args)
     elif args.action == "suggest":
         return _suggest(args)
+    elif args.action == "stock":
+        return _stock(args)
     elif args.action == "alternatives":
         return _alternatives(args)
     elif args.action == "cache":
@@ -215,6 +242,72 @@ def main(argv: list[str] | None = None) -> int:
     elif args.action == "sync-catalog":
         return _sync_catalog(args)
 
+    return 0
+
+
+def _format_age(seconds: float | None) -> str:
+    if seconds is None:
+        return "live"
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m ago"
+    return f"{seconds / 3600:.1f}h ago"
+
+
+def _stock(args) -> int:
+    """Handle the stock command (Mouser/DigiKey official APIs)."""
+    from ..parts.distributors import query_stock
+
+    if args.quantity < 1:
+        print("Error: --quantity must be >= 1", file=sys.stderr)
+        return 1
+    report = query_stock(
+        args.mpns,
+        args.quantity,
+        use_cache=not args.no_cache,
+        ttl_seconds=args.cache_ttl_minutes * 60,
+    )
+    # Notices go to stderr so JSON on stdout stays machine-readable.
+    for note in report.notices:
+        print(note, file=sys.stderr)
+    if args.format == "json":
+        emit_json(
+            {
+                "command": "stock",
+                "quantity": args.quantity,
+                "offers": [o.to_dict() for o in report.offers],
+                "not_found": report.not_found,
+                "notices": report.notices,
+                "success": bool(report.offers),
+            }
+        )
+        return 0 if report.offers else 1
+    if not report.offers:
+        print("No distributor offers found.")
+        for nf in report.not_found:
+            print(f"  not found: {nf}")
+        return 1
+    header = (
+        f"{'MPN':<22} {'Source':<8} {'Dist PN':<22} {'Stock':>8} "
+        f"{'Unit':>10} {'Lead':<12} {'Region':<10} {'Read':<9}"
+    )
+    print(f"Quantity: {args.quantity}")
+    print(header)
+    print("-" * len(header))
+    for o in report.offers:
+        price = f"{o.unit_price:.4f} {o.currency}" if o.unit_price is not None else "-"
+        flag = "" if o.purchasable else "  (stock < qty)"
+        print(
+            f"{o.mpn[:22]:<22} {o.distributor:<8} {o.distributor_pn[:22]:<22} {o.stock:>8} "
+            f"{price:>10} {(o.lead_time or '-')[:12]:<12} {o.region[:10]:<10} "
+            f"{_format_age(o.age_seconds):<9}{flag}"
+        )
+        if o.price_flag:
+            print(f"    note: {o.price_flag}")
+    for nf in report.not_found:
+        print(f"not found: {nf}")
+    print("Figures are point-in-time reads; stock moves.")
     return 0
 
 

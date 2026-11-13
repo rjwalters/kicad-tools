@@ -1,318 +1,129 @@
 # kicad-tools Roadmap
 
-**Mission**: Enable AI agents to design PCBs programmatically.
-
-kicad-tools provides the programmatic interface between AI reasoning and KiCad
-file manipulation. We complement KiCad—we don't replace it.
-
-## Design Philosophy
-
-1. **Agent-First API** - Every operation callable from code with structured I/O
-2. **Rich Feedback** - Validation returns actionable information, not just pass/fail
-3. **Round-Trip Fidelity** - Edits preserve existing file structure
-4. **Leverage KiCad** - Use kicad-cli for complex operations; focus on agent-specific capabilities
-5. **Hierarchical Abstractions** - Work with circuit blocks, not just primitives
-
----
-
-## Current State (v0.14.0)
-
-The complete agent PCB design workflow is now supported:
-
-| Step | Capability | Version |
-|------|------------|---------|
-| Parse datasheets | `datasheet` module | v0.4.0 |
-| Create symbols/footprints | `library` module, generators | v0.4.0 |
-| Design schematic | `Schematic`, circuit blocks | v0.5.0 |
-| Place components | `PCBEditor`, placement optimization | v0.6.0 |
-| Route traces | `Autorouter`, diff pairs, zones | v0.3.0 |
-| Validate design | Pure Python DRC, rich feedback | v0.7.0 |
-| Export for manufacturing | `AssemblyPackage` (via kicad-cli) | v0.2.0 |
-| AI agent integration | MCP server, sessions | v0.8.0 |
-| Design intent & feedback | `intent` module, incremental DRC | v0.9.0 |
-| Pattern library & explanations | `patterns`, `explain` modules | v0.10.0 |
-| Placement optimization | CMA-ES, Bayesian, routing orchestration | v0.11.0 |
-| Manufacturing export pipeline | BOM/CPL/gerber, JLCPCB LCSC auto-match, design report | v0.12.0 |
-| Global routing | Two-phase RSMT decomposition, RUDY congestion, Specctra DSN export | v0.13.0 |
-| Demo gallery & renders | kicad-tools.org gallery, `kct render`/`board-metrics`, oblique 3D + 2D-SVG | v0.14.0 |
-| Independent LVS gate | Copper-extracted netlist comparison (label-independent for autorouter copper) | v0.14.0 |
-
-See [CHANGELOG.md](CHANGELOG.md) for detailed release history.
-
----
-
-## Core Challenges for Agents
-
-These are the fundamental challenges AI agents face when designing PCBs, and how
-we plan to address them:
-
-| Challenge | Description | Solution |
-|-----------|-------------|----------|
-| Incomplete Information | Tools don't understand design intent | ✅ Design Intent System (v0.9) |
-| Combinatorial Explosion | Huge placement/routing solution space | ✅ Placement Optimizer (v0.11) |
-| Feedback Latency | Problems discovered late in process | ✅ Continuous Validation (v0.9) |
-| Knowledge Gap | Agents lack PCB design expertise | ✅ Patterns + Explanations (v0.10) |
-| Communication Overhead | Verbose state, repeated context | ✅ Context Persistence (v0.9) |
-
----
-
-## Planned Versions
-
-### v0.9.0 - Design Intent & Continuous Feedback
-
-**Focus**: Help agents understand design intent and get real-time feedback.
-
-The biggest gap in agent-driven PCB design is that tools don't understand WHAT
-the agent is trying to achieve. When an agent says "route USB_D+" the tools
-don't know it's a high-speed differential pair needing impedance control. This
-release adds a design intent layer that captures requirements and provides
-continuous feedback.
-
-**Design Intent System**
-- [x] Interface declarations with automatic constraint derivation
-  ```python
-  # Declare intent - system derives constraints automatically
-  design.declare_interface("USB_D+", "USB_D-", type="usb2_high_speed")
-  # System now enforces: 90Ω diff impedance, length matching, diff pair routing
-  ```
-- [x] Built-in interface types: `USB2`, `USB3`, `SPI`, `I2C`, `LVDS`, `DDR`, `Ethernet`
-- [x] Intent-aware validation ("violates USB 2.0 spec" vs "clearance too small")
-- [x] Intent-aware suggestions ("USB traces should be shorter for high-speed")
-- [x] Custom interface definitions for project-specific needs
-
-**Continuous Validation**
-- [x] Real-time DRC during placement sessions (not just at end)
-- [x] Predictive warnings based on current trajectory
-  ```python
-  session.apply_move("C1", x=45, y=32)
-  # Response includes:
-  # {"warnings": [{"type": "predictive",
-  #   "message": "This position may make routing USB_D+ difficult",
-  #   "suggestion": "Consider moving 2mm left"}]}
-  ```
-- [x] Routing difficulty estimation before routing
-- [x] Incremental validation (only check affected areas)
-- [x] "What-if" analysis API for evaluating changes without committing
-
-**Intelligent Failure Recovery**
-- [x] Root cause analysis for routing/placement failures
-- [x] Multiple resolution strategies with trade-offs
-  ```python
-  result = router.route_net("CLK")
-  # On failure, returns:
-  # {"resolution_strategies": [
-  #   {"strategy": "move_component", "target": "C3", "difficulty": "easy"},
-  #   {"strategy": "add_via", "position": [44, 30], "difficulty": "medium"},
-  #   {"strategy": "reroute_blocking_net", "net": "SPI_MOSI", "difficulty": "hard"}
-  # ]}
-  ```
-- [x] Similar problem pattern matching ("this looks like bypass_cap_blocking")
-- [x] Difficulty estimation for each fix option
-
-**Context Persistence**
-- [x] Persistent design context across MCP calls
-- [x] Decision history with rationale tracking
-- [x] Learned preferences from agent behavior
-- [x] Efficient state encoding (reduce token overhead)
-
----
-
-### v0.10.0 - Pattern Library & Explanations ✅ RELEASED
-
-**Focus**: Encode expert PCB design knowledge for agent use.
-
-Agents shouldn't solve USB layout from first principles every time. A curated
-library of validated design patterns accelerates iteration and improves quality.
-
-**Design Pattern Library**
-- [x] Pattern schema with placement rules and constraints
-  ```python
-  from kicad_tools.patterns import USBPattern
-
-  pattern = USBPattern(speed="high_speed", connector="type_c", esd_protection=True)
-  placements = pattern.get_placements(connector_at=(10, 50))
-  # Returns validated placement meeting USB spec
-  ```
-- [x] Core patterns:
-  - Power: LDO, buck converter, battery charging, reverse polarity
-  - Interfaces: USB 2.0/3.0, SPI, I2C, UART, Ethernet, HDMI
-  - MCU: Bypass caps, crystal, debug header, reset circuit
-  - Analog: ADC filtering, op-amp configs, sensor interfaces
-  - Protection: ESD, TVS, overcurrent, thermal shutdown
-- [x] Pattern validation (verify instantiated pattern meets specs)
-- [x] Pattern adaptation (customize for specific components)
-- [x] User-defined patterns with validation rules
-
-**Explanation System**
-- [x] Queryable explanations for DRC rules
-  ```python
-  explain("trace_length", net="USB_D+")
-  # Returns: {"explanation": "USB 2.0 high-speed signals require...",
-  #           "spec_reference": "USB 2.0 section 7.1.5",
-  #           "current_value": 45.2, "target_range": [40, 50]}
-  ```
-- [x] Design decision rationale tracking
-- [x] Spec references for all constraints
-- [x] Common mistake detection with explanations
-- [x] Learning resources for unfamiliar patterns
-
-**Multi-Resolution Abstraction**
-- [x] High-level operations for common tasks
-  ```python
-  # High level - declarative
-  design.add_subsystem(
-      "power_supply",
-      components=["U_REG", "C_IN", "C_OUT", "L1"],
-      near_edge="left",
-      optimize_for="thermal",
-  )
-
-  # Medium level - guided
-  optimizer.group_components(refs, strategy="power_supply", anchor="U_REG")
-
-  # Low level - explicit (existing API)
-  session.apply_move("U_REG", x=10, y=50)
-  ```
-- [x] Automatic decomposition of high-level commands
-- [x] Consistent results across abstraction levels
-
----
-
-### v0.11.0 - Placement Optimization & Routing Orchestration ✅ RELEASED
-
-**Focus**: Intelligent placement optimization and unified routing orchestration.
-
-**Placement Optimization System**
-- [x] PlacementVector encoding for search space definition
-- [x] Multi-objective cost functions (HPWL wirelength, overlap, boundary violations)
-- [x] CMA-ES evolutionary optimizer
-- [x] Bayesian Optimization strategy (Ax/BoTorch)
-- [x] Force-directed and random seed heuristics
-- [x] Multi-fidelity evaluation pipeline
-- [x] Netlist graph analysis for connectivity-aware priors
-- [x] CLI (`kct optimize-placement`) and MCP tools
-
-**Routing Orchestration**
-- [x] Unified multi-strategy routing orchestrator
-- [x] Hierarchical routing with global channel assignment
-- [x] Adaptive grid (fine near pads, coarse in channels)
-- [x] Fine-pitch support (sub-grid, dog-leg, escape routing)
-- [x] Via conflict resolution and clearance repair
-
-**Type System Foundations**
-- [x] Interval types for parametric constraints
-- [x] Typed interface ports for type-checked connections
-
----
-
-### v0.12.0 - Typed Interfaces & Constraints
-
-**Focus**: Type-safe circuit blocks and parametric part selection.
-
-*(Inspired by atopile's interface system and constraint solver)*
-
-**Typed Interface System**
-- [ ] Interface protocols: `PowerInterface`, `I2CInterface`, `SPIInterface`, `USBInterface`
-- [ ] Type-checked connections (catch I2C→SPI misconnections at design time)
-- [ ] Automatic reference management (power/ground auto-wiring)
-- [ ] Parameter validation on connection (voltage/current compatibility)
-
-**Constraint-Based Part Selection**
-- [ ] Unit-aware interval arithmetic (prevent ohms + volts)
-- [ ] Parameter constraints with equations (`v_out = v_in * ratio`)
-- [ ] LCSC API integration for parametric queries
-- [ ] Auto-select parts meeting constraints
-
-**Example**:
-```python
-# Current approach
-ldo = LDOBlock(sch, ref="U1", value="AMS1117-3.3")
-
-# Constraint-based approach
-ldo = LDOBlock(
-    sch,
-    ref="U1",
-    input_voltage=Interval(4.5, 5.5),
-    output_voltage=Interval.from_center_rel(3.3, 0.05),
-    output_current=0.5,
-)
-# System auto-selects LDO and caps from LCSC
-```
-
----
-
-### v1.0.0 - Production Ready
-
-**Focus**: API stability, performance, and production deployment.
-
-- [ ] API stability guarantees (semantic versioning)
-- [ ] Comprehensive documentation with examples
-- [ ] Performance optimization for large boards (1000+ components)
-- [ ] Robust error handling across all modules
-- [ ] CI/CD integration examples
-- [ ] Benchmark suite for regression testing
-
----
-
-### Beyond v1.0 - Ecosystem & IDE
-
-**Package Registry** *(inspired by atopile)*
-- [ ] Package manifest format for circuit blocks
-- [ ] DAG-based dependency resolution
-- [ ] Git/registry/file dependency types
-- [ ] Publishing workflow via GitHub Actions
-- [ ] Community block ecosystem
-
-**IDE Integration**
-- [ ] LSP server for `.kicad_sch` and `.kicad_pcb` files
-- [ ] Real-time DRC/ERC diagnostics in VS Code
-- [ ] Hover for component details, net info
-- [ ] Go-to-definition for net references
-- [ ] Syntax highlighting for S-expression files
-
-**Simulation Integration**
-- [ ] Basic power consumption estimation
-- [ ] Thermal estimation without full simulation
-- [ ] Signal integrity preview (crosstalk, impedance)
-- [ ] Integration hooks for external simulators
-
-**SPICE Simulation Helpers** *(under consideration)*
-- [ ] Netlist export compatible with ngspice/LTspice/Xyce
-- [ ] Simulation orchestration (run ngspice via subprocess, capture results)
-- [ ] Structured result parsing (signals, measurements as Python objects)
-- [ ] High-level validation queries:
-  ```python
-  # Example API shape (exploratory)
-  from kicad_tools.simulation import simulate
-
-  result = simulate.transient(schematic, duration="10ms")
-  stability = simulate.check_stability(schematic, node="VOUT")
-  bandwidth = simulate.measure_bandwidth(schematic, input="VIN", output="VOUT")
-  ```
-- [ ] Common analysis types: DC operating point, AC sweep, transient
-- [ ] SPICE model validation (check components have valid models)
-
-*Goal: Help agents verify designs electrically without building a full simulator.
-Leverage KiCad's ngspice integration and kicad-cli where possible.*
-
----
-
-## Non-Goals
-
-These are explicitly **not** planned:
-
-- **Schematic capture GUI** - Use KiCad for interactive design
-- **3D rendering** - Use KiCad's 3D viewer
-- **Full SPICE simulation engine** - Use ngspice/LTspice; we provide orchestration helpers
-- **Gerber generation** - Use kicad-cli (battle-tested, reliable)
-- **Replacing KiCad** - We complement it, not replace it
-
----
-
-## Contributing
-
-1. Maintain round-trip fidelity for all file modifications
-2. Add tests for new functionality
-3. Support `--format json` in CLI commands
-4. Return actionable errors from every API
-5. Test with real KiCad files (8.0+)
+**Mission**: enable AI agents to design PCBs programmatically, as the layer
+between agent reasoning and KiCad files. We complement KiCad; we do not replace it.
+
+Status as of 2026-11-13, `main` @ `3d78694e1` (v0.29.0 released 2026-11-09).
+The generated queue is [WORK_PLAN.md](WORK_PLAN.md), merged work is in
+[WORK_LOG.md](WORK_LOG.md), shipped behaviour in [CHANGELOG.md](CHANGELOG.md).
+Issue states below were read from the tracker on 2026-11-13.
+
+**What changed in this revision.** The previous text described v0.14.0
+(2026-06-16) and an empty backlog. Its per-release checklists for v0.9 to v0.11
+are dropped because CHANGELOG.md carries them; its unstarted "v0.12.0 typed
+interfaces" plan moved to Later, since v0.12.0 shipped the manufacturing export
+pipeline instead; "3D rendering" left the non-goals because `kct render`
+shipped in v0.14.0.
+
+## Design philosophy
+
+Agent-first API with structured I/O; validation that returns actionable
+findings; round-trip fidelity on every edit; kicad-cli as the referee that
+`kct check` must agree with; circuit blocks rather than only primitives.
+
+## Where it stands
+
+The v0.14.0 workflow (parse, schematic, place, route, validate, export, MCP)
+is unchanged in outline. Since then the releases from v0.15.0 to v0.29.0
+moved the work from "can produce a board" to "can prove a board is buildable":
+
+- **Routing.** Feasibility certificates, lattice and mesh engines (default
+  off), region-bounded routing and `kct route --complete` shipped in v0.15 to
+  v0.20 (release table in WORK_PLAN.md). The diff-pair redesign epic #6441 is
+  closed except for one measurement (#7856).
+- **HV isolation.** `kct creepage`, HV-aware placement and keepouts (v0.18,
+  v0.19); pairwise clearance in the router (PR #4454; #4506, #4507, #4508
+  closed). Epic #4431 stays open: the acceptance re-run recorded on it
+  (2026-10-23) reached 80% of signal nets, not the 100% it requires.
+- **One clearance kernel (#5509).** 13 of 19 consumer groups are gated against
+  kicad-cli (`MIGRATED_GROUPS` in `tests/conformance/report.py`); groups 3, 11,
+  12, 13, 14 and 19 are report-only. The audit is
+  `docs/research/clearance-kernel-acceptance-audit.md`.
+- **Harness neutrality (#5952).** Phases 1 and 2 and the AGENTS.md parity item
+  are checked off: `kct mcp setup --client codex|opencode`,
+  `kct skills install --harness ...`, `kct agent-guide`. Only the validation
+  run (#7776) remains.
+- **Manufacturing sign-off.** `kct readiness`, tapeout sign-off, waivers,
+  `pcb reinforce`, and `kct submit-jlcpcb` exist under `src/kicad_tools/cli/`.
+- **Fab DFM parity (#8838).** Opened 2026-11-12; five of seven children are
+  closed (#8839, #8841, #8842, #8843, #8845): a versioned threshold table,
+  default-on `mask_to_copper` under `--mfr jlcpcb`, the net-agnostic fab-view
+  pass, mask-expansion rules, and the parity section in `kct check`.
+- **Parts and boards.** `kct parts stock` for DigiKey and Mouser merged
+  2026-11-13 (#8892). Demo boards are `boards/00` to `boards/09`; board 08's
+  README says schematic, procurement and PCB are pending.
+
+**Health.** The last completed CI run on `main` (2026-11-13, `cebe5919a`) is
+red in three jobs: Test (extended), Board 03 End-to-End, and Board 05 Routing
+Regression. The automated release has skipped v0.30.0 on a red gate since
+2026-11-10 (#7560). `main` has moved on since that run; re-check before
+acting. The tracker has no `loom:issue` (ready) items.
+
+## Now (startable today, one PR each)
+
+| What | Done when | Issue | Blocked by |
+|---|---|---|---|
+| Board 03 gates fail on default-on `mask_to_copper` (334 errors in the CI run above); boards 05, 06, 07 gates already skip the rule in `scripts/ci/` | Board 03 End-to-End job and `tests/test_board_03_regression.py` pass on `main`, with the interim skip tied to #8858 | none (seed 1) | nothing |
+| Test (extended): 60 s timeouts in `tests/test_check_emit_dru.py`, `test_mfr_profile_consistency.py`, `test_fabrication_overrides.py`; board 02 length baseline reads 315.15 against a pinned 315.21 | Test (extended) passes on `main`; the baseline change is attributed to a commit before it is re-pinned | none (seed 2) | nothing |
+| Fab DFM parity table is stale: `PARITY_TABLE` in `src/kicad_tools/validate/fab_dfm_parity.py` still says "no rule" for THT-to-SMD and both mask-expansion categories, and "opt-in" for `mask_to_copper`, after #8849, #8852 and #8853 merged | Each row names the shipped rule; a test fails when a registered rule's category still reads `not_covered` | none (seed 3) | nothing |
+| Sharp trace corner, missing plated hole, fiducial parity | PR #8848 merged; rows updated in the parity table | #8840 | in review, `loom:operator` hold on the PR |
+| Silk-to-pad bands, silk-to-hole, silk line width | PR #8854 merged | #8844 | `loom:operator` hold on the PR |
+| BOM lines with no DigiKey/Mouser stock at build quantity | PR #8898 merged; `kct bom --check-distributor-stock` documented | #8893 | in review |
+
+## Next
+
+| What | Done when | Issue | Unblocked by |
+|---|---|---|---|
+| Close the fab DFM parity epic | Its four acceptance boxes are checked; no danger-capable row reads `not_covered` | #8838 | #8840, #8844, seed 3 |
+| Annular-ring floor that reads copper weight (the one parity row with no child issue) | Row `annular_ring` is `covered` or `partial` with a rule named | none | threshold source in the #8839 table |
+| `pcb reinforce`: restate what is left after the ends mode, courtyard and mask-strip fixes (#8780, #8797, #8821, #8886 closed) | #8741 body lists only open items, each checkable | #8741 | curation |
+| Baseline or fix `mask_to_copper` on boards 05, 06, 07 and remove the CI skips | Skips gone from `scripts/ci/`; per-board counts recorded | #8858 | a host with a qualified kicad-cli plot profile |
+| Board 07 evidence refresh chain | `redundant_copper` reads 0; routing hash re-pinned | #8603, then #8604, #8399, #8385 | maintainer ruling requested on #8603 |
+| Clearance kernel: survivor list and a decision per report-only group | `docs/clearance-conformance.md` carries the list (audit rows C3, E1) | none; proposed in #5509's body | ruling on whether groups 12/13 must be kernel-driven |
+| `optimize-traces`: collision-check each rewrite | Per-rewrite acceptance replaces whole-net rollback | #8214 | `loom:operator` |
+| Changelog check re-runs on every label change | Workflow filters label events to `changelog:skip` | #8434 | `loom:operator` (workflow file) |
+
+## Later
+
+- **Class-pair clearance as a general router input (#4431).** A second,
+  low-voltage use case was recorded on 2026-11-10. Question: does the router
+  read class-pair rules from `.kicad_dru`, or keep the voltage map as the only
+  source?
+- **Dense mains-board routing (#8610, #8486).** Question: is the remaining gap
+  search budget or placement? #8486's re-benchmark found no time saving.
+- **Finish the clearance kernel (#5509).** Rows P2b, P2c, P4a and P3b each
+  need a fixture or a ruling; start with a non-vacuous `kct check` versus
+  kicad-cli clearance count (P4a).
+- **Board 08 to a manufacturing release.** Question: which step is next,
+  schematic or procurement? No issue exists.
+- **Typed interfaces and constraint-based part selection** (the old v0.12.0
+  plan). `src/kicad_tools/intent/interfaces/` exists; question: is type-checked
+  connection at schematic time still wanted, and on which block API?
+- **v1.0.0: API stability.** Question: which modules are public API? Nothing
+  in the repo states it.
+- **Package registry, LSP server, SPICE orchestration helpers.** Carried from
+  the previous roadmap, unstarted. Each needs a user before a design.
+
+## Blocked and waiting
+
+- **Maintainer-run checks (`loom:operator`)**: live verifications that need a
+  real distributor, fab site, pinned kicad-cli host or a Mac: #8896, #8640,
+  #8629, #8620, #8585, #8573, #8563, #8478, #8425, #7727, #7440.
+- **#8530** (fiducials and board info): children #8531 to #8533 are closed;
+  waits on a close decision.
+- **#7688** (embedded 3D models): waits on a decision to file a KiCad upstream
+  request.
+- **#7776** (non-Claude harness pilot): parked; no seats or spend authorized.
+- **#8033, #7856**: long routing measurements, parked until a suitable
+  full-route host is available.
+- **#8609** tracks #8620. **#7487**: board 03 via-in-pad exception, extended
+  to 2027-10-19 by PR #8025; re-rule or remove before then.
+- **PRs #8623, #7453** (site dependency bumps): held; #8623 is approved and
+  waits on the critical-file check for `site/package.json`.
+
+## Not planned
+
+A schematic capture GUI (use KiCad); a full SPICE engine (ngspice or LTspice;
+only orchestration helpers are in scope); our own Gerber generator (kicad-cli
+produces fabrication output); placing orders (`kct submit-jlcpcb` prepares a
+submission and never orders); replacing KiCad.

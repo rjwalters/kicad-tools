@@ -215,6 +215,7 @@ class ViolationType(Enum):
     COPPER_SLIVER = "copper_sliver"
     PHYSICAL_COPPER_GAP = "physical_copper_gap"
     PHYSICAL_COPPER_GAP_INCOMPLETE = "physical_copper_gap_incomplete"
+    THT_SMD_SPACING = "tht_smd_spacing"
     EDGE_CLEARANCE_TRACE = "edge_clearance_trace"
     EDGE_CLEARANCE_PAD = "edge_clearance_pad"
     EDGE_CLEARANCE_PAD_HOLE = "edge_clearance_pad_hole"
@@ -479,6 +480,7 @@ class ViolationType(Enum):
             "copper_sliver": cls.COPPER_SLIVER,
             "physical_copper_gap": cls.PHYSICAL_COPPER_GAP,
             "physical_copper_gap_incomplete": cls.PHYSICAL_COPPER_GAP_INCOMPLETE,
+            "tht_smd_spacing": cls.THT_SMD_SPACING,
             # kicad-cli 10 DRC type strings that ``kct drc --mfr`` judges
             # against fab floors (Issue #7170).  Explicit, because the fuzzy
             # fallback mis-routes every one of them: ``annular_width``,

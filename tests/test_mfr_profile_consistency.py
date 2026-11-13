@@ -54,6 +54,7 @@ import yaml
 
 from kicad_tools.cli.build_cmd import _resolve_effective_mfr
 from kicad_tools.spec import load_spec
+from tests._board03_check_cost import board03_check_timeout
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 _TOLERANCE_YAML = REPO_ROOT / ".github" / "routed-drc-tolerance.yml"
@@ -232,6 +233,7 @@ def test_declarations_agree_across_files(board: str) -> None:
 # --------------------------------------------------------------------------
 
 
+@board03_check_timeout  # Issue #8901
 @pytest.mark.parametrize("board", sorted(_BOARDS))
 def test_committed_pcb_within_gate_at_declared_tier(board: str, tmp_path: Path) -> None:
     """Declared fab plus explicit reviewed options must pass the release gate.
@@ -278,6 +280,7 @@ def test_committed_pcb_within_gate_at_declared_tier(board: str, tmp_path: Path) 
     )
 
 
+@board03_check_timeout  # Issue #8901
 def test_board_03_reproduces_split_brain_at_base_tier() -> None:
     """Negative control: board-03 copper is NOT clean at the base jlcpcb tier.
 
@@ -305,6 +308,7 @@ def test_board_03_reproduces_split_brain_at_base_tier() -> None:
     )
 
 
+@board03_check_timeout  # Issue #8901
 def test_explicit_base_tier_overrides_sidecar_via_real_cli(tmp_path: Path) -> None:
     """Explicit ``--mfr jlcpcb`` beats a higher sidecar AND project tier (#3920).
 

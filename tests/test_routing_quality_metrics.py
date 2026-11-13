@@ -239,6 +239,9 @@ class TestComputeRoutingQuality:
             "off_axis_count": 0,
             "staircase_step_count": 2,
             "staircase_fraction": 1.0,
+            # Issue #8884: additive keys.
+            "off_axis_length_fraction": 0.0,
+            "off_axis_length_fraction_by_layer": {"F.Cu": 0.0},
         }
         # The payload must be JSON-serializable as-is.
         json.dumps(d)
@@ -600,6 +603,7 @@ class TestEvaluateRoutingQualityThresholds:
         assert d["thresholds"] == {
             "max_fragment_fraction": None,
             "max_staircase_fraction": 0.5,
+            "max_off_axis_fraction": None,
         }
         assert d["gate_passed"] is False
         assert d["gate_breaches"] == [
@@ -772,3 +776,66 @@ class TestCheckCmdThresholdGate:
         data = json.loads(report.read_text())
         assert data["routing_quality"]["gate_passed"] is False
         assert data["summary"]["passed"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #8884: length-weighted, per-layer off-axis gate
+# ---------------------------------------------------------------------------
+
+
+def _off_axis_records():
+    """B.Cu: 1 long off-axis + 1 short orthogonal (count 50%, length ~91%).
+
+    F.Cu: only orthogonal copper.
+    """
+    return [
+        ((0.0, 0.0), (3.0, 1.0), "B.Cu", 1),  # off-axis, ~3.16 mm
+        ((0.0, 5.0), (0.3, 5.0), "B.Cu", 1),  # orthogonal, 0.3 mm
+        ((0.0, 0.0), (5.0, 0.0), "F.Cu", 2),
+        ((5.0, 0.0), (5.0, 0.0), "F.Cu", 2),  # zero-length, ignored
+    ]
+
+
+def test_off_axis_length_metrics_per_layer():
+    from kicad_tools.analysis.routing_quality import compute_routing_quality_from_records
+
+    m = compute_routing_quality_from_records(_off_axis_records())
+    by_layer = m.off_axis_length_fraction_by_layer
+    assert by_layer["F.Cu"] == 0.0
+    assert by_layer["B.Cu"] == pytest.approx(3.1623 / (3.1623 + 0.3), rel=1e-3)
+    assert m.worst_off_axis_layer[0] == "B.Cu"
+    d = m.to_dict()
+    assert set(d["off_axis_length_fraction_by_layer"]) == {"B.Cu", "F.Cu"}
+    assert d["off_axis_count"] == 1  # existing key unchanged
+
+
+def test_off_axis_gate_breach_and_equality_pass():
+    from kicad_tools.analysis.routing_quality import (
+        RULE_OFF_AXIS_FRACTION,
+        compute_routing_quality_from_records,
+        evaluate_routing_quality_thresholds,
+    )
+
+    m = compute_routing_quality_from_records(_off_axis_records())
+    worst = m.worst_off_axis_layer[1]
+    breaches = evaluate_routing_quality_thresholds(m, max_off_axis_fraction=0.5)
+    assert [b.rule_id for b in breaches] == [RULE_OFF_AXIS_FRACTION]
+    assert "B.Cu" in breaches[0].message
+    assert evaluate_routing_quality_thresholds(m, max_off_axis_fraction=worst) == []
+    assert evaluate_routing_quality_thresholds(m) == []
+
+
+def test_off_axis_empty_board_and_warning_count():
+    from kicad_tools.analysis.routing_quality import (
+        compute_routing_quality_from_records,
+        evaluate_routing_quality_thresholds,
+        off_axis_layer_warning_count,
+    )
+
+    m = compute_routing_quality_from_records([])
+    assert m.off_axis_length_fraction == 0.0
+    assert evaluate_routing_quality_thresholds(m, max_off_axis_fraction=0.0) == []
+    assert off_axis_layer_warning_count(None) == 0
+    rq = {"off_axis_length_fraction_by_layer": {"F.Cu": 0.0, "B.Cu": 0.9}}
+    assert off_axis_layer_warning_count(rq) == 1
+    assert off_axis_layer_warning_count(rq, ceiling=0.95) == 0

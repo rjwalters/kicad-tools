@@ -1,6 +1,6 @@
 # Checking mask-to-copper clearance and exposure
 
-The opt-in `mask_to_copper` check compares native solder-mask openings with
+The `mask_to_copper` check (opt-in, except under `--mfr jlcpcb`; see below) compares native solder-mask openings with
 individually identified copper objects. It supplements the existing solder-mask
 expansion, pad-size and annular-ring checks. See [mask geometry](mask-geometry.md)
 for the underlying geometry inspection APIs.
@@ -9,6 +9,20 @@ Supply a process-specific clearance requirement with its source, process and
 revision. A manufacturer profile, mask expansion or minimum mask-web width does
 not supply this requirement. The example below uses a **fictional test policy**;
 replace all four policy values with the requirement for your actual process.
+
+## Default-on under `--mfr` (JLCPCB)
+
+`kct check <board> --mfr jlcpcb` runs `mask_to_copper` with no
+`--mask-copper-config`, using an **interim** policy (JLCDFM observation, epic
+#8838; to be replaced by the #8839 threshold table): openings closer than
+0.09 mm to other copper are errors, those at or below 0.15 mm are warnings that
+do not fail the verdict. Mask expansion is the board's native effective
+expansion. An explicit `--mask-copper-config` overrides the default policy,
+`--skip mask_to_copper` disables it, and runs without `--mfr` (or with a
+manufacturer that has no cited policy) stay opt-in. Without native KiCad 10.0.5
+the result is `incomplete` with the reason shown, never a silent pass.
+`MaskCopperPolicy.warning_clearance_mm` enables the warning tier in custom
+requests too.
 
 ## Run through the CLI
 

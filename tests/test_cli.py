@@ -382,6 +382,130 @@ class TestBOMCommand:
         capsys.readouterr()
         # Should sort by value
 
+    # Issue #8907: --check-availability, --validate, --quantity and --no-cache
+    # are declared by the inner parser (cli/bom_cmd.py) but were missing from
+    # the outer `kct bom` subparser, so the unified CLI rejected them. These
+    # tests drive the flags through kicad_tools.cli.main (never bom_cmd
+    # directly) and stub the two network-touching helpers, so no request is
+    # ever made.
+
+    def test_bom_check_availability_forwarded(self, simple_rc_schematic: Path, monkeypatch, capsys):
+        """--check-availability reaches bom_cmd with quantity and --no-cache."""
+        from kicad_tools.cli import bom_cmd as bom_cmd_module
+        from kicad_tools.cli import main
+
+        recorded: dict = {}
+
+        def fake_check_availability(bom, quantity, output_format, bypass_cache=False):
+            recorded["quantity"] = quantity
+            recorded["format"] = output_format
+            recorded["bypass_cache"] = bypass_cache
+            return 0
+
+        monkeypatch.setattr(bom_cmd_module, "check_availability", fake_check_availability)
+
+        result = main(
+            [
+                "bom",
+                str(simple_rc_schematic),
+                "--check-availability",
+                "--quantity",
+                "5",
+                "--no-cache",
+            ]
+        )
+        capsys.readouterr()
+
+        assert result == 0
+        assert recorded == {"quantity": 5, "format": "table", "bypass_cache": True}
+
+    def test_bom_check_availability_defaults(self, simple_rc_schematic: Path, monkeypatch, capsys):
+        """Without --quantity/--no-cache the defaults (1, False) are forwarded."""
+        from kicad_tools.cli import bom_cmd as bom_cmd_module
+        from kicad_tools.cli import main
+
+        recorded: dict = {}
+
+        def fake_check_availability(bom, quantity, output_format, bypass_cache=False):
+            recorded["quantity"] = quantity
+            recorded["format"] = output_format
+            recorded["bypass_cache"] = bypass_cache
+            return 0
+
+        monkeypatch.setattr(bom_cmd_module, "check_availability", fake_check_availability)
+
+        result = main(["bom", str(simple_rc_schematic), "--check-availability"])
+        capsys.readouterr()
+
+        assert result == 0
+        assert recorded == {"quantity": 1, "format": "table", "bypass_cache": False}
+
+    def test_bom_validate_forwarded(self, simple_rc_schematic: Path, monkeypatch, capsys):
+        """--validate reaches bom_cmd with the requested quantity and format."""
+        from kicad_tools.cli import bom_cmd as bom_cmd_module
+        from kicad_tools.cli import main
+
+        recorded: dict = {}
+
+        def fake_run_validation(bom, quantity, output_format):
+            recorded["quantity"] = quantity
+            recorded["format"] = output_format
+            return 0
+
+        monkeypatch.setattr(bom_cmd_module, "run_validation", fake_run_validation)
+
+        result = main(
+            [
+                "bom",
+                str(simple_rc_schematic),
+                "--validate",
+                "--quantity",
+                "3",
+                "--format",
+                "json",
+            ]
+        )
+        capsys.readouterr()
+
+        assert result == 0
+        assert recorded == {"quantity": 3, "format": "json"}
+
+    def test_bom_validate_exit_code_propagates(
+        self, simple_rc_schematic: Path, monkeypatch, capsys
+    ):
+        """A non-zero validation result is returned by the unified CLI."""
+        from kicad_tools.cli import bom_cmd as bom_cmd_module
+        from kicad_tools.cli import main
+
+        monkeypatch.setattr(bom_cmd_module, "run_validation", lambda bom, qty, fmt: 1)
+
+        result = main(["bom", str(simple_rc_schematic), "--validate"])
+        capsys.readouterr()
+
+        assert result == 1
+
+    def test_bom_no_cache_without_check_availability(self, simple_rc_schematic: Path, capsys):
+        """--no-cache alone is accepted and changes nothing (inner behavior)."""
+        from kicad_tools.cli import main
+
+        result = main(["bom", str(simple_rc_schematic), "--no-cache"])
+        assert result == 0
+
+        captured = capsys.readouterr()
+        assert len(captured.out) > 0
+
+    def test_bom_help_lists_new_flags(self, capsys):
+        """kct bom --help documents all four forwarded flags."""
+        from kicad_tools.cli import main
+
+        with pytest.raises(SystemExit) as exc_info:
+            main(["bom", "--help"])
+        assert exc_info.value.code == 0
+
+        help_text = capsys.readouterr().out
+        for flag in ("--check-availability", "--no-cache", "--validate", "--quantity"):
+            assert flag in help_text
+
 
 class TestCLIStandaloneEntryPoints:
     """Tests for standalone CLI entry points."""

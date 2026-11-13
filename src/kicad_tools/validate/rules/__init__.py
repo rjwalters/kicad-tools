@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     )
     from .single_pad_net import SinglePadNetRule
     from .solder_mask import SolderMaskPadRules
+    from .tht_smd_spacing import check_tht_smd_spacing
     from .via_in_pad import ViaInPadRule
     from .via_type_capability import ViaTypeCapabilityRule
     from .via_under_body import ViaUnderBodyRule
@@ -83,6 +84,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "check_silkscreen_text_height": ".silkscreen",
     "SinglePadNetRule": ".single_pad_net",
     "SolderMaskPadRules": ".solder_mask",
+    "check_tht_smd_spacing": ".tht_smd_spacing",
     "ViaInPadRule": ".via_in_pad",
     "ViaTypeCapabilityRule": ".via_type_capability",
     "ViaUnderBodyRule": ".via_under_body",
@@ -130,6 +132,7 @@ __all__ = [
     "check_silkscreen_line_width",
     "check_silkscreen_over_pads",
     "check_silkscreen_text_height",
+    "check_tht_smd_spacing",
     "ZoneFillRule",
 ]
 

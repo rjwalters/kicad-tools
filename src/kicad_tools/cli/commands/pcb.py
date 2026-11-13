@@ -1579,6 +1579,12 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                         + (f", vs {ro.obstacle_net}" if ro.obstacle_net else "")
                         + "]"
                     )
+                if outcome.openings:
+                    print(
+                        "  NOTE: new mask openings may sit under silkscreen -- run "
+                        "`kct place-silk-refs` (references) and `kct check` "
+                        "(silk-over-mask-opening) afterward."
+                    )
             else:
                 print("  NOTE: mask openings are off; anchors inherit the board's via tenting.")
 

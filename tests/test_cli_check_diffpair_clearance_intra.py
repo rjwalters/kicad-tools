@@ -102,8 +102,12 @@ class TestDiffPairClearanceIntraCLI:
         result = main(
             [
                 str(diffpair_tight_pcb),
+                # ``--skip`` is comma-separated.  The deliberately tight
+                # fixture also trips the default-on fab-view
+                # ``physical_copper_gap`` (Issue #8843); this test only pins
+                # the diffpair-skip semantics.
                 "--skip",
-                "diffpair_clearance_intra",
+                "diffpair_clearance_intra,physical_copper_gap",
                 "--allow-incomplete",
             ]
         )

@@ -10,6 +10,7 @@ Examples:
     kicad-bom design.kicad_sch --group --exclude "TP*"
     kicad-bom design.kicad_sch --check-availability
     kicad-bom design.kicad_sch --check-availability --quantity 5
+    kicad-bom design.kicad_sch --check-distributor-stock --quantity 100
     kicad-bom design.kicad_sch --validate
 """
 
@@ -19,9 +20,13 @@ import fnmatch
 import io
 import json
 import sys
+from typing import TYPE_CHECKING, Any
 
 from ..exceptions import FileNotFoundError as KiCadFileNotFoundError
 from ..schema.bom import BOM, BOMItem, extract_bom
+
+if TYPE_CHECKING:
+    from ..parts.distributors.base import DistributorOffer
 
 
 def run_validation(bom: BOM, quantity: int, output_format: str) -> int:
@@ -100,9 +105,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Check stock availability from LCSC/JLCPCB",
     )
     parser.add_argument(
+        "--check-distributor-stock",
+        action="store_true",
+        help="Flag BOM lines with no DigiKey/Mouser stock at --quantity boards "
+        "(needs distributor API credentials; exit 2 if any line is flagged)",
+    )
+    parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="With --check-availability, bypass the parts cache and fetch live",
+        help="With --check-availability/--check-distributor-stock, bypass the parts cache "
+        "and fetch live",
     )
     parser.add_argument(
         "--validate",
@@ -155,6 +167,11 @@ def main(argv: list[str] | None = None) -> int:
     # Check availability if requested
     if args.check_availability:
         return check_availability(bom, args.quantity, args.format, bypass_cache=args.no_cache)
+
+    if args.check_distributor_stock:
+        return check_distributor_stock(
+            items, args.quantity, args.format, bypass_cache=args.no_cache
+        )
 
     # JLCPCB groups by value/footprint/LCSC itself, so it takes the
     # filtered, ungrouped list (and so honours --exclude / --include-dnp).
@@ -365,6 +382,139 @@ def check_availability(bom, quantity: int, output_format: str, bypass_cache: boo
         return 2
 
     return 0
+
+
+def check_distributor_stock(
+    items: list[BOMItem],
+    quantity: int,
+    output_format: str,
+    bypass_cache: bool = False,
+    clients: list | None = None,
+) -> int:
+    """Flag BOM lines with no authorised-distributor stock at the build quantity.
+
+    Needed quantity per MPN is ``quantity`` x the number of refs sharing it.
+    MPNs are grouped and matched case-insensitively, because the distributor
+    parsers compare the query that way but report the distributor's own casing.
+
+    Only an MPN that at least one distributor actually answered for can be
+    flagged. One whose every lookup failed (HTTP error, exhausted quota, no
+    credentials) is reported as *not checked* instead -- "no offer" is not the
+    same as "no stock". Returns 2 when at least one line is flagged, else 0.
+    """
+    from ..parts.distributors import service
+
+    # Group on the upper-cased MPN, keeping the BOM's own casing for display
+    # and for the query: the parsers compare with `.upper()` but return the
+    # distributor's casing, so an exact-string lookup would miss the offer,
+    # and two BOM lines differing only in case would not share a group.
+    refs_by_mpn: dict[str, list[str]] = {}
+    display: dict[str, str] = {}
+    unchecked: list[str] = []
+    for item in items:
+        mpn = (item.mpn or "").strip()
+        if mpn:
+            key = mpn.upper()
+            refs_by_mpn.setdefault(key, []).append(item.reference)
+            display.setdefault(key, mpn)
+        else:
+            unchecked.append(item.reference)
+
+    needed = {key: quantity * len(refs) for key, refs in refs_by_mpn.items()}
+    report = service.StockReport()
+    if needed:
+        print(f"Checking distributor stock for {quantity} board(s)...", file=sys.stderr)
+        try:
+            report = service.query_stock(
+                [display[key] for key in sorted(needed)],
+                max(needed.values()),
+                use_cache=not bypass_cache,
+                clients=clients,
+            )
+        except Exception as e:
+            print(f"Error checking distributor stock: {e}", file=sys.stderr)
+            return 1
+
+    best: dict[str, DistributorOffer] = {}
+    for offer in report.offers:
+        offer_key = offer.mpn.upper()
+        cur = best.get(offer_key)
+        if cur is None or offer.stock > cur.stock:
+            best[offer_key] = offer
+
+    # An MPN counts as checked only when some distributor answered for it:
+    # an offer, or a "<mpn>@<distributor>" miss. `query_stock` records neither
+    # when the lookup itself failed, so absence of an offer proves nothing.
+    answered = set(best)
+    for miss in report.not_found:
+        answered.add(miss.rsplit("@", 1)[0].upper())
+
+    lines: list[dict[str, Any]] = []
+    flagged = 0
+    not_checked = 0
+    for key in sorted(refs_by_mpn):
+        best_offer = best.get(key)
+        stock = best_offer.stock if best_offer else None
+        checked = key in answered
+        in_stock = stock is not None and stock >= needed[key]
+        is_flagged = checked and not in_stock
+        flagged += is_flagged
+        not_checked += not checked
+        lines.append(
+            {
+                "references": refs_by_mpn[key],
+                "mpn": display[key],
+                "needed": needed[key],
+                "best_stock": stock,
+                "distributor": best_offer.distributor if best_offer else None,
+                "checked": checked,
+                "flagged": is_flagged,
+            }
+        )
+
+    if output_format == "json":
+        print(
+            json.dumps(
+                {
+                    "quantity": quantity,
+                    "lines": lines,
+                    "not_checked_no_mpn": unchecked,
+                    "notices": report.notices,
+                    "flagged": flagged,
+                    "not_checked": not_checked,
+                },
+                indent=2,
+            )
+        )
+    else:
+        for n in report.notices:
+            print(f"Notice: {n}", file=sys.stderr)
+        nothing_answered = bool(needed) and not answered
+        if nothing_answered:
+            # No distributor answered for any MPN: one line beats repeating it
+            # per BOM line (no credentials, or every lookup failed).
+            print("No distributor answered for any MPN; no lines were checked (see notices).")
+        for ln in lines:
+            if ln["flagged"]:
+                stock_text = "not found" if ln["best_stock"] is None else str(ln["best_stock"])
+                dist = ln["distributor"] or "-"
+                print(
+                    f"OUT OF STOCK  {','.join(ln['references'])}  {ln['mpn']}  "
+                    f"needed={ln['needed']}  best stock={stock_text}  distributor={dist}"
+                )
+            elif not ln["checked"] and not nothing_answered:
+                print(
+                    f"NOT CHECKED   {','.join(ln['references'])}  {ln['mpn']}  "
+                    f"needed={ln['needed']}  lookup failed (see notices)"
+                )
+        if unchecked:
+            print(f"No MPN, not checked: {', '.join(unchecked)}")
+        summary = f"{flagged} of {len(lines)} MPN line(s) flagged"
+        if not_checked:
+            summary += f"; {not_checked} not checked (lookup failed)"
+        print(summary)
+
+    return 2 if flagged else 0
 
 
 def output_availability_table(result) -> None:

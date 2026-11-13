@@ -1,0 +1,6 @@
+{"Products": [
+ {"ManufacturerProductNumber": "STM32F103C8T6", "Manufacturer": {"Name": "STMicroelectronics"},
+  "QuantityAvailable": 50, "ManufacturerLeadWeeks": "12", "ProductStatus": {"Status": "Active"},
+  "ProductVariations": [{"DigiKeyProductNumber": "497-6063-ND", "PackageType": {"Name": "Tray"},
+   "StandardPricing": [{"BreakQuantity": 1, "UnitPrice": 9.1},
+                       {"BreakQuantity": 25, "UnitPrice": 7.5}]}]}]}

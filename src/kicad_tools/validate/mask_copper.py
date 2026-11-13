@@ -1,7 +1,10 @@
 """Explicit process policy and source-qualified solder-mask exposure assessment.
 
-This check is opt-in. Neither a manufacturer's generic mask expansion nor a
-mask-web width supplies a mask-to-copper process clearance requirement.
+Outside ``--mfr`` this check is opt-in. Neither a manufacturer's generic mask
+expansion nor a mask-web width supplies a mask-to-copper process clearance
+requirement; ``default_request_for_manufacturer`` supplies an explicit, cited
+interim policy for manufacturers whose process limit has been observed
+(issue #8842).
 """
 
 from __future__ import annotations
@@ -20,6 +23,9 @@ class MaskCopperPolicy:
     source: str
     process: str
     revision: str
+    # Optional advisory tier (issue #8842): measurements at or above
+    # ``clearance_mm`` but within this distance are warnings, never failures.
+    warning_clearance_mm: float | None = None
 
     def __post_init__(self):
         if (
@@ -28,6 +34,12 @@ class MaskCopperPolicy:
             or self.clearance_mm < 0
         ):
             raise ValueError("Mask-to-copper clearance must be finite and nonnegative")
+        if self.warning_clearance_mm is not None and (
+            isinstance(self.warning_clearance_mm, bool)
+            or not math.isfinite(self.warning_clearance_mm)
+            or self.warning_clearance_mm < self.clearance_mm
+        ):
+            raise ValueError("Mask-to-copper warning clearance must be finite and >= clearance")
         if any(
             not isinstance(v, str) or not v.strip()
             for v in (self.source, self.process, self.revision)
@@ -110,6 +122,7 @@ class MaskCopperMeasurement:
             "violation",
             "uncertain",
             "intentional",
+            "warning",
         ) or self.relation not in ("overlap", "touching", "disjoint"):
             raise ValueError("Invalid mask measurement disposition/relation")
         if self.mask_side not in (
@@ -218,7 +231,8 @@ def assess_attributed_geometry(geometry, policy, intents=()):
     mislabeled as penetration depth. Exact-limit measurements remain uncertain
     within the native/Gerber construction budget, and cannot certify a pass.
     """
-    from shapely.geometry import GeometryCollection  # type: ignore[import-untyped]
+    from shapely import STRtree  # type: ignore[import-untyped]
+    from shapely.geometry import GeometryCollection, box  # type: ignore[import-untyped]
     from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyped]
 
     binding = source_binding(geometry)
@@ -341,16 +355,54 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                     "native merged region; containing-component contributors",
                 )
             )
+        # Every opening is measured against every object's copper on this layer.
+        # That unindexed all-pairs scan is what dominates the check on a real
+        # board (issue #8901): board 03 alone reaches ~149k shapely ``distance``
+        # calls, and over 99% of them only prove the pair lies beyond
+        # ``outer_limit``. A bounding-box index settles that proof without the
+        # exact distance -- a copper whose envelope is further than the reach
+        # from the opening's envelope cannot be nearer than the reach in truth,
+        # which is precisely the ``continue`` below. Pairs the index rules out
+        # are still counted in ``evaluated_pairs``, so the reported provenance
+        # describes the same comparison set as before.
+        outer_limit = (
+            policy.warning_clearance_mm
+            if policy.warning_clearance_mm is not None
+            else policy.clearance_mm
+        )
+        reach = outer_limit + uncertainty
+        conductors = []
+        for identity, item in geometry.objects.items():
+            copper = item["layers_geometry"].get(layer)
+            if copper is None or copper.is_empty:
+                continue
+            conductors.append((identity, item, copper))
+        conductor_ids = {entry[0] for entry in conductors}
+        index = STRtree([entry[2] for entry in conductors]) if conductors else None
         for owners, opening, kind, margin, provenance in openings:
-            for identity, item in geometry.objects.items():
-                copper = item["layers_geometry"].get(layer)
-                if copper is None or copper.is_empty:
+            if index is None:
+                continue
+            # Only a single-owner, non-merged opening excludes its own UUID.
+            excluded = owners[0] if kind != "merged_region" and len(owners) == 1 else None
+            result.evaluated_pairs += len(conductors) - (
+                1 if excluded is not None and excluded in conductor_ids else 0
+            )
+            candidates: list[int]
+            if opening.is_empty:
+                # ``bounds`` is undefined for an empty geometry; fall back to the
+                # exact comparison rather than guessing at an envelope.
+                candidates = list(range(len(conductors)))
+            else:
+                minx, miny, maxx, maxy = opening.bounds
+                candidates = sorted(
+                    index.query(box(minx - reach, miny - reach, maxx + reach, maxy + reach))
+                )
+            for position in candidates:
+                identity, item, copper = conductors[position]
+                if identity == excluded:
                     continue
-                if kind != "merged_region" and owners == (identity,):
-                    continue  # Exclude only this UUID's own contribution.
-                result.evaluated_pairs += 1
                 distance = opening.distance(copper)
-                if distance > policy.clearance_mm + uncertainty:
+                if distance > reach:
                     continue
                 intersection = opening.intersection(copper)
                 area = intersection.area
@@ -360,6 +412,8 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                 relation = "overlap" if area > 0 else "touching" if distance == 0 else "disjoint"
                 if certain_exposure or distance < policy.clearance_mm - uncertainty:
                     disposition = "violation"
+                elif distance > policy.clearance_mm + uncertainty:
+                    disposition = "warning"
                 else:
                     disposition = "uncertain"
                 intent = (
@@ -472,6 +526,8 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
     for index, measurement in enumerate(assessment.measurements):
         if measurement.disposition == "intentional":
             severity = "info"
+        elif measurement.disposition == "warning":
+            severity = "warning"
         else:
             severity = "error"
         result.add(
@@ -488,3 +544,25 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
             )
         )
     return result
+
+
+# Interim constants (issue #8842) until the manufacturer threshold table of
+# #8839 lands: JLCDFM's observed mask-opening-to-trace limits for JLCPCB.
+_JLCPCB_MASK_COPPER_POLICY = MaskCopperPolicy(
+    clearance_mm=0.09,
+    source="JLCDFM mask-opening-exposing-trace observation (epic #8838)",
+    process="jlcpcb",
+    revision="interim-2026-11-12",
+    warning_clearance_mm=0.15,
+)
+
+
+def default_request_for_manufacturer(manufacturer_id: str | None) -> MaskCopperRequest | None:
+    """Default-on request for ``--mfr``; None when no cited policy exists.
+
+    Mask expansion is not supplied here: the native geometry already carries
+    the board's effective expansion.
+    """
+    if manufacturer_id and manufacturer_id.lower().startswith("jlcpcb"):
+        return MaskCopperRequest(policy=_JLCPCB_MASK_COPPER_POLICY)
+    return None

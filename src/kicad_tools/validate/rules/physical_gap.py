@@ -38,6 +38,19 @@ from .clearance import _pad_on_layer, _pad_polygon, _repair_fill_polygon
 
 # Polygon approximation and comparison tolerance, in millimetres.
 TOLERANCE = 0.001
+# Per-end shave of a gap connector for the cheap copper-crossing prefilter; twice
+# this stays within the 1e-8 mm overlap threshold, so results are unchanged.
+_CONNECTOR_SHAVE_MM = 4e-9
+
+# Fab-view thresholds applied by default under ``--mfr jlcpcb`` (Issue #8843).
+# Source: JLCDFM observations recorded in epic #8838 (2026-11-12) -- observed
+# from gerbers, NOT documented by the fab.  A versioned per-manufacturer /
+# per-copper-weight table is epic #8838 item 2; until it lands these live in
+# this one place.
+FAB_VIEW_GAP_DANGER_MM = 0.10  # gap below this: JLCDFM "danger" -> error
+FAB_VIEW_GAP_WARNING_MM = 0.15  # gap below this: JLCDFM "warning" -> warning
+FAB_VIEW_MASK_BRIDGE_2OZ_MM = 0.20  # pad-to-pad mask-bridge spacing on 2 oz copper
+FAB_VIEW_MASK_BRIDGE_OZ = 2.0
 
 
 @dataclass
@@ -46,6 +59,7 @@ class CopperSource:
     layer: str
     net: str
     identity: str
+    kind: str = ""
 
 
 def _arc_geometry(node, origin=(0.0, 0.0)):
@@ -385,6 +399,7 @@ def _collect(pcb):
                             layer,
                             net_name(pad.net_number),
                             pad.uuid or f"{fp.reference}:pad:{index}",
+                            "pad",
                         )
                     )
     for index, via in enumerate(pcb.vias):
@@ -450,13 +465,62 @@ def _collect(pcb):
     return sources, unsupported
 
 
-def check_physical_copper_gap(pcb, minimum_mm: float) -> DRCResults:
+def _facing_edge_pairs(tree, edges, normals, distance_mm):
+    """Ordered ``(i, j)``, ``i < j`` edge pairs within ``distance_mm`` that face
+    each other (outward-normal dot <= -0.64).
+
+    Candidates come from a cheap bounding-box query (a box expanded by
+    ``distance_mm`` is a superset of ``dwithin``), the normal screen runs
+    vectorised, and the exact ``dwithin`` runs only on the survivors.
+    """
+    import numpy as np
+    import shapely  # type: ignore[import-untyped]
+
+    if not edges:
+        return []
+    edge_array = np.asarray(edges, dtype=object)
+    bounds = shapely.bounds(edge_array)
+    boxes = shapely.box(
+        bounds[:, 0] - distance_mm,
+        bounds[:, 1] - distance_mm,
+        bounds[:, 2] + distance_mm,
+        bounds[:, 3] + distance_mm,
+    )
+    hits = tree.query(boxes)
+    left, right = hits[0], hits[1]
+    keep = right > left
+    left, right = left[keep], right[keep]
+    if left.size == 0:
+        return []
+    n = np.asarray(normals, dtype=float)
+    dots = n[left, 0] * n[right, 0] + n[left, 1] * n[right, 1]
+    keep = dots <= -0.64
+    left, right = left[keep], right[keep]
+    if left.size == 0:
+        return []
+    keep = shapely.dwithin(edge_array[left], edge_array[right], distance_mm)
+    left, right = left[keep], right[keep]
+    order = np.lexsort((right, left))
+    return list(zip(left[order].tolist(), right[order].tolist(), strict=True))
+
+
+def check_physical_copper_gap(
+    pcb, minimum_mm: float, *, error_below_mm: float | None = None
+) -> DRCResults:
     """Report open gaps; never reinterpret a copper join as zero clearance.
+
+    ``error_below_mm`` enables two severity tiers (Issue #8843): a gap below
+    it is an ``error``, a gap in ``[error_below_mm, minimum_mm)`` is a
+    ``warning``; a slit whose two sides are the same net is a ``warning`` at any
+    distance. Every gap is still listed. ``None`` keeps the historical
+    single-tier behaviour (everything ``error``).
 
     Facing-edge screening excludes local corners. This is a slit detector,
     not a guarantee about acute notches, etching chemistry or stale zone fills.
     """
-    from shapely import STRtree, union_all  # type: ignore[import-untyped]
+    import numpy as np
+    import shapely
+    from shapely import STRtree, union_all
     from shapely.geometry import LineString
     from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
     from shapely.ops import nearest_points  # type: ignore[import-untyped]
@@ -495,88 +559,185 @@ def check_physical_copper_gap(pcb, minimum_mm: float) -> DRCResults:
                     normals.append((dy / length, -dx / length))  # outward into air
         tree = STRtree(edges)
         source_tree = STRtree([s.geometry for s in local])
+        prepared = np.asarray([s.geometry for s in local], dtype=object)
+        shapely.prepare(prepared)
+        boundaries = [s.geometry.boundary for s in local]
         findings: dict[tuple[tuple[str, ...], tuple[str, ...]], DRCViolation] = {}
-        for i, edge in enumerate(edges):
-            for raw_j in tree.query(edge, predicate="dwithin", distance=minimum_mm):
-                j = int(raw_j)
-                if j <= i:
+        # One vectorised bulk query + numpy normal screen replaces ~one STRtree
+        # query and a Python dot product per edge (Issue #8843: this pass is
+        # now default-on under jlcpcb, and was ~24 s on board 07). Same pair
+        # set, same (i, j) order as the per-edge loop, so results are unchanged.
+        pairs = _facing_edge_pairs(tree, edges, normals, minimum_mm)
+        for i, j in pairs:
+            edge = edges[i]
+            candidates = [nearest_points(edge, edges[j])]
+            middle = edge.interpolate(0.5, normalized=True)
+            candidates.append((middle, nearest_points(middle, edges[j])[1]))
+            middle = edges[j].interpolate(0.5, normalized=True)
+            candidates.append((nearest_points(edge, middle)[0], middle))
+            for a, b in candidates:
+                distance = a.distance(b)
+                if distance <= TOLERANCE or distance >= minimum_mm - TOLERANCE:
                     continue
-                if sum(a * b for a, b in zip(normals[i], normals[j], strict=True)) > -0.64:
+                dx, dy = (b.x - a.x) / distance, (b.y - a.y) / distance
+                # Both boundaries must face the open gap, within 25 degrees.
+                if normals[i][0] * dx + normals[i][1] * dy < math.cos(math.radians(25)):
                     continue
-                candidates = [nearest_points(edge, edges[j])]
-                middle = edge.interpolate(0.5, normalized=True)
-                candidates.append((middle, nearest_points(middle, edges[j])[1]))
-                middle = edges[j].interpolate(0.5, normalized=True)
-                candidates.append((nearest_points(edge, middle)[0], middle))
-                for a, b in candidates:
-                    distance = a.distance(b)
-                    if distance <= TOLERANCE or distance >= minimum_mm - TOLERANCE:
-                        continue
-                    dx, dy = (b.x - a.x) / distance, (b.y - a.y) / distance
-                    # Both boundaries must face the open gap, within 25 degrees.
-                    if normals[i][0] * dx + normals[i][1] * dy < math.cos(math.radians(25)):
-                        continue
-                    if normals[j][0] * -dx + normals[j][1] * -dy < 0.5:
-                        continue
-                    connector = LineString([a, b])
-                    # The open connector must contain no copper from a third
-                    # primitive; union provenance alone is not electrical isolation.
-                    if connector.intersection(union).length > 1e-8:
-                        continue
-                    owner_indices = [
+                if normals[j][0] * -dx + normals[j][1] * -dy < 0.5:
+                    continue
+                connector = LineString([a, b])
+                # The open connector must contain no copper from a third
+                # primitive; union provenance alone is not electrical isolation.
+                # Clip against only the sources whose bbox touches the connector
+                # (intersecting the whole-layer union dominated runtime, #8843).
+                near = source_tree.query(connector)
+                if near.size:
+                    # Cheap exact prefilter: shave 4e-9 mm off each end. If the
+                    # shaved line misses a source (indexed, prepared test), its
+                    # overlap is confined to the two shaved ends, <= 1e-8 mm, so
+                    # the ``> 1e-8`` test below could not fire for it either.
+                    # Only sources the shaved line touches pay for the exact
+                    # intersection.
+                    ux, uy = (b.x - a.x) / distance, (b.y - a.y) / distance
+                    shaved_line = LineString(
                         [
-                            int(k)
-                            for k in source_tree.query(
-                                point, predicate="dwithin", distance=TOLERANCE
-                            )
-                            if local[int(k)].geometry.boundary.distance(point) <= TOLERANCE
+                            (a.x + ux * _CONNECTOR_SHAVE_MM, a.y + uy * _CONNECTOR_SHAVE_MM),
+                            (b.x - ux * _CONNECTOR_SHAVE_MM, b.y - uy * _CONNECTOR_SHAVE_MM),
                         ]
-                        for point in (a, b)
-                    ]
-                    # Local shoulders at a pad escape or joined track are not
-                    # slits. Exclude only the neighbourhood of the actual join,
-                    # never a whole connected component or an entire source pair.
+                    )
+                    touched = near[shapely.intersects(prepared[near], shaved_line)]
                     if any(
-                        left != right
-                        and local[left].geometry.intersects(local[right].geometry)
-                        and connector.distance(
-                            local[left].geometry.intersection(local[right].geometry)
-                        )
-                        < minimum_mm
-                        for left in owner_indices[0]
-                        for right in owner_indices[1]
+                        connector.intersection(local[int(k)].geometry).length > 1e-8
+                        for k in touched
                     ):
                         continue
-                    owners = []
-                    for point in (a, b):
-                        owners.append(
-                            sorted(
-                                (local[int(k)].identity, local[int(k)].net)
-                                for k in source_tree.query(
-                                    point, predicate="dwithin", distance=TOLERANCE
-                                )
-                                if local[int(k)].geometry.boundary.distance(point) <= TOLERANCE
-                            )
-                        )
-                    ids = tuple(sorted({identity for side in owners for identity, _ in side}))
-                    nets = tuple(sorted({net for side in owners for _, net in side}))
-                    key = ids, nets
-                    if key in findings and (findings[key].actual_value or 0) <= distance:
-                        continue
-                    findings[key] = DRCViolation(
+                owner_indices = [
+                    [
+                        int(k)
+                        for k in source_tree.query(point, predicate="dwithin", distance=TOLERANCE)
+                        if boundaries[int(k)].distance(point) <= TOLERANCE
+                    ]
+                    for point in (a, b)
+                ]
+                # Local shoulders at a pad escape or joined track are not
+                # slits. Exclude only the neighbourhood of the actual join,
+                # never a whole connected component or an entire source pair.
+                if any(
+                    left != right
+                    and local[left].geometry.intersects(local[right].geometry)
+                    and connector.distance(local[left].geometry.intersection(local[right].geometry))
+                    < minimum_mm
+                    for left in owner_indices[0]
+                    for right in owner_indices[1]
+                ):
+                    continue
+                owners = [
+                    sorted((local[k].identity, local[k].net) for k in side)
+                    for side in owner_indices
+                ]
+                ids = tuple(sorted({identity for side in owners for identity, _ in side}))
+                nets = tuple(sorted({net for side in owners for _, net in side}))
+                key = ids, nets
+                if key in findings and (findings[key].actual_value or 0) <= distance:
+                    continue
+                # Tiered mode: [error_below, minimum) is a warning, and a
+                # same-net-only slit is a warning at any distance (issue
+                # #8843 allows this): it is always listed, but it cannot
+                # short two nets, so it must not block the build.
+                tiered_warning = error_below_mm is not None and (
+                    distance >= error_below_mm or len(nets) == 1
+                )
+                findings[key] = DRCViolation(
+                    "physical_copper_gap",
+                    "warning" if tiered_warning else "error",
+                    f"Physical copper gap {distance:.4f}mm < {minimum_mm:.4f}mm; "
+                    f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
+                    f"({b.x + ox:.6f}, {b.y + oy:.6f})",
+                    location=((a.x + b.x) / 2, (a.y + b.y) / 2),
+                    layer=layer,
+                    actual_value=distance,
+                    required_value=minimum_mm,
+                    items=ids,
+                    nets=nets,
+                    closest_locations=((a.x, a.y), (b.x, b.y)),
+                )
+        for key in sorted(findings):
+            results.add(findings[key])
+    return results
+
+
+def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
+    """Pad-to-pad mask-bridge spacing on 2 oz copper (Issue #8843).
+
+    Net-agnostic: two distinct pads on one layer whose copper boundaries are
+    closer than :data:`FAB_VIEW_MASK_BRIDGE_2OZ_MM` leave no room for a solder
+    mask bridge. Only the 2 oz threshold is known (epic #8838); other weights
+    are not judged here (the versioned table is epic item 2).
+
+    Fail closed: ``copper_oz is None`` (weight not declared by stackup or
+    ``--copper``) reports a ``physical_copper_gap_incomplete`` *info* finding instead
+    of assuming 1 oz (listed, never blocking).
+    """
+    from shapely import STRtree
+
+    results = DRCResults(rules_checked=1)
+    if copper_oz is None:
+        results.add(
+            DRCViolation(
+                "physical_copper_gap_incomplete",
+                # Reported (never a silent pass) at info: the mask-bridge check
+                # only judges 2 oz, so an error/warning here would block (or,
+                # under --strict, fail) every board with no declared stackup
+                # weight.
+                "info",
+                "Pad mask-bridge check incomplete: copper weight unknown "
+                "(declare a stackup copper weight or pass --copper)",
+            )
+        )
+        return results
+    if abs(copper_oz - FAB_VIEW_MASK_BRIDGE_OZ) > 1e-6:
+        return results
+    limit = FAB_VIEW_MASK_BRIDGE_2OZ_MM
+    sources, unsupported = _collect(pcb)
+    if unsupported:
+        # The gap pass already reports incomplete geometry; stay quiet here.
+        return results
+    ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
+    for layer in sorted({s.layer for s in sources}):
+        pads = [
+            s for s in sources if s.layer == layer and s.kind == "pad" and not s.geometry.is_empty
+        ]
+        tree = STRtree([p.geometry for p in pads])
+        seen: set[tuple[int, int]] = set()
+        for i, pad in enumerate(pads):
+            for raw_j in tree.query(pad.geometry, predicate="dwithin", distance=limit):
+                j = int(raw_j)
+                if j <= i or (i, j) in seen:
+                    continue
+                seen.add((i, j))
+                other = pads[j]
+                distance = pad.geometry.distance(other.geometry)
+                # distance ~0 means touching/overlapping pads: not a mask gap.
+                if distance <= TOLERANCE or distance >= limit - TOLERANCE:
+                    continue
+                from shapely.ops import nearest_points
+
+                a, b = nearest_points(pad.geometry, other.geometry)
+                ids = tuple(sorted((pad.identity, other.identity)))
+                results.add(
+                    DRCViolation(
                         "physical_copper_gap",
                         "error",
-                        f"Physical copper gap {distance:.4f}mm < {minimum_mm:.4f}mm; "
-                        f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
-                        f"({b.x + ox:.6f}, {b.y + oy:.6f})",
+                        f"Pad mask bridge {distance:.4f}mm < {limit:.4f}mm on "
+                        f"{copper_oz:g} oz copper; closest boundaries "
+                        f"({a.x + ox:.6f}, {a.y + oy:.6f}) and ({b.x + ox:.6f}, {b.y + oy:.6f})",
                         location=((a.x + b.x) / 2, (a.y + b.y) / 2),
                         layer=layer,
                         actual_value=distance,
-                        required_value=minimum_mm,
+                        required_value=limit,
                         items=ids,
-                        nets=nets,
+                        nets=tuple(sorted({pad.net, other.net})),
                         closest_locations=((a.x, a.y), (b.x, b.y)),
                     )
-        for key in sorted(findings):
-            results.add(findings[key])
+                )
     return results

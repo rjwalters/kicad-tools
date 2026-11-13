@@ -1446,7 +1446,8 @@ def _iter_graphic_mask_apertures(pcb: PCB) -> Iterator[tuple[str, _Geometry, str
 
     Covers ``gr_*`` and ``fp_*`` shapes on ``F.Mask`` / ``B.Mask``; each one
     removes solder mask whether or not copper lies beneath it.  Coordinates are
-    in the same board-relative frame as :func:`_iter_silk_elements`.
+    in the same board-relative frame as :func:`_iter_silk_elements`; the
+    quoted label coordinates are sheet-absolute (#8879).
     """
     sides = {"F.Mask": "F", "B.Mask": "B"}
     ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
@@ -1470,7 +1471,7 @@ def _iter_graphic_mask_apertures(pcb: PCB) -> Iterator[tuple[str, _Geometry, str
                 geom,
                 (
                     f"mask opening (fp_{graphic.graphic_type} on {graphic.layer} of "
-                    f"{footprint.reference}) at ({c.x:.3f}, {c.y:.3f})"
+                    f"{footprint.reference}) at ({c.x + ox:.3f}, {c.y + oy:.3f})"
                 ),
             )
     for board_graphic in pcb.graphics:
@@ -1486,7 +1487,7 @@ def _iter_graphic_mask_apertures(pcb: PCB) -> Iterator[tuple[str, _Geometry, str
             geom,
             (
                 f"mask opening (gr_{board_graphic.graphic_type} on {board_graphic.layer}) "
-                f"at ({c.x:.3f}, {c.y:.3f})"
+                f"at ({c.x + ox:.3f}, {c.y + oy:.3f})"
             ),
         )
 

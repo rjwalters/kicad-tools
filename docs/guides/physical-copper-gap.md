@@ -2,7 +2,40 @@
 
 `kct check board.kicad_pcb --drc-only --only physical_copper_gap --physical-copper-gap 0.25 --format json`
 
-This opt-in check measures open slits between facing copper boundaries regardless
+## Default under `--mfr jlcpcb` (fab view, Issue #8843)
+
+Under `--mfr jlcpcb` (explicit or resolved) the net-agnostic "fab view" runs with
+no extra flag, mirroring JLCDFM, which measures copper from gerbers without net
+knowledge. Thresholds are JLCDFM *observations* from epic #8838, not fab-documented
+limits, and live in one table at the top of `validate/rules/physical_gap.py`:
+
+| Check | Band | Severity |
+|---|---|---|
+| Copper gap (tracks, pads, vias, fills; same-net included) | < 0.10 mm | `error` |
+| Copper gap | 0.10 to < 0.15 mm | `warning` |
+| Pad-to-pad mask bridge on **2 oz** copper | < 0.20 mm | `error` |
+| THT pad to SMD pad (`tht_smd_spacing`; vias opt-in, `include_vias`) | < 2.0 mm / < 2.7 mm | `error` / `warning` |
+
+Same-net near-parallel copper (e.g. 0.08 mm) is always listed; it uses the same
+tiers. The mask-bridge check needs a known copper weight (stackup or `--copper`);
+with the weight unknown it emits a `physical_copper_gap_incomplete` *info* finding
+(listed, not blocking) rather than assuming 1 oz, and weights other than 2 oz are not judged (versioned per-weight
+table: epic #8838 item 2). `tht_smd_spacing` measures **copper edge to copper
+edge**; the epic does not say whether JLCDFM measures hole centre, hole edge or
+copper edge, so this is a documented choice.
+
+**Design decision: flattened board geometry, not exported gerbers.** The pass runs
+on the same per-layer copper union as the opt-in check: it exists and is tested,
+needs no gerber export step, and avoids a new gerber-parsing dependency surface.
+
+An explicit `--physical-copper-gap MM` still wins (single threshold, all `error`).
+Other manufacturers are unchanged: coverage still reports
+`skipped:opt_in:--physical-copper-gap` (and `skipped:opt_in:--mfr jlcpcb` for
+`tht_smd_spacing`).
+
+## Opt-in threshold
+
+The explicit `--physical-copper-gap` form measures open slits between facing copper boundaries regardless
 of electrical net identity. It unions copper on each layer before measuring, so
 shared endpoints, overlapping tracks and pad escapes are not zero-clearance
 errors. Branches connected elsewhere can still enclose a narrow slit. Electrical

@@ -265,7 +265,20 @@ def measure(board: Path) -> dict:
         bar["kicad_cli_unconnected"] = len(data.get("unconnected_items", []))
 
         check = Path(tmp) / "check.json"
-        _kct("check", str(routed), "--mfr", TIER, "--format", "json", "--output", str(check))
+        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
+        # in this bar; skipped until #8839/#8858 land.
+        _kct(
+            "check",
+            str(routed),
+            "--mfr",
+            TIER,
+            "--skip",
+            "mask_to_copper",
+            "--format",
+            "json",
+            "--output",
+            str(check),
+        )
         data = json.loads(check.read_text())
         bar["kct_check_errors"] = data["summary"]["errors"]
         bar["kct_check_warnings"] = data["summary"]["warnings"]
