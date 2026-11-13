@@ -16,6 +16,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-13
 
+- **PR #8910**: build(deps): Bump opentelemetry-api from 1.45.1 to 1.45.2
+- **PR #8906**: fix: skip mask_to_copper and allow incomplete in board 03 route_demo DRC
+- **Issue #8741** (closed): pcb reinforce: anchors are spaced mid-run, no wire-end anchors, no solder-mask opening; nothing checks that a reinforced run is buildable
 - **PR #8898**: feat(bom): add --check-distributor-stock flag
 - **Issue #8893** (closed): bom: flag lines with no DigiKey/Mouser stock at build quantity (follow-up to #8892)
 - **PR #8908**: fix(cli): declare and forward kct bom stock/validation flags
