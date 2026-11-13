@@ -88,6 +88,24 @@
             "command": "${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-worktree-paths.sh"
           }
         ]
+      },
+      {
+        "matcher": "mcp__loom__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-mcp-tools.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.loom/hooks/roll-pause.sh\""
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -112,6 +130,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-background-subagents.sh"
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-uncommitted-work.sh\""
           }
         ]
       }
@@ -132,6 +154,48 @@
           {
             "type": "command",
             "command": "${CLAUDE_PROJECT_DIR}/.claude/skills/repo/hooks/session-start-handoff.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.loom/hooks/gh-front-env.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.loom/hooks/roll-pause.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.loom/hooks/roll-pause.sh\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}/.loom/hooks/guard-uncommitted-work.sh\""
           }
         ]
       }
