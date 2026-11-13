@@ -377,10 +377,12 @@ def _dispatch_command(args) -> int:
             sub_argv.append("--include-dnp")
         if args.sort != "reference":
             sub_argv.extend(["--sort", args.sort])
-        # Issue #8907: forward the stock/validation flags to the inner parser
-        # (a flag added only to the outer parser never reaches bom_cmd).
+        # Issue #8907 / #8893: forward the stock/validation flags to the inner
+        # parser (a flag added only to the outer parser never reaches bom_cmd).
         if args.check_availability:
             sub_argv.append("--check-availability")
+        if args.check_distributor_stock:
+            sub_argv.append("--check-distributor-stock")
         if args.no_cache:
             sub_argv.append("--no-cache")
         if args.validate:

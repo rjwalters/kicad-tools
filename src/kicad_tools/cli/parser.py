@@ -644,7 +644,7 @@ def _add_bom_parser(subparsers) -> None:
     bom_parser.add_argument(
         "--sort", choices=["reference", "value", "footprint"], default="reference"
     )
-    # Issue #8907: these four are declared by the inner parser
+    # Issue #8907 / #8893: these five are declared by the inner parser
     # (cli/bom_cmd.py) and must be declared here too -- an inner flag the
     # outer parser does not know is rejected before dispatch (the #3159 /
     # #4691 drift trap). Keep types, defaults and help text in sync with
@@ -655,9 +655,20 @@ def _add_bom_parser(subparsers) -> None:
         help="Check stock availability from LCSC/JLCPCB",
     )
     bom_parser.add_argument(
+        "--check-distributor-stock",
+        action="store_true",
+        help=(
+            "Flag BOM lines with no DigiKey/Mouser stock at --quantity boards "
+            "(needs distributor API credentials; exit 2 if any line is flagged)"
+        ),
+    )
+    bom_parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="With --check-availability, bypass the parts cache and fetch live",
+        help=(
+            "With --check-availability/--check-distributor-stock, bypass the parts cache "
+            "and fetch live"
+        ),
     )
     bom_parser.add_argument(
         "--validate",
