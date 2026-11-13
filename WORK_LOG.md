@@ -16,6 +16,15 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-13
 
+- **PR #8898**: feat(bom): add --check-distributor-stock flag
+- **Issue #8893** (closed): bom: flag lines with no DigiKey/Mouser stock at build quantity (follow-up to #8892)
+- **PR #8908**: fix(cli): declare and forward kct bom stock/validation flags
+- **Issue #8907** (closed): kct bom: --check-availability, --validate, --quantity and --no-cache are not reachable through the unified CLI
+- **PR #8905**: perf(check): index the mask-to-copper pairwise scan; time-box board-03 check tests
+- **Issue #8901** (closed): Test (extended) red on main: 60 s timeouts in three check-path test files, board 02 length baseline drift
+- **PR #8904**: fix(check): refresh fab DFM parity rows for shipped rules; guard the drift
+- **Issue #8902** (closed): Fab DFM parity table is stale: rows say "no rule" for rules that have shipped
+- **PR #8899**: docs: roadmap as of 2026-11-13
 - **PR #8894**: feat(parts): add 'kct parts stock' for Mouser and DigiKey lookups
 - **Issue #8892** (closed): parts: live stock, price breaks and lead time from the DigiKey and Mouser product-search APIs
 - **PR #8890**: test: guard rule message coordinates against board-relative origin
