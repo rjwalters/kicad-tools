@@ -7,53 +7,67 @@ Seventeen tests across four modules run a complete ``kct check --mfr jlcpcb*``
 over ``boards/03-usb-joystick``'s committed routed PCB (some in-process via
 ``check_cmd.main``, some as a subprocess), and in CI run 43353715620 (``main``
 @ ``cebe5919a``) every one of them failed with ``Failed: Timeout (>60.0s) from
-pytest-timeout`` -- not one of them on an assertion.  The global cap is simply
-below what one board-03 check costs there.
+pytest-timeout`` -- not one of them on an assertion.
 
-Why the cost is not removed at source instead
----------------------------------------------
-One ``kct check --mfr jlcpcb-tier1`` on that board was profiled on
-``feature/issue-8901`` (16-core Linux host, load ~9, ``cProfile``, so the
-absolute numbers are inflated; the shape is what matters).  Of 52.8 s of
-cumulative time there is no single dominant pass:
+Where that time actually went
+-----------------------------
+One pass dominated, and it has been fixed at source rather than waited out.
+Tallying the ``kicad_tools`` frames in the timeout tracebacks of that run shows
+13 of the 13 in-process kills inside
+``mask_copper.assess_attributed_geometry`` -- 12 of them in the single
+``opening.distance(copper)`` call of its ``openings x objects`` scan.  (The
+remaining 4 of the 17 are subprocess-driven; the log does not show the child's
+stack, so they are not measured.)  Nothing was killed in ampacity, the Gerber
+export or the drift banner.
 
-===========================================  ======  ===========================
-pass                                         cumtime added by
-===========================================  ======  ===========================
-``check_ampacity`` / ``measure_pour_ampacity`` 13.6 s  pre-existing (76650
-                                                      ``pour_ampacity._probe``
-                                                      calls)
-``check_mask_to_copper``                       13.4 s  #8842 (default-on)
-``kicad-cli`` subprocesses (6 calls)            8.5 s  fab-view Gerber export
-``_emit_drift_banner`` / ``analyze_drift``      5.4 s  pre-existing (1119 sexp
-                                                      parses)
-===========================================  ======  ===========================
+That scan was an unindexed all-pairs sweep.  Measured directly on board 03's
+real attributed geometry (1140 objects, 148,618 pairs) it cost **170.4 s**;
+with a bounding-box prefilter over the copper geometries it costs **12.9 s**,
+for a byte-identical assessment (same ``evaluated_pairs``, same 410
+measurements, same coverage).  One full
+``kct check --mfr jlcpcb-tier1`` on that board, with the attribution pass
+actually running, went from **194.0 s to 34.9 s** on a 16-core Linux host
+(same exit code and findings on both).
 
-Clearing the timeouts "at source" would therefore mean four independent
-optimisations in three subsystems, each with its own correctness risk, to buy
-a test-harness margin.  Issue #8901 explicitly allows the alternative: an
-explicit per-test timeout carrying the measured reason.  #8888 and #8843 own
-the cost itself.
+That before-number also settles what the old 300 s cap would have bought: at
+the ~2.2x hosted-over-4-workers factor below, a 194 s check lands near 427 s,
+so raising the cap to 300 s would have converted 17 timeouts at 60 s into 17
+timeouts at 300 s and left the job red.  The cost had to come out.
+The prefilter is ``mask_copper.py``'s ``STRtree`` candidate query; its
+invariants are pinned by
+``tests/test_mask_copper.py::test_distance_prefilter_keeps_every_in_reach_pair_and_the_pair_count``.
 
-Measured wall time (the basis for the number below)
----------------------------------------------------
-Uninstrumented, same host, two consecutive runs of
-``python -m kicad_tools.cli check boards/03-usb-joystick/output/usb_joystick_routed.kicad_pcb
---mfr jlcpcb-tier1``: **23.6 s and 25.7 s**.
+Why an explicit timeout is still needed after that fix
+------------------------------------------------------
+34.9 s is under the global 60 s cap, but not by enough to rely on: that figure
+is a single-process run on a 16-core host, while the job runs four such checks
+concurrently on 4 vCPU in a container.  At the ~2.2x hosted-over-4-workers
+factor this job's own comment uses to size its ``timeout-minutes``, 34.9 s
+lands near **77 s** -- still over the cap.  So these tests keep an explicit
+per-test timeout; what changed is that it now covers the *residual* cost of a
+board-03 check instead of a 170 s pass that should never have been there.
 
-The 17 tests, run with the extended-tier flags (``-o addopts=
---benchmark-disable --timeout=60 -m "ci_extended and not slow"``) at ``-n 2``
-on the same host, measured **12.0 s to 34.5 s** each -- i.e. they fit inside
-the 60 s cap here but not on CI's narrower container at ``-n auto``.  Note
-that this host's ``kicad-cli`` build string is not a qualified plot profile,
-so ``mask_to_copper`` reports *incomplete* locally while CI's pinned image
-runs it to completion; the real CI cost is therefore **above** these numbers,
-which is consistent with the observed timeouts.
+The number is **not** measured on CI, and cannot be from a PR: ``Test
+(extended)`` is gated ``if: github.event_name != 'pull_request'``
+(``.github/workflows/ci.yml:830``), so it only runs on the schedule/dispatch
+against ``main``.  300 s is ~4x the 77 s estimate above and ~9x the measured
+34.9 s, so it has room for a slower runner without becoming a licence to hang;
+it remains two orders of magnitude under the job's own ``timeout-minutes: 90``.
+The global ``--timeout=60`` in ``.github/workflows/ci.yml`` is untouched, so
+every other test keeps the tight cap.
 
-``300`` s leaves roughly 9x headroom over the slowest local measurement while
-still bounding a genuine hang two orders of magnitude below the job's own
-``timeout-minutes``.  It does not touch the global ``--timeout=60`` in
-``.github/workflows/ci.yml``, so every other test keeps the tight cap.
+Caveat on the local numbers.  This host's ``kicad-cli`` build string
+(``10.0.6-10.0.6~ubuntu24.04.1``) is not in
+``mask_copper_geometry.QUALIFIED_NATIVE_VERSIONS``, so a plain local
+``kct check`` abandons the attribution pass and reports ``mask_to_copper``
+*incomplete* -- which is why the earlier profile of this check missed the
+dominant pass entirely.  The measurements above were taken with that version
+gate admitting this host's build string, so the pass that CI runs was really
+exercised; the gate governs whether the plot profile is *trusted*, not the size
+or shape of the geometry being compared.  Absolute times on a 4 vCPU runner
+will still differ.
+
+#8888 and #8843 own the remaining ~35 s of this check.
 """
 
 from __future__ import annotations
