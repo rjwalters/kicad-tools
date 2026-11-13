@@ -20,9 +20,13 @@ import fnmatch
 import io
 import json
 import sys
+from typing import TYPE_CHECKING, Any
 
 from ..exceptions import FileNotFoundError as KiCadFileNotFoundError
 from ..schema.bom import BOM, BOMItem, extract_bom
+
+if TYPE_CHECKING:
+    from ..parts.distributors.base import DistributorOffer
 
 
 def run_validation(bom: BOM, quantity: int, output_format: str) -> int:
@@ -424,17 +428,17 @@ def check_distributor_stock(
     if clients is not None:
         no_clients = not clients
 
-    best: dict[str, object] = {}
+    best: dict[str, DistributorOffer] = {}
     for offer in report.offers:
         cur = best.get(offer.mpn)
-        if cur is None or offer.stock > cur.stock:  # type: ignore[attr-defined]
+        if cur is None or offer.stock > cur.stock:
             best[offer.mpn] = offer
 
-    lines = []
+    lines: list[dict[str, Any]] = []
     flagged = 0
     for mpn in sorted(refs_by_mpn):
-        offer = best.get(mpn)
-        stock = offer.stock if offer else None  # type: ignore[attr-defined]
+        best_offer = best.get(mpn)
+        stock = best_offer.stock if best_offer else None
         ok = stock is not None and stock >= needed[mpn]
         is_flagged = (not ok) and not no_clients
         flagged += is_flagged
@@ -444,7 +448,7 @@ def check_distributor_stock(
                 "mpn": mpn,
                 "needed": needed[mpn],
                 "best_stock": stock,
-                "distributor": offer.distributor if offer else None,  # type: ignore[attr-defined]
+                "distributor": best_offer.distributor if best_offer else None,
                 "flagged": is_flagged,
             }
         )
@@ -469,11 +473,11 @@ def check_distributor_stock(
             print("No distributor was queried; no lines were checked.")
         for ln in lines:
             if ln["flagged"]:
-                stock = "not found" if ln["best_stock"] is None else str(ln["best_stock"])
+                stock_text = "not found" if ln["best_stock"] is None else str(ln["best_stock"])
                 dist = ln["distributor"] or "-"
                 print(
                     f"OUT OF STOCK  {','.join(ln['references'])}  {ln['mpn']}  "
-                    f"needed={ln['needed']}  best stock={stock}  distributor={dist}"
+                    f"needed={ln['needed']}  best stock={stock_text}  distributor={dist}"
                 )
         if unchecked:
             print(f"No MPN, not checked: {', '.join(unchecked)}")
