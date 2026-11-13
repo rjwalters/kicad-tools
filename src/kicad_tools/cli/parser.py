@@ -644,6 +644,32 @@ def _add_bom_parser(subparsers) -> None:
     bom_parser.add_argument(
         "--sort", choices=["reference", "value", "footprint"], default="reference"
     )
+    # Issue #8907: these four are declared by the inner parser
+    # (cli/bom_cmd.py) and must be declared here too -- an inner flag the
+    # outer parser does not know is rejected before dispatch (the #3159 /
+    # #4691 drift trap). Keep types, defaults and help text in sync with
+    # bom_cmd.py, and forward each from the `bom` dispatch block.
+    bom_parser.add_argument(
+        "--check-availability",
+        action="store_true",
+        help="Check stock availability from LCSC/JLCPCB",
+    )
+    bom_parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="With --check-availability, bypass the parts cache and fetch live",
+    )
+    bom_parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate BOM against JLCPCB/LCSC parts library for assembly",
+    )
+    bom_parser.add_argument(
+        "--quantity",
+        type=int,
+        default=1,
+        help="Number of boards (for availability check or validation)",
+    )
 
 
 def _add_creepage_parser(subparsers) -> None:
