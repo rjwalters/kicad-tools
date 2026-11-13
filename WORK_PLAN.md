@@ -24,12 +24,14 @@ _None._
 `loom:important`; taken before unlabelled work.
 
 - **#8741**: pcb reinforce: anchors are spaced mid-run, no wire-end anchors, no solder-mask opening; nothing checks that a reinforced run is buildable
+- **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors)
+- **#8901**: Test (extended) red on main: 60 s timeouts in three check-path test files, board 02 length baseline drift
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#8901**: Test (extended) red on main: 60 s timeouts in three check-path test files, board 02 length baseline drift
 
 ## In Progress
 
@@ -37,20 +39,22 @@ Issues currently being built (`loom:building`).
 
 - **#8840**: Sharp trace corner and missing plated through-hole rules; fiducial parity check
 - **#8844**: Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width
-- **#8892**: parts: live stock, price breaks and lead time from the DigiKey and Mouser product-search APIs
+- **#8893**: bom: flag lines with no DigiKey/Mouser stock at build quantity (follow-up to #8892)
+- **#8902**: Fab DFM parity table is stale: rows say "no rule" for rules that have shipped
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
 - **#8848**: feat(check): add sharp_trace_corner and missing_plated_hole rules
-- **#8894**: feat(parts): add 'kct parts stock' for Mouser and DigiKey lookups
+- **#8898**: feat(bom): add --check-distributor-stock flag
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#8623**: chore(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
+- **#8899**: docs: roadmap as of 2026-11-13
 
 ## Proposed
 
@@ -71,7 +75,10 @@ Issues carrying `loom:curated`.
 - **#8840**: Sharp trace corner and missing plated through-hole rules; fiducial parity check *(curated)*
 - **#8844**: Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width *(curated)*
 - **#8858**: Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849) *(curated)*
-- **#8892**: parts: live stock, price breaks and lead time from the DigiKey and Mouser product-search APIs *(curated)*
+- **#8893**: bom: flag lines with no DigiKey/Mouser stock at build quantity (follow-up to #8892) *(curated)*
+- **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors) *(curated)*
+- **#8901**: Test (extended) red on main: 60 s timeouts in three check-path test files, board 02 length baseline drift *(curated)*
+- **#8902**: Fab DFM parity table is stale: rows say "no rule" for rules that have shipped *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -90,12 +97,12 @@ _None._
 |------|-------|
 | Operator merge-risk holds | 1 |
 | Very important | 0 |
-| Important | 1 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 3 |
+| Important | 3 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 4 |
 | PRs awaiting review | 2 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 16 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 19 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->
