@@ -96,3 +96,40 @@ def test_different_net_pads_not_flagged(tmp_path):
         _fp("J2", 10, 10, _smd_net("B.Cu", 1, "A")),
     )
     assert len(v) == 1
+
+
+def test_thermal_pad_with_offset_via_array_not_flagged(tmp_path):
+    # Board 05's U2/U3 shape: top and bottom exposed pads on one net joined by
+    # thermal vias inside the pad, none of them at its centre.
+    pads = (
+        '(pad "29" smd rect (at 0 0) (size 3.4 9.7) (layers "F.Cu") (net 1 "A"))\n'
+        '  (pad "29" smd rect (at 0 0) (size 2.9 8.9) (layers "B.Cu") (net 1 "A"))\n'
+        '  (pad "29" thru_hole circle (at 1.2 -4.2) (size 0.5 0.5) (drill 0.2) '
+        '(layers "*.Cu") (net 1 "A"))'
+    )
+    _, _, v = _violations(tmp_path, _fp("U2", 25, 40, pads))
+    assert v == []
+
+
+def test_hole_outside_the_pads_or_on_another_net_does_not_join_them(tmp_path):
+    outside = '(via (at 12 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 1))'
+    other_net = '(via (at 10.2 10) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (net 2))'
+    for hole in (outside, other_net):
+        _, _, v = _violations(
+            tmp_path,
+            _fp("TP1", 10, 10, _smd_net("F.Cu", 1, "A")),
+            _fp("TP2", 10, 10, _smd_net("B.Cu", 1, "A")),
+            hole,
+        )
+        assert len(v) == 1, hole
+
+
+def test_non_plated_hole_does_not_join_the_pads(tmp_path):
+    npth = '(pad "" np_thru_hole circle (at 0 0) (size 0.5 0.5) (drill 0.5) (layers "*.Cu"))'
+    _, _, v = _violations(
+        tmp_path,
+        _fp("TP1", 10, 10, _smd("F.Cu")),
+        _fp("TP2", 10, 10, _smd("B.Cu")),
+        _fp("H1", 10, 10, npth),
+    )
+    assert len(v) == 1

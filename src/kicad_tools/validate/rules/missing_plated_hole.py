@@ -5,9 +5,12 @@ centre with no hole joining them: the designer meant a through-hole
 connection but drew two SMD pads, so the layers are not connected.
 
 Rule ID generated:
-    - missing_plated_hole: an F.Cu-only SMD pad and a B.Cu-only SMD pad have
-      centres within :data:`COLOCATION_TOLERANCE_MM` and no through-hole pad
-      or via is at that spot.
+    - missing_plated_hole: an F.Cu-only SMD pad and a B.Cu-only SMD pad of
+      one net have centres within :data:`COLOCATION_TOLERANCE_MM`, and no
+      same-net plated hole (via or plated through-hole pad) lies inside both
+      pads.  A thermal pad whose top and bottom copper are joined by a via
+      array is therefore clean even with no hole at its centre; a
+      non-plated hole never counts, because it does not join the layers.
 """
 
 from __future__ import annotations
@@ -37,6 +40,16 @@ def _pad_centres(pcb: PCB):
             yield fp, pad, (fp.position[0] + dx, fp.position[1] + dy)
 
 
+def _inside_pad(pad, centre: tuple[float, float], point: tuple[float, float]) -> bool:
+    """Whether ``point`` lies within the pad's bounding rectangle (pad frame)."""
+    from kicad_tools.core.geometry import rotate_pad_offset
+
+    # ``pad.rotation`` is absolute; undo it to reach the pad's own frame.
+    lx, ly = rotate_pad_offset(point[0] - centre[0], point[1] - centre[1], -pad.rotation)
+    tol = 1e-6
+    return abs(lx) <= pad.size[0] / 2 + tol and abs(ly) <= pad.size[1] / 2 + tol
+
+
 class MissingPlatedHoleRule(DRCRule):
     """Flag co-located top/bottom SMD pads that have no hole between them."""
 
@@ -49,16 +62,20 @@ class MissingPlatedHoleRule(DRCRule):
         del design_rules
         results = DRCResults()
         results.rules_checked = 1
-        top, bottom, holes = [], [], []
+        top, bottom = [], []
+        # Plated holes as (net_number, centre): only these join the layers.
+        holes: list[tuple[int, tuple[float, float]]] = []
         for fp, pad, centre in _pad_centres(pcb):
-            if pad.type in ("thru_hole", "np_thru_hole") or pad.drill > 0:
-                holes.append(centre)
+            if pad.type == "np_thru_hole":
+                continue
+            if pad.type == "thru_hole" or pad.drill > 0:
+                holes.append((pad.net_number, centre))
             elif pad.type == "smd":
                 if "F.Cu" in pad.layers and "B.Cu" not in pad.layers:
                     top.append((fp, pad, centre))
                 elif "B.Cu" in pad.layers and "F.Cu" not in pad.layers:
                     bottom.append((fp, pad, centre))
-        holes.extend((v.position[0], v.position[1]) for v in pcb.vias)
+        holes.extend((v.net_number, (v.position[0], v.position[1])) for v in pcb.vias)
 
         for fp_t, pad_t, c_t in top:
             for fp_b, pad_b, c_b in bottom:
@@ -68,7 +85,12 @@ class MissingPlatedHoleRule(DRCRule):
                 # with a hole would short the nets, so it is not a missing hole.
                 if pad_t.net_number != pad_b.net_number:
                     continue
-                if any(math.dist(c_t, h) <= COLOCATION_TOLERANCE_MM for h in holes):
+                if any(
+                    net == pad_t.net_number
+                    and _inside_pad(pad_t, c_t, h)
+                    and _inside_pad(pad_b, c_b, h)
+                    for net, h in holes
+                ):
                     continue
                 results.add(
                     DRCViolation(

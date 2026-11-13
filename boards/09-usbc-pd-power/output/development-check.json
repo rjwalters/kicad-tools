@@ -49,16 +49,23 @@
     "manufacturer-check": {
       "returncode": 2,
       "summary": {
-        "errors": 51,
-        "warnings": 147,
-        "infos": 3,
+        "errors": 52,
+        "warnings": 170,
+        "infos": 4,
         "waived": 0,
-        "rules_checked": 70,
+        "rules_checked": 84,
         "rules_checked_by_rule": {
           "connectivity": 1,
           "copper_sliver": 1,
           "track_dangling": 1,
           "via_dangling": 1,
+          "pour_slot": 1,
+          "redundant_copper_duplicate": 1,
+          "redundant_copper_fragments": 1,
+          "redundant_copper_detour": 1,
+          "redundant_copper_via_offcentre": 1,
+          "redundant_copper_covered": 1,
+          "redundant_copper_staircase": 1,
           "diffpair_clearance_intra": 2,
           "doc_drift_stale_pin": 1,
           "doc_drift_unresolvable_pin": 1,
@@ -72,21 +79,27 @@
           "netclass_annular_ring": 1,
           "sch_field_offset": 1,
           "sch_field_overlap": 1,
+          "sch_wire_through_symbol": 1,
           "spec_conformance_dimensions": 1,
           "spec_conformance_layers": 1,
           "spec_conformance_min_trace": 1,
           "spec_conformance_min_via": 1,
           "spec_conformance_min_drill": 1,
-          "spec_conformance_target_fab": 1
+          "spec_conformance_target_fab": 1,
+          "mask_to_copper": 1,
+          "mask_negative_expansion": 1,
+          "mask_multi_segment": 1
         },
         "passed": false,
         "stale_waivers": 0,
-        "coverage_checked": 36,
+        "orphan_waivers": 0,
+        "coverage_checked": 47,
         "coverage_skipped": 5,
         "coverage_unknown": [
           "model_coverage"
         ],
-        "coverage_blocking_unknown": []
+        "coverage_blocking_unknown": [],
+        "attach_zone_exemption": "not_applicable"
       }
     },
     "net-status": {
@@ -137,9 +150,9 @@
   ],
   "sha256": {
     "usbc_pd_power.kicad_sch": "025ed270feacb0d33557cdfcbb5e14cb8f6b7c814d76579a7ee170ae65b338a7",
-    "usbc_pd_power.kicad_pcb": "587e063d8931f2b4e96619c430074f47b2649f06ca296c192ab44f3886441a9b",
+    "usbc_pd_power.kicad_pcb": "d2687f3070cfa88cdeee522c3be2e136778e988045378951562c10619508e9f5",
     "circuit.json": "8c5346506cd6bd6796e29cc368fae648df63b1ccaf7c651f61d4422ca8e8c8ef",
-    "net_class_map.json": "52ea7075492770de56fc8f9eff9d405f02a56f3c9bb2f6ba210919cf8123b5b0",
+    "net_class_map.json": "080bfbd951526b2171bac077b61cc28330f5371a60f39d1cbfcb748d746d6a54",
     "usbc_pd_power.kicad_pro": "46e70ad622f62a250039b8ed3a792497b33bf6c7a0d18eb689a5f513a4ae2c22",
     "board09.kicad_sym": "36f1e94f721256abb4ab91d033f3d099e7aee1a49c81a25856ddfb67d36b9e52",
     "board09.pretty/SRP7050TA.kicad_mod": "0e5569968f48e2d3f7f09ec4814306e0d63792d71fd3ccf00564d053394dd947"

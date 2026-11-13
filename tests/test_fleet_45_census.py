@@ -68,7 +68,7 @@ Board 09 is a *blocked development checkpoint*, not a historical fixture:
 its README documents clean native ERC/DRC and full routing, but
 explicitly blocks manufacturing release (51 ampacity errors, 22
 unselected MPNs, no manufacturing ZIP).  Now that it is discovered, its
-318-segment output carries 61 off-angle segments -- pending a source
+320-segment output carries 59 off-angle segments -- pending a source
 emitter repair, it is an EXPLICIT, hash-pinned exemption from the strict
 ``ARTIFACTS`` enforcement below (``BLOCKED_DEVELOPMENT_CHECKPOINT``),
 distinct from the ``HISTORICAL_WITNESS`` mechanism (which pins a
@@ -251,7 +251,7 @@ HISTORICAL_WITNESS_SHA256 = "fdbb69fd1cae5ee76a6a66788feebfed3490f090652df75fdbf
 # _committed_routed_artifacts() now that discovery no longer relies solely
 # on the `_routed` filename suffix, but explicitly exempted from the
 # strict 45-degree enforcement below pending a source-emitter repair of
-# its 61 off-angle segments.  Unlike HISTORICAL_WITNESS this is NOT a
+# its 59 off-angle segments.  Unlike HISTORICAL_WITNESS this is NOT a
 # frozen historical fixture -- it is board09's live, actively-developed
 # routed output, currently blocked from manufacturing release for
 # unrelated reasons (ampacity, MPN selection, no manufacturing ZIP; see
@@ -264,7 +264,7 @@ BLOCKED_DEVELOPMENT_CHECKPOINT = (
     REPO_ROOT / "boards/09-usbc-pd-power/output/usbc_pd_power.kicad_pcb"
 )
 BLOCKED_DEVELOPMENT_CHECKPOINT_SHA256 = (
-    "587e063d8931f2b4e96619c430074f47b2649f06ca296c192ab44f3886441a9b"
+    "d2687f3070cfa88cdeee522c3be2e136778e988045378951562c10619508e9f5"
 )
 
 ARTIFACTS = [
@@ -286,7 +286,7 @@ def test_blocked_development_checkpoint_is_tracked() -> None:
     This documents the issue #5084 policy decision explicitly: the file
     IS now found by discovery (closing the filename-suffix gap) but is
     NOT yet held to the strict fleet angle census, because board09 is a
-    blocked development checkpoint whose 61 off-angle segments need a
+    blocked development checkpoint whose 59 off-angle segments need a
     source-emitter repair, not a quantize-to-pass shortcut.  If this
     assertion's counts ever change, board09's routing changed -- update
     the pin, and if bad == 0, remove the exemption entirely.
@@ -300,7 +300,7 @@ def test_blocked_development_checkpoint_is_tracked() -> None:
         == BLOCKED_DEVELOPMENT_CHECKPOINT_SHA256
     )
     total, bad = segment_angle_census(BLOCKED_DEVELOPMENT_CHECKPOINT)
-    assert (total, len(bad)) == (318, 61)
+    assert (total, len(bad)) == (320, 59)
 
 
 def test_fleet_has_routed_artifacts() -> None:

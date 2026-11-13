@@ -169,8 +169,9 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "partial",
         False,
         "`missing_plated_hole` (#8840) flags same-net top/bottom SMD pads whose "
-        "centres coincide (0.05 mm); overlapping pads with offset centres are not "
-        "checked. The observed 2 warnings were not re-measured.",
+        "centres coincide (0.05 mm) with no same-net plated hole inside both; "
+        "overlapping pads with offset centres are not checked. The observed 2 "
+        "warnings were not re-measured.",
     ),
     ParityRow(
         "silkscreen_line_width",

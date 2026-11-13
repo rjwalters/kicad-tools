@@ -471,13 +471,16 @@ def add_critical_copper(pcb: PCB) -> None:
     for endpoint, via in [(("R5", "1"), (62.4, 35)), (("R4", "1"), (23.5, 26))]:
         pcb.add_trace(endpoint, via, width=0.25, net="VIN")
         pcb.add_via(*via, net="VIN")
+        # R5's feed lands on the far end of the 45-degree leg, (53, 32.5),
+        # arriving at 45 degrees: landing at (52, 33.5) left a 53-degree
+        # wedge against that leg (sharp_trace_corner, issue #8840).
         pcb.add_trace(
             via,
-            (52, 33.5) if endpoint[0] == "R5" else (39.8, 33.5),
+            (53, 32.5) if endpoint[0] == "R5" else (39.8, 33.5),
             width=0.25,
             layer="B.Cu",
             net="VIN",
-            waypoints=None if endpoint[0] == "R5" else [(23.5, 35.5), (39.8, 35.5)],
+            waypoints=[(55.5, 35)] if endpoint[0] == "R5" else [(23.5, 35.5), (39.8, 35.5)],
         )
     for ref in ("Q1", "Q2"):
         pcb.add_trace((ref, "1"), (ref, "2"), width=1.2, net="PMOS_SOURCE")
@@ -487,9 +490,13 @@ def add_critical_copper(pcb: PCB) -> None:
         ("Q2", "1"),
         width=1.2,
         net="PMOS_SOURCE",
-        waypoints=[(29.5, 18.635), (29.5, 22), (34, 22), (46.475, 22)],
+        waypoints=[(29.5, 18.635), (29.5, 22), (32.175, 22), (34, 22), (46.475, 22)],
     )
-    pcb.add_trace((34, 22), ("R1", "1"), width=0.25, net="PMOS_SOURCE", waypoints=[(32.175, 25)])
+    # R1's branch drops at 90 degrees from the wide run; leaving it at
+    # (34, 22) towards (32.175, 25) made a 58.7-degree wedge (issue #8840).
+    pcb.add_trace(
+        (32.175, 22), ("R1", "1"), width=0.25, net="PMOS_SOURCE", waypoints=[(32.175, 25)]
+    )
     pcb.add_trace(
         ("R1", "1"),
         ("D1", "1"),
