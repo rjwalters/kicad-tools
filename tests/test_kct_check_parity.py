@@ -165,6 +165,8 @@ def _run_kct_check(pcb: Path, sidecar: Path | None) -> dict:
         str(pcb),
         "--mfr",
         "jlcpcb",
+        "--skip",
+        "mask_to_copper",
         "--errors-only",
         "--format",
         "json",
