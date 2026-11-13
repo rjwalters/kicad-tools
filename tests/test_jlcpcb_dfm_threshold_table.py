@@ -216,3 +216,70 @@ def test_drc_checker_default_fails_closed_on_3oz_jlcpcb():
         DRCChecker(pcb, manufacturer="jlcpcb", layers=4, copper_oz=3.0)
     # The explicit opt-out used by `kct check` does not raise.
     DRCChecker(pcb, manufacturer="jlcpcb", layers=4, copper_oz=3.0, strict_copper=False)
+
+
+# --- Issue #8857: one effective-rules path for check / apply-rules / .kicad_dru
+
+_FLOOR_FIELDS = {
+    "trace_spacing": "min_clearance_mm",
+    "pad_spacing": "min_smd_pad_clearance_mm",
+    "annular_ring_via": "min_annular_ring_mm",
+    "annular_ring_pth": "min_pth_annular_ring_mm",
+    "mask_bridge": "min_solder_mask_dam_mm",
+}
+
+
+def _table_stackups():
+    t = get_profile("jlcpcb").dfm_thresholds
+    return [(e.layers, e.outer_oz, e.inner_oz) for e in t.entries]
+
+
+@pytest.mark.parametrize("stackup", _table_stackups())
+def test_effective_rules_meet_table_floors_and_match_check(stackup):
+    layers, outer, inner = stackup
+    p = get_profile("jlcpcb")
+    entry = p.get_dfm_entry(*stackup)
+    eff = p.get_design_rules(layers, outer)
+    for name, field_name in _FLOOR_FIELDS.items():
+        assert getattr(eff, field_name) >= entry.thresholds[name].danger_mm - 1e-9, (
+            entry.key,
+            field_name,
+        )
+    # kct check applies the same floors: its result equals the profile's.
+    c = SimpleNamespace(
+        pcb=SimpleNamespace(copper_layers=list(range(layers))),
+        design_rules=p._base_design_rules(layers, outer),
+    )
+    assert _apply_dfm_table(c, "jlcpcb", layers, outer, inner, outer, {}) is False
+    assert c.design_rules == eff
+
+
+def test_4layer_2oz_mask_dam_is_table_floor_everywhere():
+    """The divergence behind #8857: profile said 0.1, table (and check) 0.2."""
+    from kicad_tools.manufacturers.dru_generator import generate_dru
+
+    eff = get_profile("jlcpcb").get_design_rules(4, 2.0)
+    assert eff.min_solder_mask_dam_mm == pytest.approx(0.20)
+    assert "0.2" in generate_dru(eff, "JLCPCB")
+
+
+@pytest.mark.parametrize("stackup", [s for s in _table_stackups() if s[0] > 2])
+def test_inner_and_outer_spacing_stay_separate(stackup):
+    layers, outer, _ = stackup
+    p = get_profile("jlcpcb")
+    base = p._base_design_rules(layers, outer)
+    eff = p.get_design_rules(layers, outer)
+    assert eff.min_inner_clearance_mm == base.min_inner_clearance_mm
+
+
+def test_3oz_main_is_incomplete_not_error(tmp_path):
+    from kicad_tools.cli.check_cmd import evaluate_check_verdict
+
+    c = SimpleNamespace(
+        pcb=SimpleNamespace(copper_layers=list(range(4))),
+        design_rules=get_profile("jlcpcb").get_design_rules(4, 1.0),
+    )
+    assert _apply_dfm_table(c, "jlcpcb", 4, 3.0, 0.5, 1.0, {}) is True
+    res = SimpleNamespace(violations=[], mask_copper_assessments=[], rules_checked=1)
+    v = evaluate_check_verdict(tmp_path / "x.kicad_pcb", res, drc_only=True, dfm_incomplete=True)
+    assert v.verdict == "incomplete"

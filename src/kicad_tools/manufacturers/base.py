@@ -569,10 +569,10 @@ class ManufacturerProfile:
             return None
         return self.dfm_thresholds.lookup(layers, outer_oz, inner_oz)
 
-    def get_design_rules(
+    def _base_design_rules(
         self, layers: int = 4, copper_oz: float = 1.0, *, strict: bool = False
     ) -> DesignRules:
-        """Get design rules for a specific configuration.
+        """Profile design rules for a configuration, before DFM-table floors.
 
         With ``strict=True`` (used by ``kct check`` / ``kct readiness``), a
         heavier-than-1oz outer weight with no profile entry raises
@@ -606,6 +606,51 @@ class ManufacturerProfile:
 
         # Return first available
         return list(self.design_rules.values())[0]
+
+    def apply_dfm_floors(self, rules: DesignRules, entry: DfmEntry | None) -> DesignRules:
+        """Tighten ``rules`` with a DFM-table entry's danger floors (Issue #8857).
+
+        The single merge path: ``kct check``, ``kct mfr apply-rules``,
+        ``kct export`` and the generated ``.kicad_dru`` all go through it, so
+        they enforce the same floors.  Floors only tighten (``max``).  Outer
+        and inner spacing stay separate: only ``min_clearance_mm`` (outer) is
+        touched, never ``min_inner_clearance_mm``.
+        """
+        if entry is None:
+            return rules
+        from dataclasses import replace
+
+        t = entry.thresholds
+        return replace(
+            rules,
+            min_clearance_mm=max(rules.min_clearance_mm, t["trace_spacing"].danger_mm),
+            min_smd_pad_clearance_mm=max(
+                rules.min_smd_pad_clearance_mm or 0.0, t["pad_spacing"].danger_mm
+            ),
+            min_annular_ring_mm=max(rules.min_annular_ring_mm, t["annular_ring_via"].danger_mm),
+            min_pth_annular_ring_mm=max(
+                rules.min_pth_annular_ring_mm or 0.0, t["annular_ring_pth"].danger_mm
+            ),
+            min_solder_mask_dam_mm=max(rules.min_solder_mask_dam_mm, t["mask_bridge"].danger_mm),
+        )
+
+    def get_design_rules(
+        self, layers: int = 4, copper_oz: float = 1.0, *, strict: bool = False
+    ) -> DesignRules:
+        """Effective design rules: profile rules tightened by the DFM table.
+
+        With ``strict=True`` (fabs without a table), a heavier-than-1oz outer
+        weight with no profile entry raises
+        :class:`UnsupportedCopperWeightError` (Issue #8836).  When the fab has
+        a ``dfm_thresholds`` entry for the resolved stackup its floors are
+        applied here (Issue #8857), so every consumer sees the same numbers.
+        """
+        rules = self._base_design_rules(layers, copper_oz, strict=strict)
+        if self.dfm_thresholds is None:
+            return rules
+        inner = float(rules.inner_copper_oz) if layers > 2 else 0.0
+        entry = self.get_dfm_entry(layers, float(rules.outer_copper_oz), inner)
+        return self.apply_dfm_floors(rules, entry)
 
     def copper_options(self, layers: int) -> list[tuple[float, float]]:
         """Distinct ``(outer_oz, inner_oz)`` builds the profile offers for a layer count.
