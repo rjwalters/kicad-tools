@@ -53,3 +53,45 @@ Official authenticated error classification remains the official client's job;
 source orchestration retains safe exception types/codes without copying raw
 response bodies or credentials. No live supplier request is needed to test these
 semantics.
+
+## Authorised-distributor stock (`kct parts stock`)
+
+`kct parts stock <MPN>... -q <qty> [--format table|json]` reads Mouser and DigiKey
+through their official product-search APIs (issue #8892). It is separate from the
+LCSC/JLCPCB sources above and never falls back to them.
+
+Credentials are environment-only (never CLI flags, never written to output or the
+cache): `MOUSER_API_KEY`; `DIGIKEY_CLIENT_ID` + `DIGIKEY_CLIENT_SECRET`
+(OAuth2 client-credentials; the token is held in memory only). A source without
+credentials is skipped with a message naming the missing variables; the others
+still run. Optional: `DIGIKEY_LOCALE_SITE` (default `US`),
+`DIGIKEY_LOCALE_CURRENCY` (default `USD`).
+
+| Field | Mouser | DigiKey |
+|---|---|---|
+| Stock on hand | `AvailabilityInStock` | `QuantityAvailable` (all packagings) |
+| Unit price at quantity | `PriceBreaks` | first priced variation's `StandardPricing` |
+| Lead time | `LeadTime` (as given, e.g. "84 Days") | `ManufacturerLeadWeeks` |
+| Lifecycle | `LifecycleStatus` | `ProductStatus.Status` |
+| Packaging | `Packaging` product attribute, if present | variation `PackageType` |
+| Distributor PN | `MouserPartNumber` | variation `DigiKeyProductNumber` |
+| Region | fixed label `mouser-account-default` (the key's account site) | `DIGIKEY_LOCALE_SITE` |
+
+Every offer carries `fetched_at` (UTC, time of the API read). Price is the highest
+break at or below the requested quantity; below the lowest break the lowest break is
+used and flagged. Multiple MPNs give a comparison sorted purchasable-now (stock >=
+quantity) first, then unit price. Cached offers (default TTL 60 min, `--no-cache`
+to bypass) show their age; stock moves, so treat cached figures accordingly.
+
+Rate limits: live calls are counted per source per UTC day in the local cache
+(`distributors.db` beside `parts.db`) and refused once the quota is reached
+(defaults 1000/day each, overridable with `MOUSER_DAILY_QUOTA` /
+`DIGIKEY_DAILY_QUOTA`; **verify against each vendor's current terms** -- the defaults
+were not confirmed against live documentation). Cache hits do not count. Per-minute
+limits are not tracked; an HTTP 429 is reported and the lookup skipped.
+
+Not covered: orders, carts, quotes; other distributors; non-exact MPN search
+(only exact MPN matches are returned); DigiKey packaging variations beyond the
+first priced one; BOM integration (tracked in #8893). Test fixtures are
+hand-written to the documented response shapes, not captured live; real-key
+behaviour has not been verified in CI.
