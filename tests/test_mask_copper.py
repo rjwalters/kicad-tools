@@ -398,3 +398,141 @@ def test_public_cli_forwards_mask_config_and_preserves_incomplete(tmp_path, caps
     assert assessment["coverage"] == "not_run"
     assert "explicit process-specific" in assessment["reasons"][0]
     assert board.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "gap,expected,passed",
+    [
+        (0.05, "violation", False),
+        (0.12, "warning", True),
+        (0.2, None, True),
+    ],
+)
+def test_warning_tier_does_not_fail_verdict(gap, expected, passed):
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(conductor_x=1.1 + gap)
+    policy = MaskCopperPolicy(0.09, "order", "process", "rev", warning_clearance_mm=0.15)
+    result = assess_attributed_geometry(geometry, policy)
+    assert ([m.disposition for m in result.measurements] or [None]) == [expected]
+    assert result.passed is passed
+    severities = {v.severity for v in assessment_results(result).violations}
+    assert severities <= (
+        {"warning"} if expected == "warning" else {"error"} if expected else set()
+    )
+
+
+def test_warning_clearance_must_not_be_below_clearance():
+    with pytest.raises(ValueError):
+        MaskCopperPolicy(0.1, "s", "p", "r", warning_clearance_mm=0.05)
+
+
+def test_default_request_is_jlcpcb_only_and_cited():
+    from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+    request = default_request_for_manufacturer("jlcpcb")
+    assert request.policy.clearance_mm == 0.09
+    assert request.policy.warning_clearance_mm == 0.15
+    assert default_request_for_manufacturer("jlcpcb-tier1") is not None
+    assert default_request_for_manufacturer("pcbway") is None
+    assert default_request_for_manufacturer(None) is None
+
+
+def test_cli_mfr_runs_mask_to_copper_by_default_but_not_without_mfr(tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+
+    def run(*extra):
+        main(["check", str(board), "--drc-only", "--format", "json", *extra])
+        return json.loads(capsys.readouterr().out)
+
+    with_mfr = run("--mfr", "jlcpcb")
+    assessments = with_mfr.get("mask_copper_assessments")
+    assert assessments, "mask_to_copper must run by default under --mfr"
+    assert assessments[0]["policy"]["clearance_mm"] == 0.09
+    assert assessments[0]["coverage"] != "not_run" or assessments[0]["reasons"]
+
+    assert not run("--mfr", "jlcpcb", "--skip", "mask_to_copper").get("mask_copper_assessments")
+    assert not run().get("mask_copper_assessments")
+
+
+def spread_geometry(near_gap, *, far_conductor_count=40, far_spacing=5.0):
+    """Owner pad with one near conductor and many deliberately distant ones.
+
+    The distant conductors exist so the bounding-box prefilter in
+    :func:`assess_attributed_geometry` (issue #8901) has something to prune:
+    only the conductor at ``near_gap`` from the mask opening's right edge can
+    be inside the policy's reach.
+    """
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+
+    owner = "00000000-0000-0000-0000-000000000001"
+    near = "00000000-0000-0000-0000-000000000002"
+    pad = box(0, 0, 1, 1)
+    opening = box(-0.1, -0.1, 1.1, 1.1)
+    objects = {
+        owner: {
+            "kind": "pad:rect",
+            "net": "N",
+            "layers_geometry": {"F.Mask": opening, "F.Cu": pad},
+            "margin_mm": {"F.Mask": 0.1},
+        },
+        near: {
+            "kind": "segment",
+            "net": "N",
+            "layers_geometry": {"F.Cu": box(1.1 + near_gap, 0.4, 1.6 + near_gap, 0.6)},
+            "margin_mm": {},
+        },
+    }
+    copper = [item["layers_geometry"]["F.Cu"] for item in objects.values()]
+    for index in range(far_conductor_count):
+        start = 10.0 + index * far_spacing
+        shape = box(start, 0.4, start + 1.0, 0.6)
+        objects[f"00000000-0000-0000-0000-{index + 3:012d}"] = {
+            "kind": "segment",
+            "net": "F",
+            "layers_geometry": {"F.Cu": shape},
+            "margin_mm": {},
+        }
+        copper.append(shape)
+    exported = ExportedMaskGeometry(
+        "a" * 64,
+        None,
+        None,
+        "10.0.5",
+        {},
+        layers={"F.Mask": opening, "F.Cu": unary_union(copper)},
+    )
+    return AttributedMaskGeometry(exported, objects), owner, near
+
+
+@pytest.mark.parametrize(
+    ("near_gap", "measured"),
+    [(0.05, True), (0.5, False)],
+)
+def test_distance_prefilter_keeps_every_in_reach_pair_and_the_pair_count(near_gap, measured):
+    """The bbox prefilter may only drop pairs the exact distance would reject.
+
+    Issue #8901: the pairwise scan was an unindexed ``openings x objects``
+    sweep, 170 s of one board-03 ``kct check``. Pruning by envelope must not
+    change which pairs are measured, and ``evaluated_pairs`` must still report
+    the whole comparison set, not just the surviving candidates.
+    """
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry
+
+    geometry, owner, near = spread_geometry(near_gap)
+    result = assess_attributed_geometry(geometry, MaskCopperPolicy(0.1, "order", "process", "rev"))
+
+    # One opening, every conductor on F.Cu but the owner's own contribution.
+    assert result.evaluated_pairs == len(geometry.objects) - 1
+    assert [m.conductor_uuid for m in result.measurements] == ([near] if measured else [])
+    assert all(m.opening_uuids == (owner,) for m in result.measurements)

@@ -154,6 +154,10 @@ def _run_kct_check(pcb_path: Path) -> dict:
         # the profile inline to stay aligned with that verdict.
         "--mfr",
         "jlcpcb-tier1",
+        # Issue #8842: mask_to_copper is default-on under --mfr but has no baseline
+        # in this gate; skipped until the #8839 threshold table lands.
+        "--skip",
+        "mask_to_copper",
         "--errors-only",
         "--format",
         "json",

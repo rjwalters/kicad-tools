@@ -103,6 +103,10 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
         print("Guided checklist (do these yourself; stop at the saved cart):")
         for line in drv.guided_checklist(spec, inputs):
             print(f"  {line}")
+        from ..parts.jlc_env import JLCContact
+
+        for line in JLCContact.from_env().guided_lines(show_values=sys.stdout.isatty()):
+            print(f"  {line}")
         return 0
     if not args.match_mapping:
         print("REFUSED: --website needs --match-mapping", file=sys.stderr)
@@ -157,6 +161,7 @@ def _website_leg(args: argparse.Namespace, result, out: Path) -> int:
 
 
 def run(args: argparse.Namespace) -> int:
+    from ..parts.jlc_env import load_jlc_env
     from ..parts.jlcpcb_api import JLCCredentials, JLCOpenAPIClient
     from ..parts.lcsc_inventory import LCSCInventorySource
 
@@ -169,6 +174,7 @@ def run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    load_jlc_env(Path(args.board))
     credentials = JLCCredentials.from_env()
     inventory_source: JLCOpenAPIClient | LCSCInventorySource | None = None
     if credentials:

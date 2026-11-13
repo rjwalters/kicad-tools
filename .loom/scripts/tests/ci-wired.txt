@@ -274,6 +274,7 @@ tests/hooks/test-guard-destructive-sed-operands.sh
 tests/hooks/test-guard-destructive-session-scratch.sh
 tests/hooks/test-guard-destructive-stash-scope.sh
 tests/hooks/test-guard-destructive-write-confinement.sh
+tests/hooks/test-guard-confinement-evidence.sh
 tests/hooks/test-guard-loom-workflow.sh
 tests/hooks/test-guard-worktree-edit-bash-parity.sh
 # Not a Claude-path guard, but the same repo-root tests/hooks/ location and

@@ -56,6 +56,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.analysis.routing_quality import (
+    RULE_OFF_AXIS_LENGTH_WARNING,
+    off_axis_layer_warning_count,
+)
+
 from .board_readiness import read_readiness, readiness_input_hash
 from .format_options import FORMAT_JSON, add_format_flag, emit_json, stdout_to_stderr_when
 from .kicad_toolchain import (
@@ -127,6 +132,8 @@ ASSEMBLY_AFFECTING_RULES = frozenset(
         # Issue #8532: no global fiducials / no revision on the silkscreen.
         "fiducials_missing",
         "board_id_missing",
+        # Issue #8884: a layer dominated (by length) by off-axis copper.
+        "routing_quality_off_axis_length",
     }
 )
 
@@ -2026,6 +2033,10 @@ def _gate_warning_review(
 ) -> tuple[CheckOutcome, dict[str, int]]:
     """Gate 4b — per-rule warning table + assembly-affecting acknowledgement."""
     counts = _warning_counts(check_report)
+    # Issue #8884: derived from the advisory ``routing_quality`` object.
+    off_axis_layers = off_axis_layer_warning_count(check_report.get("routing_quality"))
+    if off_axis_layers:
+        counts = dict(sorted({**counts, RULE_OFF_AXIS_LENGTH_WARNING: off_axis_layers}.items()))
     table = _format_warning_table(counts)
     introduced: dict[str, int] = {}
     if options.baseline is not None:

@@ -216,8 +216,11 @@ def precheck(
     if (
         category == "physical_copper_gap"
         and getattr(checker, "physical_copper_gap_mm", None) is None
+        and not getattr(checker, "fab_view", False)
     ):
         return skipped(category, "opt_in:--physical-copper-gap")
+    if category == "tht_smd_spacing" and not getattr(checker, "fab_view", False):
+        return skipped(category, "opt_in:--mfr jlcpcb")
     if category == "routing_policy" and not getattr(checker, "require_routing_policy", False):
         from kicad_tools.validate.rules.routing_policy import declares_routing_policy
 
@@ -247,6 +250,15 @@ def precheck(
         unevaluated, total = _unevaluated_courtyards(checker)
         if unevaluated:
             return unknown(category, f"no_courtyard_geometry ({unevaluated} of {total} footprints)")
+    if category in ("mask_negative_expansion", "mask_multi_segment"):
+        # Issue #8847: an unsaved board or unmodelled mask feature means the
+        # opening geometry is partial, so zero findings is not a pass.
+        snap_fn = getattr(checker, "mask_geometry_snapshot", None)
+        if snap_fn is not None:
+            snap = snap_fn()
+            reason = snap[1] if isinstance(snap, tuple) and len(snap) == 2 else None
+            if reason:
+                return unknown(category, reason)
     if category == "sch_fields":
         if drc_only:
             return skipped(category, "drc_only")

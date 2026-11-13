@@ -8,9 +8,10 @@
 #   2. A symlinked .claude/agents (the dogfood link) is left alone.
 #   3. An existing .loom/hooks/tests/ is synced; without one, a run prints an
 #      "un-synced drift" line naming the upstream test files and writes nothing.
-#   4. An upstream hook the repo's .claude/settings.json does not wire is
-#      named in a warning; settings.json is byte-identical afterwards, the exit
-#      status is unchanged, and a fully wired repo prints no such warning.
+#   4. (#13787) A Loom hook installed in .loom/hooks/ but not wired (the repo
+#      only has the Repo Skills guard) is wired additively by resync: the
+#      existing entry stays first, a second run is a no-op. --dry-run only
+#      reports; non-JSON and pinned settings.json are left untouched.
 #
 # Usage: ./.loom/scripts/tests/test-resync-installed-agents-hooks.sh
 
@@ -18,6 +19,8 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESYNC="$(cd "$SCRIPT_DIR/.." && pwd)/resync-installed.sh"
+PROVISION_LIB="$(cd "$SCRIPT_DIR/../../.." && pwd)/scripts/install/provision-hooks.sh"
+[[ -r "$PROVISION_LIB" ]] || { echo "SKIP: $PROVISION_LIB not found (not a Loom source checkout)"; exit 0; }
 
 TESTS_RUN=0; TESTS_FAILED=0
 pass() { TESTS_RUN=$((TESTS_RUN + 1)); echo "  PASS: $1"; }
@@ -50,14 +53,14 @@ make_fixture() {
     printf '#!/usr/bin/env bash\necho v2\n' > "$REPO/defaults/hooks/tests/test-hook-wiring.sh"
     printf '#!/usr/bin/env bash\necho t\n' > "$REPO/defaults/hooks/tests/test-roll-pause.sh"
     chmod +x "$REPO"/defaults/hooks/tests/*.sh
-    # The upstream wiring table: two hooks.
-    cat > "$REPO/scripts/install/provision-hooks.sh" <<'LIB'
-_PHOOK_TYPES=(PreToolUse PreToolUse)
-_PHOOK_MATCHERS=(Bash "*")
-_PHOOK_NAMES=(guard-destructive.sh roll-pause.sh)
-LIB
+    # The real upstream wiring table + ensure_project_hook_wiring (#13787).
+    cp "$PROVISION_LIB" "$REPO/scripts/install/provision-hooks.sh"
+    # Two installed hook scripts; settings.json starts with only the Repo Skills guard.
+    printf '#!/usr/bin/env bash\n' > "$REPO/.loom/hooks/guard-destructive.sh"
+    printf '#!/usr/bin/env bash\n' > "$REPO/.loom/hooks/roll-pause.sh"
+    chmod +x "$REPO"/.loom/hooks/*.sh
     cat > "$REPO/.claude/settings.json" <<'JSON'
-{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"bash -c 'x hook-wiring.sh PreToolUse guard-destructive.sh'"}]}]}}
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"\"${CLAUDE_PROJECT_DIR}/.claude/skills/repo/hooks/guard-destructive.sh\""}]}]}}
 JSON
     printf '{\n  "loom_version": "0.0.0",\n  "loom_commit": "old",\n  "install_date": "2020-01-01",\n  "loom_source": "%s",\n  "installed_files": []\n}\n' \
         "$REPO" > "$REPO/.loom/install-metadata.json"
@@ -107,27 +110,44 @@ if [[ "$(sed -n 2p "$REPO/.loom/hooks/tests/test-hook-wiring.sh")" == "echo v2" 
     pass "present directory: stale test updated, missing one created executable"
 else fail "rc=$RC out=$OUT"; fi
 
-echo "Case 4: an upstream hook missing from settings.json is reported, not added"
+echo "Case 4: resync wires missing Loom hooks additively (#13787)"
+make_fixture
+run
+cmds() { jq -r '.hooks.PreToolUse[] | select(.matcher=="Bash") | .hooks[].command' "$REPO/.claude/settings.json"; }
+if [[ "$(cmds | sed -n 1p)" == *".claude/skills/repo/hooks/guard-destructive.sh"* \
+      && "$(cmds | sed -n 2p)" == *".loom/hooks/guard-destructive.sh"* && "$(cmds | wc -l)" -eq 2 ]]; then
+    pass "Repo Skills guard kept first, Loom guard appended under Bash"
+else fail "rc=$RC cmds=$(cmds) out=$OUT"; fi
+if jq -e '.hooks.PreToolUse[] | select(.matcher=="*") | .hooks[].command | contains(".loom/hooks/roll-pause.sh")' \
+      "$REPO/.claude/settings.json" >/dev/null; then pass "roll-pause.sh wired too"
+else fail "roll-pause.sh not wired"; fi
+if [[ $RC -eq 0 ]]; then pass "exit status 0"; else fail "rc=$RC"; fi
+after="$(cat "$REPO/.claude/settings.json")"
+run
+if [[ "$(cat "$REPO/.claude/settings.json")" == "$after" && "$OUT" != *"not wired"* ]]; then
+    pass "second resync is a no-op"
+else fail "out=$OUT"; fi
+
+echo "Case 5: --dry-run reports the Repo-Skills-only repo and writes nothing"
 make_fixture
 before="$(cat "$REPO/.claude/settings.json")"
-run
-if [[ "$OUT" == *"does not"*"PreToolUse [*] roll-pause.sh"* && "$OUT" != *"guard-destructive.sh"*"[Bash]"* ]]; then
-    pass "roll-pause.sh named; the wired guard is not"
+OUT="$(cd "$REPO" && LOOM_DAEMON_BIN="$FAKE" bash "$RESYNC" --dry-run 2>&1)"; RC=$?
+if [[ "$OUT" == *"not wired"*"PreToolUse [Bash] guard-destructive.sh"* && "$(cat "$REPO/.claude/settings.json")" == "$before" ]]; then
+    pass "guard named as installed-but-not-wired; file untouched"
 else fail "out=$OUT"; fi
-if [[ "$(cat "$REPO/.claude/settings.json")" == "$before" && $RC -eq 0 ]]; then
-    pass "settings.json unchanged and exit status 0"
-else fail "rc=$RC"; fi
+
+echo "Case 6: invalid-JSON and pinned settings.json are left untouched"
 make_fixture
-cat > "$REPO/.claude/settings.json" <<'JSON'
-{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"x guard-destructive.sh"}]},{"matcher":"*","hooks":[{"type":"command","command":"x roll-pause.sh"}]}]}}
-JSON
+printf 'not json\n' > "$REPO/.claude/settings.json"
 run
-if [[ "$OUT" != *"wires hook"* ]]; then pass "fully wired repo: no warning"
+if [[ "$(cat "$REPO/.claude/settings.json")" == "not json" ]]; then pass "non-JSON file untouched"
 else fail "out=$OUT"; fi
 make_fixture
+before="$(cat "$REPO/.claude/settings.json")"
 printf '.claude/settings.json\n' > "$REPO/.loom/resync-ignore"
 run
-if [[ "$OUT" != *"wires hook"* ]]; then pass "a pinned settings.json is not reported on"
+if [[ "$(cat "$REPO/.claude/settings.json")" == "$before" && "$OUT" != *"not wired"* ]]; then
+    pass "a pinned settings.json is neither wired nor reported on"
 else fail "out=$OUT"; fi
 
 echo

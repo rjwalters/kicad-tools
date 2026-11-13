@@ -11,11 +11,13 @@ from .base import (
     ManufacturerProfile,
     PartsLibrary,
     load_design_rules_from_yaml,
+    load_dfm_thresholds,
     load_rotation_corrections,
 )
 
 # Load design rules from YAML configuration
 _DESIGN_RULES = load_design_rules_from_yaml("jlcpcb")
+_DFM_THRESHOLDS = load_dfm_thresholds("jlcpcb")
 
 # Load rotation corrections for JLCPCB pick-and-place files
 _ROTATION_CORRECTIONS = load_rotation_corrections("jlcpcb")
@@ -161,6 +163,7 @@ JLCPCB_PROFILE = ManufacturerProfile(
     name="JLCPCB",
     website="https://jlcpcb.com",
     design_rules=_DESIGN_RULES,
+    dfm_thresholds=_DFM_THRESHOLDS,
     assembly=JLCPCB_ASSEMBLY,
     assembly_tiers=list(JLCPCB_ASSEMBLY_TIERS),
     parts_library=LCSC_LIBRARY,

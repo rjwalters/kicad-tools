@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from kicad_tools.manufacturers import DesignRules, get_profile
 
@@ -143,9 +143,12 @@ class DRCChecker:
         reinforcement_waived_nets: Iterable[str] | None = None,
         mask_copper_request: MaskCopperRequest | None = None,
         physical_copper_gap_mm: float | None = None,
+        fab_view: bool = False,
+        fab_view_copper_oz: float | None = None,
         authored_min_clearance_mm: float | None = None,
         require_routing_policy: bool = False,
         routing_policy_defer_pair_vias: bool = True,
+        strict_copper: bool = True,
     ) -> None:
         """Initialize the DRC checker.
 
@@ -250,6 +253,13 @@ class DRCChecker:
                 ``routing_policy`` leaves the via cap of engaged diff-pair
                 nets to ``diffpair_uncoupled_length`` so it is not reported
                 twice.  Pass False when that category does not run.
+            strict_copper: When True (default), a heavier-than-1oz outer
+                weight with no profile entry raises
+                ``UnsupportedCopperWeightError`` instead of silently using
+                1 oz floors (Issue #8836).  Only pass False from a caller
+                that applies the DFM threshold table's fail-closed
+                ``incomplete`` verdict right after construction
+                (``kct check``, Issue #8839).
 
         Raises:
             ValueError: If manufacturer ID is not recognized
@@ -310,6 +320,12 @@ class DRCChecker:
             if not math.isfinite(physical_copper_gap_mm) or physical_copper_gap_mm <= 0:
                 raise ValueError("Physical copper gap must be finite and positive")
         self.physical_copper_gap_mm = physical_copper_gap_mm
+        # Issue #8843: net-agnostic "fab view" (JLCDFM-style) passes, enabled
+        # by the CLI under ``--mfr jlcpcb``.  ``fab_view_copper_oz`` is the
+        # *declared* outer copper weight (None = unknown -> mask-bridge check
+        # fails closed rather than assuming 1 oz).
+        self.fab_view = fab_view
+        self.fab_view_copper_oz = fab_view_copper_oz
         self.emit_measurements = emit_measurements
         # The skew / continuity rules surface their measured info findings
         # when either the user asked for --verbose OR a caller wants the
@@ -321,7 +337,13 @@ class DRCChecker:
 
         # Load manufacturer profile and design rules
         profile = get_profile(manufacturer)
-        self.design_rules: DesignRules = profile.get_design_rules(layers, copper_oz, strict=True)
+        # Strict by default (Issue #8836) so every caller fails closed on an
+        # unsupported copper weight; ``kct check`` opts out via
+        # ``strict_copper=False`` because ``_apply_dfm_table`` yields the
+        # ``incomplete`` verdict instead (Issue #8839).
+        self.design_rules: DesignRules = profile.get_design_rules(
+            layers, copper_oz, strict=strict_copper
+        )
 
         # Issue #4326: override the ampacity copper weights ONLY.
         #
@@ -389,6 +411,8 @@ class DRCChecker:
         "check_silkscreen",
         "check_solder_mask_pads",
         "check_mask_to_copper",
+        "check_mask_negative_expansion",
+        "check_mask_multi_segment",
         "check_footprint_placement",
         "check_netlist",
         "check_pin1_markers",
@@ -401,6 +425,7 @@ class DRCChecker:
         "check_thermal_asymmetry",
         "check_via_in_pad",
         "check_via_type_capability",
+        "check_tht_smd_spacing",
         "check_via_under_body",
         "check_width_consistency",
         "check_zero_length_segments",
@@ -495,6 +520,9 @@ class DRCChecker:
         # fab-blocking defect.  Explicit entry REQUIRED -- the ``via``
         # prefix fallback would file it under Manufacturing.
         "via_under_body": CATEGORY_ADVISORY,
+        # JLCDFM mask warnings (Issue #8847): fab-DFM advisories.
+        "mask_negative_expansion": CATEGORY_ADVISORY,
+        "mask_multi_segment": CATEGORY_ADVISORY,
         # 3D model coverage (Issue #7682): a documentation/render advisory,
         # never fab-blocking.
         "model_coverage": CATEGORY_ADVISORY,
@@ -571,6 +599,8 @@ class DRCChecker:
         "missing_plated_hole": CATEGORY_ADVISORY,
         "board_id_missing": CATEGORY_ADVISORY,
         "silk_over_copper": CATEGORY_ADVISORY,
+        # Silk inside a graphic mask opening (#8861): an error, fab-blocking.
+        "silk_over_mask_opening": CATEGORY_MANUFACTURING,
         "silk_edge_clearance": CATEGORY_ADVISORY,
         # Coverage advisory for silk primitives the geometry model does not
         # cover (Issue #5811).  Explicit entry REQUIRED -- category_for_rule
@@ -807,11 +837,32 @@ class DRCChecker:
 
     def check_physical_copper_gap(self) -> DRCResults:
         """Opt-in net-independent slit preflight on unioned copper geometry."""
-        if self.physical_copper_gap_mm is None:
-            return DRCResults()
-        from .rules.physical_gap import check_physical_copper_gap
+        from .rules import physical_gap
 
-        return self._absolutize(check_physical_copper_gap(self.pcb, self.physical_copper_gap_mm))
+        if self.physical_copper_gap_mm is not None:
+            # Explicit --physical-copper-gap wins: single threshold, all errors.
+            return self._absolutize(
+                physical_gap.check_physical_copper_gap(self.pcb, self.physical_copper_gap_mm)
+            )
+        if not self.fab_view:
+            return DRCResults()
+        # Issue #8843: JLCDFM-style default. gap < 0.10mm error, [0.10, 0.15) warning,
+        # plus the 2 oz pad mask-bridge check (fails closed on unknown weight).
+        results = physical_gap.check_physical_copper_gap(
+            self.pcb,
+            physical_gap.FAB_VIEW_GAP_WARNING_MM,
+            error_below_mm=physical_gap.FAB_VIEW_GAP_DANGER_MM,
+        )
+        results.merge(physical_gap.check_pad_mask_bridge(self.pcb, self.fab_view_copper_oz))
+        return self._absolutize(results)
+
+    def check_tht_smd_spacing(self) -> DRCResults:
+        """THT pad / via to SMD pad spacing (Issue #8843); fab-view (jlcpcb) only."""
+        if not self.fab_view:
+            return DRCResults()
+        from .rules.tht_smd_spacing import check_tht_smd_spacing
+
+        return self._absolutize(check_tht_smd_spacing(self.pcb))
 
     def check_clearances(self) -> DRCResults:
         """Check clearance rules (trace-to-trace, trace-to-pad, etc.).
@@ -1711,6 +1762,55 @@ class DRCChecker:
 
         rule = SolderMaskPadRules()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def _mask_opening_findings(self, which: str) -> DRCResults:
+        from .rules.mask_expansion import check_mask_openings
+
+        snapshot, _reason = self.mask_geometry_snapshot()
+        if snapshot is None:
+            return DRCResults()
+        return self._absolutize(check_mask_openings(snapshot, self.pcb, which))
+
+    def mask_geometry_snapshot(self) -> tuple[Any, str | None]:
+        """Cached ``(snapshot, None)`` or ``(None, reason)`` when unavailable.
+
+        The snapshot is read from the saved source file, so a checker built
+        from an unsaved or modified PCB object reports coverage as unknown
+        rather than a clean pass (Issue #8847).
+        """
+        cached: tuple[Any, str | None] | None = getattr(self, "_mask_snapshot_cache", None)
+        if cached is not None:
+            return cached
+        from .mask_geometry import inspect_mask_geometry
+
+        path = getattr(self.pcb, "path", None)
+        try:
+            if path is None:
+                result: tuple[Any, str | None] = (None, "no_saved_source_pcb")
+            else:
+                snap = inspect_mask_geometry(path)
+                if snap.complete:
+                    result = (snap, None)
+                else:
+                    feats = sorted({u["feature"] for u in snap.unsupported})
+                    result = (snap, "incomplete:mask_geometry (" + ", ".join(feats) + ")")
+        except (OSError, ValueError, ImportError) as exc:
+            result = (None, f"mask_geometry_unavailable: {exc}")
+        self._mask_snapshot_cache = result
+        return result
+
+    def check_mask_negative_expansion(self) -> DRCResults:
+        """Warn on mask openings smaller than their pad (Issue #8847).
+
+        Pure geometry on the source-bound mask snapshot; default-on and
+        independent of the opt-in ``mask_to_copper`` native path.  Zero
+        expansion is not flagged; a per-pad override wins over the board value.
+        """
+        return self._mask_opening_findings("negative")
+
+    def check_mask_multi_segment(self) -> DRCResults:
+        """Warn when one mask opening is several disjoint pieces (Issue #8847)."""
+        return self._mask_opening_findings("multi")
 
     def check_footprint_placement(self) -> DRCResults:
         """Check that footprints are placed inside the board outline.

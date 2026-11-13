@@ -249,7 +249,7 @@ Copper:          1 oz (35 µm) outer, 0.5 oz (17.5 µm) inner
 Finish:          HASL Lead-Free (or ENIG if available)
 Soldermask:      Green (both sides)
 Silkscreen:      White (both sides)
-Min trace/space: 6 mil / 6 mil (0.1524 mm)
+Min trace/space: 0.15 mm (6 mil) multilayer 2 oz outer
 Min via:         0.3 mm drill / 0.6 mm pad
 Board outline:   Defined in GKO layer
 

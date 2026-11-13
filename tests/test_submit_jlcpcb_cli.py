@@ -322,3 +322,18 @@ def test_fab_dfm_cli_refuses_partial_attestation(env, tmp_path, capsys):
     err = capsys.readouterr().err
     assert "REFUSED" in err and "all 14 categories" in err
     assert (env["bundle"] / "manifest.json").read_bytes() == before
+
+
+def test_guided_contact_values_only_on_tty_and_never_in_output_tree(env, monkeypatch, capsys):
+    sentinel = "SENTINEL-8859-contact"
+    write_manifest(env)
+    _no_browser(monkeypatch)
+    _stock(monkeypatch, {"C1": 5})
+    monkeypatch.setenv("JLCPCB_CONTACT_LAST_NAME", sentinel)
+    assert cmd.main(_argv(env, "--guided")) == 0
+    cap = capsys.readouterr()
+    assert sentinel not in cap.out + cap.err  # non-TTY: key names only
+    assert "JLCPCB_CONTACT_LAST_NAME" in cap.out
+    for p in env["out"].rglob("*"):
+        if p.is_file():
+            assert sentinel.encode() not in p.read_bytes(), p

@@ -33,7 +33,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from kicad_tools.analysis.routing_quality import (
     FRAGMENT_LENGTH_MM,
@@ -1141,6 +1141,12 @@ def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
         f"({pct(metrics.diagonal_45_count)}) / off-axis {metrics.off_axis_count} "
         f"({pct(metrics.off_axis_count)})"
     )
+    worst = metrics.worst_off_axis_layer
+    if metrics.off_axis_count and worst is not None:
+        print(
+            f"  Off-axis length: {metrics.off_axis_length_fraction:.0%} of length "
+            f"(worst layer {worst[0]} {worst[1]:.0%})"
+        )
     print(
         f"  Staircase steps (<{STAIRCASE_STEP_MM} mm legs): "
         f"{metrics.staircase_step_count} ({pct(metrics.staircase_step_count)})"
@@ -1776,6 +1782,22 @@ def main(argv: list[str] | None = None) -> int:
             "(advisory-only metrics, no gating)."
         ),
     )
+    parser.add_argument(
+        "--max-off-axis-fraction",
+        dest="max_off_axis_fraction",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Opt-in routing-quality gate (issue #8884): fail the check when "
+            "the worst single layer's length-weighted off-axis fraction "
+            "(off-axis straight copper length / total straight copper length "
+            "on that layer) exceeds this ceiling (0.0-1.0). Exceeding emits "
+            "an error-severity routing_quality_off_axis_fraction violation "
+            "and exits 2; a fraction exactly equal to the ceiling passes. "
+            "Default: unset (advisory-only)."
+        ),
+    )
 
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(argv)
@@ -1815,6 +1837,7 @@ def main(argv: list[str] | None = None) -> int:
     for _flag, _value in (
         ("--max-fragment-fraction", args.max_fragment_fraction),
         ("--max-staircase-fraction", args.max_staircase_fraction),
+        ("--max-off-axis-fraction", args.max_off_axis_fraction),
     ):
         if _value is not None and not (0.0 <= _value <= 1.0):
             print(
@@ -1893,10 +1916,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-    if only_set and "physical_copper_gap" in only_set and args.physical_copper_gap is None:
-        print("Error: physical_copper_gap requires --physical-copper-gap MM", file=sys.stderr)
-        return 1
-
     # Load PCB - resolve to absolute path for reliable file access
     # Handles both file paths and directory paths (like kct build)
     input_path = Path(args.pcb).resolve()
@@ -1961,6 +1980,15 @@ def main(argv: list[str] | None = None) -> int:
     # jlcpcb-tier1).  Precedence: explicit --mfr > fab_profile.json sidecar >
     # project.kct target_fab > jlcpcb default.  An explicit flag always wins.
     effective_mfr, mfr_notices, mfr_source = _resolve_effective_check_mfr(args.mfr, pcb_path)
+
+    if (
+        only_set
+        and "physical_copper_gap" in only_set
+        and args.physical_copper_gap is None
+        and effective_mfr != "jlcpcb"
+    ):
+        print("Error: physical_copper_gap requires --physical-copper-gap MM", file=sys.stderr)
+        return 1
     for _line in mfr_notices:
         print(_line, file=sys.stderr)
 
@@ -2374,8 +2402,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: invalid mask-to-copper request: {exc}", file=sys.stderr)
             return 1
 
-    if mask_copper_request is not None and (
-        "mask_to_copper" in skip_set or (only_set is not None and "mask_to_copper" not in only_set)
+    if (
+        mask_copper_request is None
+        and getattr(args, "mfr", None)
+        and "mask_to_copper" not in skip_set
+        and (only_set is None or "mask_to_copper" in only_set)
+    ):
+        # Issue #8842: an explicit --mfr turns mask_to_copper on by default
+        # using that manufacturer's cited interim policy (None => stays opt-in).
+        from kicad_tools.validate.mask_copper import default_request_for_manufacturer
+
+        mask_copper_request = default_request_for_manufacturer(effective_mfr)
+        mask_copper_default_applied = mask_copper_request is not None
+    else:
+        mask_copper_default_applied = False
+
+    if (
+        mask_copper_request is not None
+        and not mask_copper_default_applied
+        and (
+            "mask_to_copper" in skip_set
+            or (only_set is not None and "mask_to_copper" not in only_set)
+        )
     ):
         print(
             "Error: explicit mask-copper config conflicts with --only/--skip selection",
@@ -2419,6 +2467,9 @@ def main(argv: list[str] | None = None) -> int:
             # graceful no-op (AC5).
             emit_measurements=True,
             physical_copper_gap_mm=getattr(args, "physical_copper_gap", None),
+            # Issue #8843: net-agnostic fab view is default-on under jlcpcb.
+            fab_view=effective_mfr == "jlcpcb",
+            fab_view_copper_oz=resolved_copper_outer,
             courtyard_waivers=courtyard_waivers,
             # Issue #4673: strict (real-geometry) connectivity is the
             # default; --legacy-connectivity is the explicit opt-out and
@@ -2445,11 +2496,31 @@ def main(argv: list[str] | None = None) -> int:
                 (only_set is None or "diffpair_uncoupled_length" in only_set)
                 and "diffpair_uncoupled_length" not in skip_set
             ),
+            # Issue #8839: _apply_dfm_table (below) fails closed with an
+            # ``incomplete`` verdict for fabs that have a table; other fabs
+            # keep the #8836 hard raise.
+            strict_copper=get_profile(effective_mfr).dfm_thresholds is None,
         )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    # Issue #8839: floors come from the versioned, provenance-carrying DFM
+    # threshold table; a stackup with no entry fails closed (verdict
+    # ``incomplete``) instead of silently using another copper weight.
+    dfm_incomplete = _apply_dfm_table(
+        checker,
+        effective_mfr,
+        layers,
+        resolved_copper_outer,
+        resolved_copper_inner,
+        preset_copper_oz,
+        copper_weights,
+    )
+
+    # NOTE (#8839): the #5006 per-board override below runs AFTER the table, so
+    # a cited board override may lower a table floor (it is the board's own
+    # cited exception); the table is the default, not a hard minimum.
     # Issue #5006: apply a validated, cited per-board fabrication-floor
     # override on top of the manufacturer profile's resolved DesignRules --
     # BEFORE any check runs and BEFORE --emit-drc-constraints below reads
@@ -2640,7 +2711,11 @@ def main(argv: list[str] | None = None) -> int:
     # crash IS fatal (exit 1) -- an explicitly requested gate must never
     # silently pass because it could not measure.
     drc_only = getattr(args, "drc_only", False)
-    rq_gating = args.max_fragment_fraction is not None or args.max_staircase_fraction is not None
+    rq_gating = (
+        args.max_fragment_fraction is not None
+        or args.max_staircase_fraction is not None
+        or args.max_off_axis_fraction is not None
+    )
     routing_quality: RoutingQualityMetrics | None = None
     if not drc_only or rq_gating:
         try:
@@ -2650,7 +2725,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"Error: routing-quality metrics unavailable ({exc}); "
                     "cannot evaluate --max-fragment-fraction / "
-                    "--max-staircase-fraction",
+                    "--max-staircase-fraction / --max-off-axis-fraction",
                     file=sys.stderr,
                 )
                 return 1
@@ -2678,6 +2753,7 @@ def main(argv: list[str] | None = None) -> int:
             routing_quality,
             max_fragment_fraction=args.max_fragment_fraction,
             max_staircase_fraction=args.max_staircase_fraction,
+            max_off_axis_fraction=args.max_off_axis_fraction,
         )
         for rq_breach in rq_breaches:
             results.add(
@@ -2695,6 +2771,7 @@ def main(argv: list[str] | None = None) -> int:
                 rq_breaches,
                 max_fragment_fraction=args.max_fragment_fraction,
                 max_staircase_fraction=args.max_staircase_fraction,
+                max_off_axis_fraction=args.max_off_axis_fraction,
             ),
         }
 
@@ -2766,6 +2843,12 @@ def main(argv: list[str] | None = None) -> int:
         allow_incomplete=bool(getattr(args, "allow_incomplete", False)),
         drc_only=drc_only,
         strict_copper_disagreement=bool(args.strict and copper_disagreement),
+        mask_copper_default=mask_copper_default_applied,
+        dfm_incomplete=dfm_incomplete,
+        manufacturer=args.mfr,
+    )
+    fab_dfm_parity = (
+        check_verdict.fab_dfm_parity.to_dict() if check_verdict.fab_dfm_parity else None
     )
     meta = check_verdict.meta
     verdict, exit_code = check_verdict.verdict, check_verdict.exit_code
@@ -2804,6 +2887,7 @@ def main(argv: list[str] | None = None) -> int:
             scope=scope_record,
             project_rules=project_rules,
             copper_weights=copper_weights,
+            fab_dfm_parity=fab_dfm_parity,
         )
     elif args.format == "summary":
         output_summary(violations, results, pcb_path)
@@ -2832,6 +2916,10 @@ def main(argv: list[str] | None = None) -> int:
     # the JSON stream (the JSON carries the full ``coverage`` map).
     if not machine_output and not drc_only:
         print_coverage_stanza(coverage)
+        if check_verdict.fab_dfm_parity is not None:
+            from kicad_tools.validate.fab_dfm_parity import format_parity_stanza
+
+            print(format_parity_stanza(check_verdict.fab_dfm_parity))
 
     # Write JSON report to file if --output specified
     if args.output:
@@ -2852,6 +2940,7 @@ def main(argv: list[str] | None = None) -> int:
             exit_code=exit_code,
             scope=scope_record,
             copper_weights=copper_weights,
+            fab_dfm_parity=fab_dfm_parity,
         )
 
     # Issue #4375: optionally emit DRC-constraint sidecars from the SAME
@@ -2887,6 +2976,8 @@ class CheckVerdict:
     meta: MetaCheckResult | None
     error_count: int
     warning_count: int
+    #: Issue #8845: fab DFM parity report (``--mfr jlcpcb`` only), else ``None``.
+    fab_dfm_parity: Any = None
 
 
 def evaluate_check_verdict(
@@ -2899,6 +2990,9 @@ def evaluate_check_verdict(
     allow_incomplete: bool = False,
     drc_only: bool = False,
     strict_copper_disagreement: bool = False,
+    mask_copper_default: bool = False,
+    dfm_incomplete: bool = False,
+    manufacturer: str | None = None,
 ) -> CheckVerdict:
     """Turn DRC results into ``kct check``'s verdict + exit code (Issue #7260).
 
@@ -2921,15 +3015,35 @@ def evaluate_check_verdict(
         drc_only: Skip the meta rollup.
         strict_copper_disagreement: ``--strict`` with a stackup-vs-``--copper``
             disagreement (always a fail).
+        mask_copper_default: The mask_to_copper request was applied by default
+            (Issue #8842); a run that could not execute is ``incomplete``.
+        dfm_incomplete: The stackup has no DFM-table entry (Issue #8839); a
+            would-be ``pass`` becomes ``incomplete``.
+        manufacturer: Manufacturer id; for the JLCPCB family a danger-capable
+            ``not_covered`` fab DFM parity row (Issue #8845) makes an otherwise
+            passing verdict ``incomplete``.
     """
     counted = list(results.violations) if violations is None else list(violations)
     error_count = sum(1 for v in counted if v.is_error)
     warning_count = sum(1 for v in counted if v.is_warning)
-    drc_passed = (
-        error_count == 0
-        and all(a.passed for a in results.mask_copper_assessments)
-        and not (warning_count > 0 and strict)
+    # Issue #8842: a default-applied (not explicitly requested) mask_to_copper
+    # that could not run (no native geometry) is "incomplete", not a failure,
+    # so ``--allow-incomplete`` keeps working; real findings still fail.
+    mask_failed = [
+        a
+        for a in results.mask_copper_assessments
+        if not a.passed
+        and not (
+            mask_copper_default
+            and not any(m.disposition in ("violation", "uncertain") for m in a.measurements)
+        )
+    ]
+    mask_incomplete = (
+        mask_copper_default
+        and any(not a.passed for a in results.mask_copper_assessments)
+        and not mask_failed
     )
+    drc_passed = error_count == 0 and not mask_failed and not (warning_count > 0 and strict)
     drc_sub = SubCheckResult(
         status="PASSED" if drc_passed else "FAILED",
         detail=(
@@ -2946,7 +3060,8 @@ def evaluate_check_verdict(
             strict=strict,
         )
     verdict, exit_code = _check_verdict(
-        mask_copper_failed=any(not a.passed for a in results.mask_copper_assessments),
+        mask_copper_failed=bool(mask_failed),
+        mask_copper_incomplete=mask_incomplete,
         strict_copper_disagreement=strict_copper_disagreement,
         drc_only=drc_only,
         error_count=error_count,
@@ -2955,18 +3070,29 @@ def evaluate_check_verdict(
         allow_incomplete=allow_incomplete,
         meta=meta,
     )
+    from kicad_tools.validate.fab_dfm_parity import evaluate_parity
+
+    parity = evaluate_parity(manufacturer)
+    if (dfm_incomplete or (parity is not None and parity.incomplete)) and verdict == "pass":
+        from ._gate import gate_exit_code
+
+        exit_code, verdict = gate_exit_code(
+            0, 0, incomplete=True, allow_incomplete=allow_incomplete, style="check"
+        )
     return CheckVerdict(
         verdict=verdict,
         exit_code=exit_code,
         meta=meta,
         error_count=error_count,
         warning_count=warning_count,
+        fab_dfm_parity=parity,
     )
 
 
 def _check_verdict(
     *,
     mask_copper_failed: bool,
+    mask_copper_incomplete: bool = False,
     strict_copper_disagreement: bool,
     drc_only: bool,
     error_count: int,
@@ -2989,7 +3115,10 @@ def _check_verdict(
         exit_code, verdict = gate_exit_code(1, 0, style="check")
     elif drc_only or meta is None:
         exit_code, verdict = gate_exit_code(
-            error_count, warning_count, strict=strict, style="check"
+            error_count,
+            warning_count,
+            strict=strict,
+            style="check",
         )
     else:
         # The meta rollup already folded DRC (incl. --strict warnings), ERC,
@@ -2997,7 +3126,7 @@ def _check_verdict(
         exit_code, verdict = gate_exit_code(
             1 if meta.overall == "FAILED" else 0,
             0,
-            incomplete=meta.overall == "INCOMPLETE",
+            incomplete=meta.overall == "INCOMPLETE" or mask_copper_incomplete,
             allow_incomplete=allow_incomplete,
             style="check",
         )
@@ -3593,9 +3722,12 @@ def run_selected_checks(
         "solder_mask": checker.check_solder_mask_pads,
         "spec_conformance": _spec_conformance_check,
         "mask_to_copper": checker.check_mask_to_copper,
+        "mask_negative_expansion": checker.check_mask_negative_expansion,
+        "mask_multi_segment": checker.check_mask_multi_segment,
         "thermal_asymmetry": checker.check_thermal_asymmetry,
         "via_in_pad": checker.check_via_in_pad,
         "via_type": checker.check_via_type_capability,
+        "tht_smd_spacing": checker.check_tht_smd_spacing,
         "via_under_body": checker.check_via_under_body,
         "width_consistency": checker.check_width_consistency,
         "zero_length_segment": checker.check_zero_length_segments,
@@ -3868,6 +4000,79 @@ def _copper_weights_provenance(
     }
 
 
+def _apply_dfm_table(
+    checker: DRCChecker,
+    mfr: str,
+    layers: int | None,
+    outer: float | None,
+    inner: float | None,
+    preset_oz: float,
+    copper_weights: dict,
+) -> bool:
+    """Apply the DFM threshold table's floors to ``checker`` (Issue #8839).
+
+    Returns True when the manufacturer HAS a table but the board's stackup
+    (layers, outer oz, inner oz) has no entry -- the caller turns that into an
+    ``incomplete`` verdict.  Floors only tighten the profile's rules.
+    """
+    profile = get_profile(mfr)
+    if profile.dfm_thresholds is None:
+        copper_weights["dfm_table"] = {
+            "version": None,
+            "stackup": None,
+            "entry": None,
+            "reason": f"no table for {mfr}",
+        }
+        return False
+    n_layers = layers if layers is not None else len(checker.pcb.copper_layers)
+    base = profile.get_design_rules(n_layers, preset_oz)
+    eff_outer = outer if outer is not None else (preset_oz if preset_oz else 1.0)
+    assumed = outer is None or (n_layers > 2 and inner is None)
+    if n_layers <= 2:
+        eff_inner = 0.0
+    else:
+        eff_inner = inner if inner is not None else base.inner_copper_oz
+    entry = profile.get_dfm_entry(n_layers, eff_outer, eff_inner)
+    stackup = f"{n_layers}-layer, {eff_outer:g}oz outer / {eff_inner:g}oz inner"
+    if assumed:
+        stackup += " (assumed: no stackup/--copper weight declared)"
+    table_version = profile.dfm_thresholds.version
+    if entry is None:
+        copper_weights["dfm_table"] = {
+            "version": table_version,
+            "stackup": stackup,
+            "entry": None,
+        }
+        print(
+            f"INCOMPLETE: no {mfr} DFM threshold entry for {stackup} "
+            f"(table v{table_version}); fab floors for this stackup are unknown. "
+            "Add a sourced entry to the manufacturer YAML or use a covered stackup.",
+            file=sys.stderr,
+        )
+        return True
+    t = entry.thresholds
+    checker.design_rules = profile.apply_dfm_floors(checker.design_rules, entry)
+    copper_weights["dfm_table"] = {
+        "version": table_version,
+        "stackup": stackup,
+        "entry": entry.key,
+        "thresholds": {
+            name: {
+                "danger_mm": th.danger_mm,
+                "warning_mm": th.warning_mm,
+                "warning_basis": (th.warning_basis or th.basis)
+                if th.warning_mm is not None
+                else None,
+                "basis": th.basis,
+                "source_url": th.source_url,
+                "retrieved": th.retrieved,
+            }
+            for name, th in t.items()
+        },
+    }
+    return False
+
+
 def _format_copper_weights(copper_weights: dict) -> str:
     """One-line header form of :func:`_copper_weights_provenance`."""
     parts = []
@@ -3915,6 +4120,13 @@ def output_table(
     print(f"Layers: {layers}")
     if copper_weights:
         print(f"Copper (ampacity): {_format_copper_weights(copper_weights)}")
+        dfm = copper_weights.get("dfm_table")
+        if dfm:
+            if dfm.get("reason"):
+                print(f"DFM thresholds: {dfm['reason']}")
+            else:
+                used = dfm["entry"] or "NO ENTRY (incomplete)"
+                print(f"DFM thresholds: table v{dfm['version']}, {dfm['stackup']} -> {used}")
     print(f"Rules checked: {results.rules_checked}")
 
     print("\nResults:")
@@ -4262,6 +4474,7 @@ def output_json(
     scope: dict | None = None,
     project_rules: list[dict] | None = None,
     copper_weights: dict | None = None,
+    fab_dfm_parity: dict | None = None,
 ) -> None:
     """Output violations as JSON.
 
@@ -4355,6 +4568,9 @@ def output_json(
         data["fabrication_process"] = fabrication_process
     if coverage is not None:
         data["coverage"] = coverage
+    # Issue #8845: additive; present under --mfr jlcpcb only.
+    if fab_dfm_parity is not None:
+        data["fab_dfm_parity"] = fab_dfm_parity
     # Issue #7230: additive top-level verdict/exit_code from the same call
     # that decides the process exit.  ``summary.passed`` stays DRC-only.
     if verdict is not None:
@@ -4418,6 +4634,7 @@ def write_json_report(
     exit_code: int | None = None,
     scope: dict | None = None,
     copper_weights: dict | None = None,
+    fab_dfm_parity: dict | None = None,
 ) -> None:
     """Write DRC results as a JSON report file.
 
@@ -4492,6 +4709,9 @@ def write_json_report(
         data["fabrication_process"] = fabrication_process
     if coverage is not None:
         data["coverage"] = coverage
+    # Issue #8845: additive; present under --mfr jlcpcb only.
+    if fab_dfm_parity is not None:
+        data["fab_dfm_parity"] = fab_dfm_parity
     # Issue #7230: additive top-level verdict/exit_code from the same call
     # that decides the process exit.  ``summary.passed`` stays DRC-only.
     if verdict is not None:

@@ -27,6 +27,7 @@ from kicad_tools.manufacturers.fabrication_overrides import (
     resolve_pcb_fabrication_overrides,
     validate_fabrication_override,
 )
+from tests._board03_check_cost import board03_check_timeout
 
 JLC_TIER1_MFR = "jlcpcb-tier1"
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -409,6 +410,7 @@ def board_copy(tmp_path: Path) -> Path:
     return dst
 
 
+@board03_check_timeout  # Issue #8901
 @pytest.mark.skipif(not BOARD_03.exists(), reason="board 03 routed PCB not available")
 def test_check_emit_retains_valid_reviewed_override(board_copy: Path, capsys):
     from kicad_tools.cli.check_cmd import main
@@ -432,6 +434,7 @@ def test_check_emit_retains_valid_reviewed_override(board_copy: Path, capsys):
     assert pro["board"]["design_settings"]["rules"]["min_hole_to_hole"] == 0.45
 
 
+@board03_check_timeout  # Issue #8901
 @pytest.mark.skipif(not BOARD_03.exists(), reason="board 03 routed PCB not available")
 def test_check_emit_rejects_unsafe_override_keeps_profile_default(board_copy: Path, capsys):
     from kicad_tools.cli.check_cmd import main
@@ -457,6 +460,7 @@ def test_check_emit_rejects_unsafe_override_keeps_profile_default(board_copy: Pa
     assert pro["board"]["design_settings"]["rules"]["min_hole_to_hole"] == default_floor
 
 
+@board03_check_timeout  # Issue #8901
 @pytest.mark.skipif(not BOARD_03.exists(), reason="board 03 routed PCB not available")
 def test_check_python_drc_and_native_emission_agree_on_override(board_copy: Path):
     """The SAME resolved floor reaches both the checker and the sidecars.

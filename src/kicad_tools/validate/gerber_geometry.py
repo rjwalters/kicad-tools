@@ -78,11 +78,23 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
     ended = False
     count = 0
 
-    def emit(shape):
+    pending: list[Any] = []
+
+    def flush():
+        # Collapse the same-polarity batch with one unary_union instead of
+        # re-unioning the accumulated geometry per shape. Order between dark
+        # and clear batches is preserved because callers flush on polarity change.
         nonlocal geometry
+        if not pending:
+            return
+        batch = unary_union(pending)
+        pending.clear()
+        geometry = geometry.union(batch) if dark else geometry.difference(batch)
+
+    def emit(shape):
         if not shape.is_valid:
             raise GerberGeometryError("Invalid Gerber polygon")
-        geometry = geometry.union(shape) if dark else geometry.difference(shape)
+        pending.append(shape)
 
     def coord(value):
         if decimals is None or units is None:
@@ -120,6 +132,7 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
             elif command in {"LPD", "LPC"}:
                 if region is not None:
                     raise GerberGeometryError("Polarity inside region")
+                flush()
                 dark = command == "LPD"
             elif "*" not in command and re.fullmatch(
                 r"(?:TF\.[^*]+|TA\.[^*]+|TO\.[^*]+|TD(?:\.[^*]+)?)", command
@@ -267,4 +280,5 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
         position = endpoint
     if not ended or decimals is None or units is None:
         raise GerberGeometryError("Incomplete Gerber layer")
+    flush()
     return GerberGeometry(scale(geometry, xfact=1, yfact=-1, origin=(0, 0)), count)

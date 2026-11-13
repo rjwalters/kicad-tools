@@ -14,8 +14,69 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-13
+
+- **PR #8898**: feat(bom): add --check-distributor-stock flag
+- **Issue #8893** (closed): bom: flag lines with no DigiKey/Mouser stock at build quantity (follow-up to #8892)
+- **PR #8908**: fix(cli): declare and forward kct bom stock/validation flags
+- **Issue #8907** (closed): kct bom: --check-availability, --validate, --quantity and --no-cache are not reachable through the unified CLI
+- **PR #8905**: perf(check): index the mask-to-copper pairwise scan; time-box board-03 check tests
+- **Issue #8901** (closed): Test (extended) red on main: 60 s timeouts in three check-path test files, board 02 length baseline drift
+- **PR #8904**: fix(check): refresh fab DFM parity rows for shipped rules; guard the drift
+- **Issue #8902** (closed): Fab DFM parity table is stale: rows say "no rule" for rules that have shipped
+- **PR #8899**: docs: roadmap as of 2026-11-13
+- **PR #8894**: feat(parts): add 'kct parts stock' for Mouser and DigiKey lookups
+- **Issue #8892** (closed): parts: live stock, price breaks and lead time from the DigiKey and Mouser product-search APIs
+- **PR #8890**: test: guard rule message coordinates against board-relative origin
+- **PR #8889**: perf(validate): batch same-polarity Gerber shapes into one unary_union
+- **PR #8887**: fix: locate reinforcement wire from mask strip and anchors on doubled-copper nets
+- **PR #8885**: feat(check): gate length-weighted per-layer off-axis copper
+- **PR #8883**: fix: avoid graphic mask openings in place-silk-refs
+- **PR #8882**: test: cover rotated/back-side footprint and unfilled-ring mask openings
+- **PR #8881**: fix: quote sheet-absolute coordinates in silk_over_mask_opening messages
+- **PR #8880**: fix: apply JLCPCB DFM table floors in get_design_rules so check, apply-rules and DRU agree
+- **PR #8877**: test: pin reinforcement_incomplete behaviour for tapped wire runs and doubled copper
+- **PR #8876**: chore(loom): resync installed Loom to v0.19.1294
+- **PR #8874**: fix(jlcpcb): use fab-published 0.15/0.16 mm 2oz clearance floors
+- **PR #8852**: feat: default-on net-agnostic fab-view spacing and THT-to-SMD rule under jlcpcb
+- **PR #8849**: feat(check): run mask_to_copper by default under --mfr jlcpcb
+- **Issue #8888** (closed): perf(check): mask_to_copper adds ~2.5x to kct check --mfr jlcpcb (Gerber union in gerber_geometry.emit)
+- **Issue #8886** (closed): Reinforcement checks skip every real wire run on a doubled-copper net; resolve the wire from its mask strip and anchors
+- **Issue #8884** (closed): kct check/readiness: no gate for off-axis (non-45°) trace share — a board with 66% of bottom-layer length off-grid went READY
+- **Issue #8879** (closed): silk_over_mask_opening quotes the mask opening position in board-relative coordinates
+- **Issue #8878** (closed): test: cover fp_* mask apertures (mirrored footprints, unfilled circle ring) in silk_over_mask_opening
+- **Issue #8866** (closed): wire_run_courtyard_overlap fires on stitched doubled copper and reinforcement_incomplete skips real wire runs
+- **Issue #8865** (closed): JLCPCB 2 oz outer clearance floor is 0.1524 mm; the fab publishes 0.15 mm, so 0.150 mm gaps fail
+- **Issue #8862** (closed): place-silk-refs: treat graphic mask openings as obstacles; board-text candidates (split from #8861)
+- **Issue #8857** (closed): DFM threshold table: single source of truth with design_rules, outer/inner spacing split, DRU parity (follow-up to PR #8850)
+- **Issue #8843** (closed): Net-agnostic fab-view spacing pass and THT-to-SMD spacing rule
+- **Issue #8842** (closed): Default-on mask_to_copper under --mfr, plus negative-expansion and multi-segment mask rules
+
 ### 2026-11-12
 
+- **PR #8875**: fix(validate): use sheet-absolute coords in footprint_outside_board and zone_fill messages
+- **PR #8873**: fix(check): locate wire_run_courtyard_overlap findings on the run
+- **PR #8872**: fix(check): name per-layer key migration on unused path_ampacity waivers
+- **PR #8870**: fix(check): use sheet-absolute coordinates in redundant_copper_staircase message
+- **PR #8869**: fix(validate): model silk circles and arcs in silk checks
+- **PR #8864**: feat(check): flag silkscreen inside graphic solder-mask openings
+- **PR #8860**: feat(submit-jlcpcb): load JLCPCB_* from project .env and plumb contact block
+- **PR #8855**: feat: add JLCDFM fab parity section; uncovered danger categories make kct check incomplete
+- **PR #8853**: feat(check): add mask negative-expansion and multi-segment warnings
+- **PR #8851**: feat: record attested JLCDFM counts via tapeout-sign-off --stage fab-dfm
+- **PR #8850**: feat: add versioned per-stackup JLCPCB DFM threshold table with fail-closed lookup
+- **PR #8846**: fix(check): apply JLCPCB 2oz clearance floor from declared stackup copper
+- **Issue #8871** (closed): Rule messages for footprint_outside_board and zone_fill quote board-relative coordinates
+- **Issue #8868** (closed): redundant_copper_staircase reports board-relative coordinates; other rules use sheet coordinates
+- **Issue #8867** (closed): path_ampacity per-layer keys silently orphan existing waivers; add a stale_waiver_cause
+- **Issue #8863** (closed): Model silk circle/arc geometry in silk checks (split from #8861)
+- **Issue #8861** (closed): silk_over_copper ignores graphic solder-mask openings: silk printed on bare strips passes every gate, and no fix path
+- **Issue #8859** (closed): JLCPCB automations: read operator contact/checkout details from .env, and load .env without a wrapper
+- **Issue #8847** (closed): Soldermask rules: negative expansion and multi-segment openings
+- **Issue #8845** (closed): kct check fab-DFM parity section, incomplete verdict, and parity fixture suite
+- **Issue #8841** (closed): kct submit-jlcpcb: record fab DFM category counts in the readiness receipt
+- **Issue #8839** (closed): DFM threshold table per manufacturer, copper weight and layer class (fail closed)
+- **Issue #8836** (closed): jlcpcb rule floors ignore copper weight: 2 oz board passes with clearances below the fab's 2 oz minimum
 - **PR #8835**: Bump Repo Skills 0.25.10 -> 0.26.1
 - **PR #8833**: feat: flag short-jog staircases and let compress_staircase absorb trailing legs
 - **Issue #8831** (closed): Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free

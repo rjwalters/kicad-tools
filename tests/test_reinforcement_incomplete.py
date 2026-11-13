@@ -363,3 +363,136 @@ class TestRecordedEndShift:
     def test_legacy_sidecar_without_key_behaves_as_before(self):
         pcb, outcome = self._slid()
         assert self._check(pcb, self._wires(outcome, bound=None)) == ["a"]
+
+
+def _four_layer_wire_board() -> PCB:
+    """Wire-reinforced B.Cu run on a 4-layer board (Issue #8866, net A shape)."""
+    pcb = PCB.create(width=200, height=100, layers=4, center=False)
+    pcb.add_trace((20, 50), (120, 50), width=2.0, layer="B.Cu", net=NET)
+    _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=NET, drill=1.0, size=2.0)
+    _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=NET, drill=1.0, size=2.0)
+    reinforce_net(pcb, NET)
+    return pcb
+
+
+class TestWireRunWithOrdinaryTaps:
+    """Issue #8866: a mask-strip wire run is checked, not skipped, despite taps."""
+
+    def test_non_wire_taps_on_other_layers_do_not_cause_a_skip(self):
+        pcb = _four_layer_wire_board()
+        # Thin B.Cu tap, ordinary via, inner-layer and F.Cu copper on the same net.
+        pcb.add_trace((50, 50), (50, 58), width=0.25, layer="B.Cu", net=NET)
+        pcb.add_via(50, 58, size=0.8, drill=0.4, net=NET)
+        pcb.add_trace((50, 58), (60, 58), width=0.25, layer="In1.Cu", net=NET)
+        pcb.add_trace((60, 58), (60, 66), width=0.25, layer="F.Cu", net=NET)
+        assert _subchecks(_run(pcb)) == []  # checked and complete
+
+    def test_checked_run_still_reports_a_missing_mask_strip(self):
+        pcb = _four_layer_wire_board()
+        pcb.add_trace((50, 50), (50, 58), width=0.25, layer="B.Cu", net=NET)
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
+        assert _subchecks(_run(pcb)) == ["b"]  # checked, and the gap is reported
+
+    def test_tap_closing_a_loop_is_checked_from_the_mask_strip(self):
+        """Issue #8886: ambiguous copper no longer hides a real wire run."""
+        pcb = _ambiguous_wire_board()
+        assert _resolution_status(pcb) == "ambiguous"  # skipped before the fix
+        assert _subchecks(_run(pcb)) == []  # located from strip + anchors, complete
+
+    def test_ambiguous_net_still_reports_a_missing_mask_strip(self):
+        pcb = _ambiguous_wire_board()
+        strips = [g for g in pcb.graphic_lines if g.layer == "B.Mask"]
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
+        # Anchors remain, so the wire is still located (from them) -> one skip, not 'no wire'.
+        assert strips
+        results = _run(pcb)
+        assert _subchecks(results) == ["skipped"]
+        assert "loop/parallel return path" in results.violations[0].message
+
+    def test_ambiguous_net_reports_a_removed_anchor(self):
+        pcb = _ambiguous_wire_board()
+        victim = _anchors(pcb)[0]
+        pcb.vias[:] = [v for v in pcb.vias if v is not victim]
+        assert _subchecks(_run(pcb)) == ["a"]
+
+
+def _ambiguous_wire_board() -> PCB:
+    """A mask-strip wire on B.Cu whose net also has a loop-closing tap (Issue #8886)."""
+    pcb = _four_layer_wire_board()
+    pcb.add_trace((50, 50), (50, 58), width=0.25, layer="B.Cu", net=NET)
+    pcb.add_trace((50, 58), (70, 58), width=0.25, layer="B.Cu", net=NET)
+    pcb.add_trace((70, 58), (70, 50), width=0.25, layer="B.Cu", net=NET)
+    return pcb
+
+
+def _resolution_status(pcb: PCB) -> str:
+    from kicad_tools.router.current_paths import resolve_current_path
+
+    return resolve_current_path(pcb, _spec()).status
+
+
+class TestNoWireAndSkipLocation:
+    """Issue #8886: one finding for a wire-less declaration; located skips."""
+
+    @staticmethod
+    def _wireless() -> PCB:
+        pcb = _ambiguous_wire_board()
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
+        pcb.vias[:] = [v for v in pcb.vias if v.net_name != NET]
+        return pcb
+
+    def test_declared_eligible_without_wire_is_one_finding(self):
+        pcb = self._wireless()
+        assert _resolution_status(pcb) == "ambiguous"
+        results = _run(pcb)
+        assert _subchecks(results) == ["no_wire"]
+        assert "no wire is present" in results.violations[0].message
+
+    def test_no_wire_path_has_no_courtyard_findings(self):
+        from kicad_tools.validate.rules.reinforcement_courtyard import (
+            ReinforcementCourtyardRule,
+        )
+
+        pcb = self._wireless()
+        assert list(ReinforcementCourtyardRule(specs=[_spec()]).check(pcb, _rules())) == []
+
+    def test_skipped_finding_is_on_the_path_and_rounded(self):
+        pcb = _reinforced()
+        import dataclasses
+
+        spec = dataclasses.replace(_spec(True), source=PathEndpoint("NOPE", "1"))
+        (v,) = _run(pcb, specs=[spec]).violations
+        assert v.location != (0.0, 0.0)
+        assert all(round(c, 3) == c for c in v.location)
+
+    def test_skip_message_rounds_witness_coordinates(self):
+        from kicad_tools.validate.rules.reinforcement_incomplete import _round_floats
+
+        assert _round_floats("at (10.799999999999997, 10.8)") == "at (10.800, 10.8)"
+
+
+class TestStitchedDoubledCopper:
+    """Issue #8866, net B: doubled F.Cu/B.Cu copper, no mask opening.
+
+    Eligibility is *declared* in the current-paths sidecar, never inferred from
+    the copper. Undeclared, the net yields no finding. Declared
+    ``reinforcement_eligible: true``, the rule is working as designed and
+    reports the missing anchors / mask opening on it.
+    """
+
+    @staticmethod
+    def _board() -> PCB:
+        pcb = PCB.create(width=200, height=100, layers=4, center=False)
+        for layer in ("F.Cu", "B.Cu"):
+            pcb.add_trace((20, 50), (120, 50), width=2.6, layer=layer, net=NET)
+        _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=NET, drill=1.0, size=2.0)
+        _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=NET, drill=1.0, size=2.0)
+        pcb.add_via(70, 50, size=1.2, drill=0.6, net=NET)
+        return pcb
+
+    def test_undeclared_doubled_copper_has_no_finding(self):
+        assert _run(self._board(), eligible=False).violations == []
+
+    def test_declared_eligible_doubled_copper_is_flagged_as_designed(self):
+        results = _run(self._board(), eligible=True)
+        assert set(_subchecks(results)) == {"a", "b", "d"}

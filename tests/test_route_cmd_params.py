@@ -503,7 +503,7 @@ class TestManufacturerTraceWidthFloor:
     ``kct route --manufacturer jlcpcb`` used to emit copper below the very
     floor ``kct check --mfr jlcpcb`` enforces, because route floored at the
     layer/copper-agnostic ``MfrLimits.min_trace`` (0.127mm) while check reads
-    the per-``<layers>layer_<oz>oz`` ``min_trace_width_mm`` (0.1524mm at 2oz).
+    the per-``<layers>layer_<oz>oz`` ``min_trace_width_mm`` (0.15mm at 4-layer 2oz).
     """
 
     @staticmethod
@@ -534,11 +534,11 @@ class TestManufacturerTraceWidthFloor:
         from kicad_tools.cli import route_cmd
 
         args = self._args(copper="2", trace_width=None)
-        # A wide-ish explicit-free run: the 0.1524 floor is below 0.2, so the
+        # A wide-ish explicit-free run: the 0.15 floor is below 0.2, so the
         # default stands -- but the ladder floor must be raised.
         assert route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path)) == 0
         assert args.trace_width == 0.2
-        assert args.min_trace == pytest.approx(0.1524)
+        assert args.min_trace == pytest.approx(0.15)
         assert args.copper_oz == 2.0
 
     def test_binding_floor_raises_the_default_and_announces_it(self, tmp_path, capsys):
@@ -570,18 +570,18 @@ class TestManufacturerTraceWidthFloor:
         assert "Trace width:" not in capsys.readouterr().out
 
     def test_explicit_sub_floor_width_warns_but_is_honored(self, tmp_path, capsys):
-        """The reporter's exact emission: 0.150mm against the 0.1524mm floor."""
+        """The reporter's exact emission: 0.140mm against the 0.15mm floor."""
         from kicad_tools.cli import route_cmd
 
-        args = self._args(copper="2", trace_width=0.15)
+        args = self._args(copper="2", trace_width=0.14)
         route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
 
         # Honored, never silently rewritten.
-        assert args.trace_width == 0.15
+        assert args.trace_width == 0.14
         err = capsys.readouterr().err
         assert "WARNING" in err
+        assert "0.14" in err
         assert "0.15" in err
-        assert "0.1524" in err
         assert "jlcpcb" in err
         assert "4-layer 2oz" in err
         assert "dimension_trace_width" in err
@@ -589,7 +589,7 @@ class TestManufacturerTraceWidthFloor:
     def test_explicit_width_at_the_floor_does_not_warn(self, tmp_path, capsys):
         from kicad_tools.cli import route_cmd
 
-        args = self._args(copper="2", trace_width=0.1524)
+        args = self._args(copper="2", trace_width=0.15)
         route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
         assert "WARNING" not in capsys.readouterr().err
 
@@ -608,11 +608,11 @@ class TestManufacturerTraceWidthFloor:
         from kicad_tools.cli import route_cmd
         from kicad_tools.router.rules import NetClassRouting
 
-        ncm = {"DP": NetClassRouting(name="DIFFERENTIAL", trace_width=0.15)}
+        ncm = {"DP": NetClassRouting(name="DIFFERENTIAL", trace_width=0.14)}
         args = self._args(copper="2", _loaded_net_class_map=ncm)
         route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
 
-        assert ncm["DP"].trace_width == 0.15  # user data untouched
+        assert ncm["DP"].trace_width == 0.14  # user data untouched
         err = capsys.readouterr().err
         assert "DIFFERENTIAL" in err
         assert "dimension_trace_width" in err
@@ -652,7 +652,7 @@ class TestManufacturerTraceWidthFloor:
         route_cmd._apply_manufacturer_trace_width_floor(args, self._pcb(tmp_path))
         assert args.copper_oz == 2.0
         assert args._copper_oz_inner == 0.5
-        assert args.min_trace == pytest.approx(0.1524)
+        assert args.min_trace == pytest.approx(0.15)
 
     def test_layer_count_drives_the_1oz_floor(self, tmp_path):
         from kicad_tools.cli import route_cmd

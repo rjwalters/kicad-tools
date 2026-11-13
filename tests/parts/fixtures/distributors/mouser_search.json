@@ -1,0 +1,10 @@
+{"Errors": [], "SearchResults": {"NumberOfResult": 2, "Parts": [
+ {"ManufacturerPartNumber": "STM32F103C8T6", "Manufacturer": "STMicroelectronics",
+  "MouserPartNumber": "511-STM32F103C8T6", "AvailabilityInStock": "1234",
+  "Availability": "1,234 In Stock", "LeadTime": "84 Days", "LifecycleStatus": "Active",
+  "ProductAttributes": [{"AttributeName": "Packaging", "AttributeValue": "Tray"}],
+  "PriceBreaks": [{"Quantity": 1, "Price": "$8.50", "Currency": "USD"},
+                  {"Quantity": 10, "Price": "$7.90", "Currency": "USD"},
+                  {"Quantity": 100, "Price": "$6.25", "Currency": "USD"}]},
+ {"ManufacturerPartNumber": "STM32F103C8T6TR", "MouserPartNumber": "511-OTHER",
+  "AvailabilityInStock": "5", "PriceBreaks": []}]}}

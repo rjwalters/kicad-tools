@@ -82,7 +82,11 @@ def test_filled_third_primitive_hides_internal_boundaries():
 )
 def test_exact_limit_tolerance(gap, expected):
     assert (
-        bool(gaps(board(track((0, 0), (4, 0), "a"), track((0, 0.2 + gap), (4, 0.2 + gap), "b"))))
+        bool(
+            gaps(
+                board(track((0, 0), (4, 0), "a"), track((0, 0.2 + gap), (4, 0.2 + gap), "b", net=2))
+            )
+        )
         == expected
     )
 
@@ -603,3 +607,96 @@ def test_missing_polygon_points_is_incomplete_not_clean():
     result = check_physical_copper_gap(board(item), 0.25)
     assert result.violations
     assert all(v.rule_id == "physical_copper_gap_incomplete" for v in result.violations)
+
+
+# ---- Issue #8843: fab-view tiers, mask bridge, jlcpcb default -------------
+
+
+def _tiered(pcb):
+    return [
+        v
+        for v in check_physical_copper_gap(pcb, 0.15, error_below_mm=0.10).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+
+
+@pytest.mark.parametrize(("gap", "severity"), [(0.08, "error"), (0.12, "warning"), (0.20, None)])
+def test_tiered_severity(gap, severity):
+    # Tracks 0.2 wide: centre offset = width + gap.
+    found = _tiered(
+        board(track((0, 0), (4, 0), "a"), track((0, 0.2 + gap), (4, 0.2 + gap), "b", net=2))
+    )
+    if severity is None:
+        assert not found
+    else:
+        assert [v.severity for v in found] == [severity]
+
+
+def test_same_net_near_parallel_copper_is_listed():
+    found = _tiered(
+        board(track((0, 0), (4, 0), "a", net=1), track((0, 0.28), (4, 0.28), "b", net=1))
+    )
+    assert found and found[0].actual_value == pytest.approx(0.08, abs=0.002)
+    # Same-net slits are always listed but never blocking (issue #8843).
+    assert [v.severity for v in found] == ["warning"]
+
+
+def _pad(ref, x, y, uuid, net=1):
+    return f"""(footprint "X" (layer "F.Cu") (at {x} {y})
+      (property "Reference" "{ref}")
+      (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu") (net {net} "GND") (uuid "{uuid}")))"""
+
+
+@pytest.mark.parametrize(("gap", "expected"), [(0.18, 1), (0.22, 0)])
+def test_mask_bridge_2oz(gap, expected):
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board(_pad("U1", 0, 0, "p0"), _pad("U2", 1 + gap, 0, "p1", net=2))
+    found = check_pad_mask_bridge(pcb, 2.0).violations
+    assert len(found) == expected
+
+
+def test_mask_bridge_unknown_weight_fails_closed():
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board(_pad("U1", 0, 0, "p0"), _pad("U2", 5, 0, "p1"))
+    found = check_pad_mask_bridge(pcb, None).violations
+    assert [v.rule_id for v in found] == ["physical_copper_gap_incomplete"]
+    assert not check_pad_mask_bridge(pcb, 1.0).violations  # known, not 2 oz: not judged here
+
+
+def test_checker_default_on_only_under_fab_view():
+    from kicad_tools.validate.checker import DRCChecker
+
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2))
+    assert not DRCChecker(pcb).check_physical_copper_gap().violations
+    on = DRCChecker(pcb, fab_view=True, fab_view_copper_oz=1.0).check_physical_copper_gap()
+    assert [v.severity for v in on.violations] == ["error"]
+    # An explicit threshold wins over the fab-view default (single tier, all errors).
+    explicit = DRCChecker(
+        pcb, fab_view=True, fab_view_copper_oz=1.0, physical_copper_gap_mm=0.3
+    ).check_physical_copper_gap()
+    assert explicit.violations and explicit.violations[0].required_value == 0.3
+
+
+def test_cli_jlcpcb_default_on_and_other_mfr_unchanged(tmp_path, capsys):
+    import json
+
+    from kicad_tools.cli import main
+    from kicad_tools.sexp import serialize_sexp
+
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2))
+    path = tmp_path / "gap.kicad_pcb"
+    path.write_text(serialize_sexp(pcb._sexp))
+
+    def run(mfr):
+        main(["check", str(path), "--drc-only", "--mfr", mfr, "--format", "json"])
+        return json.loads(capsys.readouterr().out)
+
+    jlc = run("jlcpcb")
+    assert any(
+        v["rule_id"] == "physical_copper_gap" and v["severity"] == "error"
+        for v in jlc["violations"]
+    )
+    other = run("pcbway")
+    assert not any(v["rule_id"] == "physical_copper_gap" for v in other["violations"])

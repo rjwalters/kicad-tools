@@ -68,6 +68,9 @@ class FootprintOutsideBoardRule(DRCRule):
             return results
 
         outline_segments = pcb.get_board_outline_segments()
+        # Message text is shown sheet-absolute (matching ``location`` after
+        # ``DRCChecker._absolutize``); ``location`` itself stays board-relative.
+        ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
 
         for footprint in pcb.footprints:
             fx, fy = footprint.position
@@ -80,7 +83,7 @@ class FootprintOutsideBoardRule(DRCRule):
                         severity="error",
                         message=(
                             f"Footprint {footprint.reference} at "
-                            f"({fx:.2f}, {fy:.2f}) is outside the board "
+                            f"({fx + ox:.2f}, {fy + oy:.2f}) is outside the board "
                             f"outline by {distance:.2f}mm"
                         ),
                         location=(fx, fy),

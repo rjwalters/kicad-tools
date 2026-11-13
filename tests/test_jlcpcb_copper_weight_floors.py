@@ -24,7 +24,7 @@ def test_emitted_dru_scopes_outer_and_inner_clearance(profile):
     dru = generate_dru(profile.get_design_rules(4, 2.0), manufacturer_name="JLCPCB")
     assert "(layer outer)" in dru and "(layer inner)" in dru
     assert "Clearance (outer)" in dru
-    assert "(constraint clearance (min 0.1524mm))" in dru
+    assert "(constraint clearance (min 0.15mm))" in dru
 
 
 def test_one_oz_dru_keeps_single_unscoped_clearance(profile):
@@ -44,3 +44,12 @@ def test_two_layer_two_oz_clearance(profile):
 
 def test_non_strict_lookup_keeps_legacy_fallback(profile):
     assert profile.get_design_rules(4, 3.0).min_clearance_mm == pytest.approx(0.1016)
+
+
+def test_four_layer_two_oz_outer_boundary_matches_fab_8865(profile):
+    """JLCPCB publishes 0.15 mm multilayer 2 oz: 0.150 passes, 0.148 fails."""
+    rules = profile.get_design_rules(4, 2.0)
+    assert rules.min_clearance_mm == pytest.approx(0.15)
+    assert rules.min_clearance_mm - 1e-9 <= 0.150
+    assert rules.min_clearance_mm > 0.148
+    assert rules.min_inner_clearance_mm == pytest.approx(0.1016)

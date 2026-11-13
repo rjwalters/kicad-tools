@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-11-05*
+*Last updated: 2026-11-13*
 
 ---
 
@@ -23,7 +23,7 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#8741**: pcb reinforce: anchors are spaced mid-run, no wire-end anchors, no solder-mask opening; nothing checks that a reinforced run is buildable
+- **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors)
 
 ## Ready
 
@@ -35,14 +35,15 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8821**: pcb reinforce: avoid same-side courtyards when planning wire runs (split from #8820)
-- **#8831**: Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free
+- **#8840**: Sharp trace corner and missing plated through-hole rules; fiducial parity check
+- **#8844**: Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8829**: feat: reinforce refuses runs under same-side courtyards
+- **#8848**: feat(check): add sharp_trace_corner and missing_plated_hole rules
+- **#8906**: fix: skip mask_to_copper and allow incomplete in board 03 route_demo DRC
 
 ## Approved (Awaiting Merge)
 
@@ -55,7 +56,6 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 Issues carrying `loom:curated`.
 
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC *(curated)*
-- **#5539**: Champion: Merge-Risk Hold Digest *(curated)*
 - **#7487**: Re-rule or remove board 03 usb_geometry via-in-pad window exception by 2027-04-19 (#7457 / #7084 Q10) *(curated)*
 - **#8214**: optimize-traces: collision-check each rewrite on finished boards instead of whole-net rollback *(curated)*
 - **#8425**: Live-verify covered-track split (#8406) on pinned kicad-cli and #8368 board B *(curated)*
@@ -66,8 +66,10 @@ Issues carrying `loom:curated`.
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
-- **#8821**: pcb reinforce: avoid same-side courtyards when planning wire runs (split from #8820) *(curated)*
-- **#8831**: Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free *(curated)*
+- **#8840**: Sharp trace corner and missing plated through-hole rules; fiducial parity check *(curated)*
+- **#8844**: Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width *(curated)*
+- **#8858**: Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849) *(curated)*
+- **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors) *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -78,6 +80,7 @@ _None._
 - **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
 - **#5952**: Epic: Harness-neutral kicad-tools (Claude Code, Codex CLI, opencode)
+- **#8838**: Epic: fab DFM parity - a board that passes kct check --mfr jlcpcb must pass JLCPCB's DFM tool
 
 ## Backlog Balance
 
@@ -88,11 +91,11 @@ _None._
 | Important | 1 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 1 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 14 |
+| Curated | 15 |
 | Architect / Hermit proposals | 0 |
-| Active epics | 3 |
+| Active epics | 4 |
 <!-- guide:plan-body:end -->
 
 ## Release History (static archive)
