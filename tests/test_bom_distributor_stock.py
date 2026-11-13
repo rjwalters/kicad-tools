@@ -260,3 +260,76 @@ def test_genuine_not_found_is_still_flagged(tmp_path, monkeypatch, capsys):
     b = next(ln for ln in data["lines"] if ln["mpn"] == "B")
     assert b["checked"] is True
     assert b["flagged"] is True
+
+
+def test_unified_cli_forwards_distributor_stock_flags(tmp_path, monkeypatch):
+    """`kct bom <sch> --check-distributor-stock --quantity N --no-cache` must
+    reach ``bom_cmd`` (Issue #8893).
+
+    The flag was added only to ``bom_cmd``'s inner parser, so the unified CLI
+    rejected the documented invocation with ``unrecognized arguments`` and
+    exited 2 -- which is also this feature's "lines flagged" code. Every other
+    test here calls ``check_distributor_stock`` directly and so cannot see the
+    outer/inner parser drift (#3159).
+    """
+    from kicad_tools.cli import bom_cmd as bom_cmd_mod
+    from kicad_tools.cli import main as cli_main
+
+    sch = tmp_path / "b.kicad_sch"
+    sch.write_text("(kicad_sch)")
+
+    item = SimpleNamespace(
+        reference="U1", mpn="A", value="v", footprint="f", dnp=False, is_virtual=False
+    )
+    monkeypatch.setattr(bom_cmd_mod, "extract_bom", lambda _p: SimpleNamespace(items=[item]))
+
+    seen = {}
+
+    def fake_check(items, quantity, fmt, bypass_cache=False, clients=None):
+        seen.update(
+            refs=[i.reference for i in items],
+            quantity=quantity,
+            fmt=fmt,
+            bypass_cache=bypass_cache,
+        )
+        return 2
+
+    monkeypatch.setattr(bom_cmd_mod, "check_distributor_stock", fake_check)
+
+    rc = cli_main(
+        [
+            "bom",
+            str(sch),
+            "--check-distributor-stock",
+            "--quantity",
+            "10",
+            "--no-cache",
+            "--format",
+            "json",
+        ]
+    )
+
+    # The flags arrived, and the inner command's exit code is propagated.
+    assert seen == {"refs": ["U1"], "quantity": 10, "fmt": "json", "bypass_cache": True}
+    assert rc == 2
+
+
+def test_unified_cli_bom_without_the_flag_does_not_check_stock(tmp_path, monkeypatch):
+    """Plain `kct bom <sch>` must not trigger the distributor check."""
+    from kicad_tools.cli import bom_cmd as bom_cmd_mod
+    from kicad_tools.cli import main as cli_main
+
+    sch = tmp_path / "b.kicad_sch"
+    sch.write_text("(kicad_sch)")
+
+    item = SimpleNamespace(
+        reference="U1", mpn="A", value="v", footprint="f", dnp=False, is_virtual=False
+    )
+    monkeypatch.setattr(bom_cmd_mod, "extract_bom", lambda _p: SimpleNamespace(items=[item]))
+
+    def boom(*a, **k):  # pragma: no cover - must not run
+        raise AssertionError("check_distributor_stock called without the flag")
+
+    monkeypatch.setattr(bom_cmd_mod, "check_distributor_stock", boom)
+
+    assert cli_main(["bom", str(sch)]) == 0

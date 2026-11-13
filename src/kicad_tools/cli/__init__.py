@@ -377,6 +377,14 @@ def _dispatch_command(args) -> int:
             sub_argv.append("--include-dnp")
         if args.sort != "reference":
             sub_argv.extend(["--sort", args.sort])
+        # Issue #8893: forward the distributor-stock flags to the inner parser
+        # (a flag added only to one parser never reaches bom_cmd -- #3159 drift).
+        if getattr(args, "check_distributor_stock", False):
+            sub_argv.append("--check-distributor-stock")
+        if getattr(args, "no_cache", False):
+            sub_argv.append("--no-cache")
+        if getattr(args, "quantity", 1) != 1:
+            sub_argv.extend(["--quantity", str(args.quantity)])
         return bom_cmd(sub_argv)
 
     elif args.command == "check":

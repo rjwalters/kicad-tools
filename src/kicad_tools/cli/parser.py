@@ -644,6 +644,29 @@ def _add_bom_parser(subparsers) -> None:
     bom_parser.add_argument(
         "--sort", choices=["reference", "value", "footprint"], default="reference"
     )
+    # Issue #8893: these three must exist on BOTH parsers -- a flag added only to
+    # bom_cmd's inner parser never reaches it through `kct bom` (the #3159 drift
+    # trap); `kct bom ... --check-distributor-stock` exited 2 as an argparse
+    # error, which is also this feature's "lines flagged" code.
+    bom_parser.add_argument(
+        "--check-distributor-stock",
+        action="store_true",
+        help=(
+            "Flag BOM lines with no DigiKey/Mouser stock at --quantity boards "
+            "(needs distributor API credentials; exit 2 if any line is flagged)"
+        ),
+    )
+    bom_parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help=("With --check-distributor-stock, bypass the parts cache and fetch live"),
+    )
+    bom_parser.add_argument(
+        "--quantity",
+        type=int,
+        default=1,
+        help="Number of boards (for the distributor stock check)",
+    )
 
 
 def _add_creepage_parser(subparsers) -> None:
