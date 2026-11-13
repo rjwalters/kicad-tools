@@ -394,27 +394,39 @@ def check_distributor_stock(
     """Flag BOM lines with no authorised-distributor stock at the build quantity.
 
     Needed quantity per MPN is ``quantity`` x the number of refs sharing it.
-    Returns 2 when at least one line is flagged, else 0 (including when no
-    credentials are configured: notices are printed and nothing is flagged).
+    MPNs are grouped and matched case-insensitively, because the distributor
+    parsers compare the query that way but report the distributor's own casing.
+
+    Only an MPN that at least one distributor actually answered for can be
+    flagged. One whose every lookup failed (HTTP error, exhausted quota, no
+    credentials) is reported as *not checked* instead -- "no offer" is not the
+    same as "no stock". Returns 2 when at least one line is flagged, else 0.
     """
     from ..parts.distributors import service
 
+    # Group on the upper-cased MPN, keeping the BOM's own casing for display
+    # and for the query: the parsers compare with `.upper()` but return the
+    # distributor's casing, so an exact-string lookup would miss the offer,
+    # and two BOM lines differing only in case would not share a group.
     refs_by_mpn: dict[str, list[str]] = {}
+    display: dict[str, str] = {}
     unchecked: list[str] = []
     for item in items:
         mpn = (item.mpn or "").strip()
         if mpn:
-            refs_by_mpn.setdefault(mpn, []).append(item.reference)
+            key = mpn.upper()
+            refs_by_mpn.setdefault(key, []).append(item.reference)
+            display.setdefault(key, mpn)
         else:
             unchecked.append(item.reference)
 
-    needed = {mpn: quantity * len(refs) for mpn, refs in refs_by_mpn.items()}
+    needed = {key: quantity * len(refs) for key, refs in refs_by_mpn.items()}
     report = service.StockReport()
     if needed:
         print(f"Checking distributor stock for {quantity} board(s)...", file=sys.stderr)
         try:
             report = service.query_stock(
-                sorted(needed),
+                [display[key] for key in sorted(needed)],
                 max(needed.values()),
                 use_cache=not bypass_cache,
                 clients=clients,
@@ -423,32 +435,39 @@ def check_distributor_stock(
             print(f"Error checking distributor stock: {e}", file=sys.stderr)
             return 1
 
-    # No client ran at all -> nothing was checked, so nothing can be flagged.
-    no_clients = bool(report.notices) and not report.offers and not report.not_found
-    if clients is not None:
-        no_clients = not clients
-
     best: dict[str, DistributorOffer] = {}
     for offer in report.offers:
-        cur = best.get(offer.mpn)
+        offer_key = offer.mpn.upper()
+        cur = best.get(offer_key)
         if cur is None or offer.stock > cur.stock:
-            best[offer.mpn] = offer
+            best[offer_key] = offer
+
+    # An MPN counts as checked only when some distributor answered for it:
+    # an offer, or a "<mpn>@<distributor>" miss. `query_stock` records neither
+    # when the lookup itself failed, so absence of an offer proves nothing.
+    answered = set(best)
+    for miss in report.not_found:
+        answered.add(miss.rsplit("@", 1)[0].upper())
 
     lines: list[dict[str, Any]] = []
     flagged = 0
-    for mpn in sorted(refs_by_mpn):
-        best_offer = best.get(mpn)
+    not_checked = 0
+    for key in sorted(refs_by_mpn):
+        best_offer = best.get(key)
         stock = best_offer.stock if best_offer else None
-        ok = stock is not None and stock >= needed[mpn]
-        is_flagged = (not ok) and not no_clients
+        checked = key in answered
+        in_stock = stock is not None and stock >= needed[key]
+        is_flagged = checked and not in_stock
         flagged += is_flagged
+        not_checked += not checked
         lines.append(
             {
-                "references": refs_by_mpn[mpn],
-                "mpn": mpn,
-                "needed": needed[mpn],
+                "references": refs_by_mpn[key],
+                "mpn": display[key],
+                "needed": needed[key],
                 "best_stock": stock,
                 "distributor": best_offer.distributor if best_offer else None,
+                "checked": checked,
                 "flagged": is_flagged,
             }
         )
@@ -462,6 +481,7 @@ def check_distributor_stock(
                     "not_checked_no_mpn": unchecked,
                     "notices": report.notices,
                     "flagged": flagged,
+                    "not_checked": not_checked,
                 },
                 indent=2,
             )
@@ -469,8 +489,11 @@ def check_distributor_stock(
     else:
         for n in report.notices:
             print(f"Notice: {n}", file=sys.stderr)
-        if no_clients and needed:
-            print("No distributor was queried; no lines were checked.")
+        nothing_answered = bool(needed) and not answered
+        if nothing_answered:
+            # No distributor answered for any MPN: one line beats repeating it
+            # per BOM line (no credentials, or every lookup failed).
+            print("No distributor answered for any MPN; no lines were checked (see notices).")
         for ln in lines:
             if ln["flagged"]:
                 stock_text = "not found" if ln["best_stock"] is None else str(ln["best_stock"])
@@ -479,9 +502,17 @@ def check_distributor_stock(
                     f"OUT OF STOCK  {','.join(ln['references'])}  {ln['mpn']}  "
                     f"needed={ln['needed']}  best stock={stock_text}  distributor={dist}"
                 )
+            elif not ln["checked"] and not nothing_answered:
+                print(
+                    f"NOT CHECKED   {','.join(ln['references'])}  {ln['mpn']}  "
+                    f"needed={ln['needed']}  lookup failed (see notices)"
+                )
         if unchecked:
             print(f"No MPN, not checked: {', '.join(unchecked)}")
-        print(f"{flagged} of {len(lines)} MPN line(s) flagged")
+        summary = f"{flagged} of {len(lines)} MPN line(s) flagged"
+        if not_checked:
+            summary += f"; {not_checked} not checked (lookup failed)"
+        print(summary)
 
     return 2 if flagged else 0
 
