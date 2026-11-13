@@ -393,17 +393,82 @@ class TestWireRunWithOrdinaryTaps:
         pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
         assert _subchecks(_run(pcb)) == ["b"]  # checked, and the gap is reported
 
-    def test_tap_closing_a_loop_skips_and_names_the_copper(self):
-        pcb = _four_layer_wire_board()
-        pcb.add_trace((50, 50), (50, 58), width=0.25, layer="B.Cu", net=NET)
-        pcb.add_trace((50, 58), (70, 58), width=0.25, layer="B.Cu", net=NET)
-        pcb.add_trace((70, 58), (70, 50), width=0.25, layer="B.Cu", net=NET)
+    def test_tap_closing_a_loop_is_checked_from_the_mask_strip(self):
+        """Issue #8886: ambiguous copper no longer hides a real wire run."""
+        pcb = _ambiguous_wire_board()
+        assert _resolution_status(pcb) == "ambiguous"  # skipped before the fix
+        assert _subchecks(_run(pcb)) == []  # located from strip + anchors, complete
+
+    def test_ambiguous_net_still_reports_a_missing_mask_strip(self):
+        pcb = _ambiguous_wire_board()
+        strips = [g for g in pcb.graphic_lines if g.layer == "B.Mask"]
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
+        # Anchors remain, so the wire is still located (from them) -> one skip, not 'no wire'.
+        assert strips
         results = _run(pcb)
         assert _subchecks(results) == ["skipped"]
-        msg = results.violations[0].message
-        assert "declared reinforcement_eligible" in msg
-        assert "loop/parallel return path" in msg
-        assert "(70.0, 58.0)->(70.0, 50.0) on B.Cu" in msg  # names the offending copper
+        assert "loop/parallel return path" in results.violations[0].message
+
+    def test_ambiguous_net_reports_a_removed_anchor(self):
+        pcb = _ambiguous_wire_board()
+        victim = _anchors(pcb)[0]
+        pcb.vias[:] = [v for v in pcb.vias if v is not victim]
+        assert _subchecks(_run(pcb)) == ["a"]
+
+
+def _ambiguous_wire_board() -> PCB:
+    """A mask-strip wire on B.Cu whose net also has a loop-closing tap (Issue #8886)."""
+    pcb = _four_layer_wire_board()
+    pcb.add_trace((50, 50), (50, 58), width=0.25, layer="B.Cu", net=NET)
+    pcb.add_trace((50, 58), (70, 58), width=0.25, layer="B.Cu", net=NET)
+    pcb.add_trace((70, 58), (70, 50), width=0.25, layer="B.Cu", net=NET)
+    return pcb
+
+
+def _resolution_status(pcb: PCB) -> str:
+    from kicad_tools.router.current_paths import resolve_current_path
+
+    return resolve_current_path(pcb, _spec()).status
+
+
+class TestNoWireAndSkipLocation:
+    """Issue #8886: one finding for a wire-less declaration; located skips."""
+
+    @staticmethod
+    def _wireless() -> PCB:
+        pcb = _ambiguous_wire_board()
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
+        pcb.vias[:] = [v for v in pcb.vias if v.net_name != NET]
+        return pcb
+
+    def test_declared_eligible_without_wire_is_one_finding(self):
+        pcb = self._wireless()
+        assert _resolution_status(pcb) == "ambiguous"
+        results = _run(pcb)
+        assert _subchecks(results) == ["no_wire"]
+        assert "no wire is present" in results.violations[0].message
+
+    def test_no_wire_path_has_no_courtyard_findings(self):
+        from kicad_tools.validate.rules.reinforcement_courtyard import (
+            ReinforcementCourtyardRule,
+        )
+
+        pcb = self._wireless()
+        assert list(ReinforcementCourtyardRule(specs=[_spec()]).check(pcb, _rules())) == []
+
+    def test_skipped_finding_is_on_the_path_and_rounded(self):
+        pcb = _reinforced()
+        import dataclasses
+
+        spec = dataclasses.replace(_spec(True), source=PathEndpoint("NOPE", "1"))
+        (v,) = _run(pcb, specs=[spec]).violations
+        assert v.location != (0.0, 0.0)
+        assert all(round(c, 3) == c for c in v.location)
+
+    def test_skip_message_rounds_witness_coordinates(self):
+        from kicad_tools.validate.rules.reinforcement_incomplete import _round_floats
+
+        assert _round_floats("at (10.799999999999997, 10.8)") == "at (10.800, 10.8)"
 
 
 class TestStitchedDoubledCopper:

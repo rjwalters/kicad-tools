@@ -106,3 +106,87 @@ def test_footprint_mask_graphic_opening_is_error(tmp_path: Path) -> None:
     v = res.violations[0]
     assert v.rule_id == "silk_over_mask_opening" and v.severity == "error"
     assert "fp_circle" in v.message and "F.Mask" in v.message
+
+
+def _silk_at(side: str, x: float, y: float) -> str:
+    """One silk text centred on board point (x, y)."""
+    mirror = " (justify mirror)" if side == "B" else ""
+    return (
+        f'  (gr_text "SILK TEXT" (at {x} {y}) (layer "{side}.SilkS")'
+        f" (effects (font (size 1 1) (thickness 0.15)){mirror}))\n"
+    )
+
+
+def _fp_mask_shape(kind: str, layer: str) -> str:
+    """A 10 x 2 mm opening centred on the footprint origin (footprint-local frame)."""
+    if kind == "fp_line":
+        return f'(fp_line (start -5 0) (end 5 0) (stroke (width 2) (type solid)) (layer "{layer}"))'
+    return (
+        "(fp_poly (pts (xy -5 -1) (xy 5 -1) (xy 5 1) (xy -5 1)) "
+        f'(stroke (width 0) (type solid)) (fill yes) (layer "{layer}"))'
+    )
+
+
+# _fp_transform maps local (lx, ly) to (fx + lx*cos(r) - ly*sin(r), fy + lx*sin(r) + ly*cos(r))
+# with r = -rotation.  For rotation 90 at (20 20): local (5 0) -> (20 15), so the horizontal
+# local strip becomes the vertical strip x 19..21, y 15..25.  For rotation 45: local (5 0)
+# -> (23.54 16.46), a diagonal strip along x + y = 40.  Unrotated it would be y 19..21.
+@pytest.mark.parametrize("kind", ["fp_line", "fp_poly"])
+@pytest.mark.parametrize(
+    ("angle", "on_rotated", "on_unrotated"),
+    [(90, (20, 16.5), (27, 20)), (45, (23.5, 16.5), (27, 20))],
+)
+def test_rotated_footprint_mask_opening_follows_rotation(
+    tmp_path: Path,
+    kind: str,
+    angle: int,
+    on_rotated: tuple[float, float],
+    on_unrotated: tuple[float, float],
+) -> None:
+    fp = f'  (footprint "K" (layer "F.Cu") (at 20 20 {angle})\n    {_fp_mask_shape(kind, "F.Mask")})\n'
+    res, _ = _check(tmp_path, fp + _silk_at("F", *on_rotated))
+    assert len(res.violations) == 1
+    v = res.violations[0]
+    assert v.rule_id == "silk_over_mask_opening" and v.severity == "error"
+    assert kind in v.message and "F.Mask" in v.message
+
+    res, _ = _check(tmp_path, fp + _silk_at("F", *on_unrotated))
+    assert not res.violations
+
+
+@pytest.mark.parametrize("kind", ["fp_line", "fp_poly"])
+def test_back_side_footprint_mask_opening_flags_back_silk_only(tmp_path: Path, kind: str) -> None:
+    fp = f'  (footprint "K" (layer "B.Cu") (at 20 20 90)\n    {_fp_mask_shape(kind, "B.Mask")})\n'
+    # Rotated 90: opening is x 19..21, y 15..25.
+    res, _ = _check(tmp_path, fp + _silk_at("B", 20, 16.5))
+    assert len(res.violations) == 1
+    v = res.violations[0]
+    assert v.rule_id == "silk_over_mask_opening" and v.severity == "error"
+    assert kind in v.message and "B.Mask" in v.message
+
+    # Same XY on the F side: not the opening's side.
+    res, _ = _check(tmp_path, fp + _silk_at("F", 20, 16.5))
+    assert not res.violations
+
+    # Where the unrotated opening would have been (y 19..21, x 15..25).
+    res, _ = _check(tmp_path, fp + _silk_at("B", 27, 20))
+    assert not res.violations
+
+
+@pytest.mark.parametrize("side", ["F", "B"])
+def test_unfilled_circle_ring_hole_is_clean_ring_is_error(tmp_path: Path, side: str) -> None:
+    # Ring centre (20 30), radius 6, stroke 1: ring spans r 5.5..6.5, hole r < 5.5.
+    ring = (
+        f"  (gr_circle (center 20 30) (end 26 30) (stroke (width 1) (type solid)) (fill no)"
+        f' (layer "{side}.Mask"))\n'
+    )
+    # Text box (~7 x 1.2 mm) centred in the hole stays inside r 5.5.
+    res, _ = _check(tmp_path, ring + _silk_at(side, 20, 30))
+    assert not res.violations
+
+    # Text centred on the top of the ring (y = 24) crosses r 5.5..6.5.
+    res, _ = _check(tmp_path, ring + _silk_at(side, 20, 24))
+    assert len(res.violations) == 1
+    v = res.violations[0]
+    assert v.rule_id == "silk_over_mask_opening" and v.severity == "error"
+    assert "gr_circle" in v.message and f"{side}.Mask" in v.message

@@ -1537,6 +1537,25 @@ net is taken from the key); otherwise it is a **warning**. The rule's own findin
 waivable like any other (`rule: "reinforcement_incomplete"`); a waived finding keeps
 its severity and does not clear the manufacturing gate by default.
 
+**Locating the wire (#8886).** A path that resolves is checked from its
+resolved segments. A declared-eligible path that is `ambiguous` (parallel or
+loop return copper: a second-layer copy of the route, stitching vias, a tap
+closing a loop) or `unresolved` with both endpoint pads present is still
+checked: the wire is located from board geometry, not from the current split,
+as the same-net segments a `F.Mask`/`B.Mask` strip lies along, plus the anchor
+holes. With no mask strip and no anchor hole on the net there is no wire, and
+the rule emits one `no_wire` finding (and `wire_run_courtyard_overlap` stays
+silent). A path whose endpoint pad is missing, or whose wire cannot be located,
+is still reported `[skipped]`, located at the path's source pad in sheet
+coordinates (rounded to 3 dp).
+
+**What `reinforcement_eligible` changes.** (1) `path_ampacity` reports an
+undersized path as an error instead of a warning; (2) `kct pcb reinforce` may
+only touch copper of paths with the flag; (3) `reinforcement_incomplete` and
+`wire_run_courtyard_overlap` run only for flagged paths. To declare a path as
+intentionally doubled copper rather than wire, leave `reinforcement_eligible`
+`false`: no wire is then expected and these rules stay silent on it.
+
 Route-time width selection itself stays governed by the net-class
 `trace_width` (the same declarative/checked-post-route split
 `NetClassRouting.target_ampacity` already uses); see the

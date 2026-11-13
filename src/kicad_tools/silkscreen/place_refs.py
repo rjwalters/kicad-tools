@@ -63,6 +63,7 @@ from kicad_tools.silkscreen._silk_defaults import (
     SILK_EDGE_CLEARANCE_MM,
 )
 from kicad_tools.validate.rules.silkscreen import (
+    _iter_graphic_mask_apertures,
     _iter_pad_apertures,
     _iter_via_apertures,
     _silk_side,
@@ -573,11 +574,90 @@ class RefPlacement:
 
 
 @dataclass
+class FixedTextConflict:
+    """A board-level ``gr_text`` overlapping a mask opening (report-only)."""
+
+    text: str
+    layer: str
+    position: tuple[float, float]  # board-relative mm
+    opening: str
+    candidates: list[tuple[float, float]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "layer": self.layer,
+            "position": list(self.position),
+            "opening": self.opening,
+            "candidate_positions": [list(c) for c in self.candidates],
+        }
+
+
+def _report_fixed_text_over_openings(
+    pcb: PCB,
+    apertures: dict[str, list[tuple[Any, str]]],
+    result: PlaceSilkRefsResult,
+    *,
+    clearance_mm: float,
+    max_offset_mm: float,
+    step_mm: float,
+) -> None:
+    """Record board-level ``gr_text`` over a mask opening; never moves it.
+
+    Candidate clear positions reuse the ring search of :func:`_candidate_points`
+    around the text's own box and are tested against the same aperture set
+    the reference placer uses (Issue #8862).
+    """
+    ox, oy = getattr(pcb, "_board_origin", (0.0, 0.0))
+    for text in pcb.texts:
+        side = _silk_side(text.layer)
+        if side is None or text.hidden or not apertures.get(side):
+            continue
+        center = (text.position[0] - ox, text.position[1] - oy)
+
+        def geom_at(point: tuple[float, float], text: Any = text) -> Any:
+            return _oriented_text_geometry(
+                text.text, text.font_size, text.font_thickness, point, text.rotation
+            )
+
+        geom = geom_at(center)
+        if geom is None:
+            continue
+        reach = clearance_mm + KICAD_TEXT_EXTENT_SLACK_MM
+        hit = next(
+            (label for g, label in apertures[side] if geom.buffer(reach).intersects(g)), None
+        )
+        if hit is None:
+            continue
+        min_x, min_y, max_x, max_y = geom.bounds
+        points = _candidate_points(
+            (min_x, min_y, max_x, max_y), max_x - min_x, max_y - min_y, max_offset_mm, step_mm
+        )
+        points.sort(key=lambda p: math.hypot(p[0] - center[0], p[1] - center[1]))
+        clear: list[tuple[float, float]] = []
+        for point in points:
+            cand = geom_at(point)
+            if cand is None:
+                continue
+            grown = cand.buffer(reach)
+            if not any(grown.intersects(g) for g, _ in apertures[side]):
+                clear.append(point)
+                if len(clear) == 3:
+                    break
+        result.fixed_text_conflicts.append(
+            FixedTextConflict(text.text, text.layer, center, hit, clear)
+        )
+
+
+@dataclass
 class PlaceSilkRefsResult:
     """Aggregate result of a reference-placement plan."""
 
     clearance_mm: float
     placements: list[RefPlacement] = field(default_factory=list)
+    #: Board-level ``gr_text`` sitting over a mask opening. Report-only: the
+    #: text is never moved (Issue #8862).
+    fixed_text_conflicts: list[FixedTextConflict] = field(default_factory=list)
 
     @property
     def moved(self) -> list[RefPlacement]:
@@ -882,6 +962,19 @@ class SilkRefPlacer:
             apertures[aperture_side].append((geom, label))
         for aperture_side, geom, label in _iter_npth_apertures(pcb, mask_clearance_mm):
             apertures[aperture_side].append((geom, label))
+        # gr_*/fp_* shapes on F.Mask/B.Mask open the mask just like pads do
+        # (Issue #8862); same iterator the silk-over-mask validator uses.
+        for aperture_side, geom, label in _iter_graphic_mask_apertures(pcb):
+            apertures[aperture_side].append((geom, label))
+
+        _report_fixed_text_over_openings(
+            pcb,
+            apertures,
+            result,
+            clearance_mm=clearance_mm,
+            max_offset_mm=max_offset_mm,
+            step_mm=step_mm,
+        )
 
         static_silk: dict[str, list[tuple[Any, str]]] = {"F": [], "B": []}
         for static_side, geom, label in _iter_static_silk_obstacles(pcb):
