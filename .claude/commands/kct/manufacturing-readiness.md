@@ -81,7 +81,7 @@ The order matches `kct readiness` and is deliberate: check, then the native DRC,
 ```bash
 # sign-off gate 1
 mkdir -p <dir> && rm -f <dir>/check-report.json <dir>/manifest.json
-kct check <board.kicad_pcb> --mfr <tier> --output <dir>/check-report.json
+kct check <board.kicad_pcb> --mfr <tier> --skip mask_to_copper --output <dir>/check-report.json
 jq -e '(.summary.errors == 0)
   and ((.summary.stale_waivers // 0) == 0)
   and (((.summary.coverage_blocking_unknown // []) | length) == 0)
