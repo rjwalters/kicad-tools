@@ -3536,17 +3536,35 @@ if [[ -x "$GUARD_CHECK_SCRIPT" ]]; then
     esac
 fi
 
-# ---------- settings.json hook-wiring drift (#11033) ----------
+# ---------- settings.json hook-wiring drift (#11033, #13787) ----------
 #
-# .claude/settings.json is repo-owned, so a hook upstream wires that the repo does
-# not is only REPORTED, never added (a roll-pause.sh PreToolUse entry shipped this
-# way, and hooks/tests asserts it). The upstream wiring is the (event, matcher,
-# script) table in scripts/install/provision-hooks.sh, read from the source
-# checkout next to DEFAULTS_DIR, else the machine checkout. A hook counts as wired
-# when some command under that event in the repo's settings names the script
-# (user-scope wiring may still cover it). Warn-only: no exit code, no write.
+# .claude/settings.json is repo-owned, but a Loom hook whose script is installed
+# under .loom/hooks/ and is not wired is a silent hole (frenkel/2am ran only the
+# Repo Skills guard, #13787). The upstream wiring is the (event, matcher, script)
+# table in scripts/install/provision-hooks.sh, read from the source checkout next
+# to DEFAULTS_DIR, else the machine checkout. A hook counts as wired only when
+# some command under that event names the LOOM path ".loom/hooks/<script>": a
+# bare script-name match let Repo Skills' .claude/skills/repo/hooks/
+# guard-destructive.sh satisfy the check. A missing entry is added ADDITIVELY via
+# the installer's own ensure_project_hook_wiring (other entries are never removed
+# or reordered; idempotent). --dry-run, an ignored settings.json, or a failed
+# write (e.g. a non-JSON file, left untouched) only warn.
+_unwired_loom_hooks() {
+    local settings="$1" lib="$2" i event matcher name
+    # The table is read in a subshell: the library only defines functions and arrays.
+    while IFS=$'\037' read -r event matcher name; do
+        # Only hooks whose script is installed can be asserted as wired.
+        [[ -f "$WRITE_ROOT/.loom/hooks/$name" ]] || continue
+        jq -e --arg e "$event" --arg n ".loom/hooks/$name" \
+            '[.hooks[$e][]?.hooks[]?.command | strings | select(contains($n))] | length > 0' \
+            "$settings" >/dev/null 2>&1 || printf '    %s [%s] %s\n' "$event" "$matcher" "$name"
+    done < <( ( source "$lib" 2>/dev/null || exit 0
+                for i in "${!_PHOOK_NAMES[@]}"; do
+                    printf '%s\037%s\037%s\n' "${_PHOOK_TYPES[i]}" "${_PHOOK_MATCHERS[i]}" "${_PHOOK_NAMES[i]}"
+                done ) )
+}
 report_unwired_hooks() {
-    local settings="$WRITE_ROOT/.claude/settings.json" lib
+    local settings="$WRITE_ROOT/.claude/settings.json" lib unwired
     [[ -f "$settings" ]] && command -v jq >/dev/null 2>&1 || return 0
     is_ignored ".claude/settings.json" && return 0
     for lib in "$(dirname "$DEFAULTS_DIR")/scripts/install/provision-hooks.sh" \
@@ -3555,19 +3573,21 @@ report_unwired_hooks() {
         lib=""
     done
     [[ -n "$lib" ]] || return 0
-    local i event matcher name unwired=""
-    # The table is read in a subshell: the library only defines functions and arrays.
-    while IFS=$'\037' read -r event matcher name; do
-        jq -e --arg e "$event" --arg n "$name" \
-            '[.hooks[$e][]?.hooks[]?.command | strings | select(contains($n))] | length > 0' \
-            "$settings" >/dev/null 2>&1 || unwired+="    $event [$matcher] $name"$'\n'
-    done < <( ( source "$lib" 2>/dev/null || exit 0
-                for i in "${!_PHOOK_NAMES[@]}"; do
-                    printf '%s\037%s\037%s\n' "${_PHOOK_TYPES[i]}" "${_PHOOK_MATCHERS[i]}" "${_PHOOK_NAMES[i]}"
-                done ) )
+    unwired="$(_unwired_loom_hooks "$settings" "$lib")"
     [[ -n "$unwired" ]] || return 0
-    warn "upstream wires hook(s) that .claude/settings.json does not (the file is repo-owned and was NOT modified; add them, or run the installer's hook wiring):"
-    printf '%s' "$unwired" >&2
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        ( source "$lib" >/dev/null 2>&1 && ensure_project_hook_wiring "$WRITE_ROOT" >/dev/null 2>&1 ) || true
+        local still
+        still="$(_unwired_loom_hooks "$settings" "$lib")"
+        if [[ -z "$still" ]]; then
+            note "  ${GREEN}wired${NC} Loom hook(s) missing from .claude/settings.json (additive, #13787):"
+            printf '%s\n' "$unwired" >&2
+            return 0
+        fi
+        unwired="$still"
+    fi
+    warn "Loom hook(s) installed under .loom/hooks/ but not wired in .claude/settings.json (installed but not wired; file NOT modified):"
+    printf '%s\n' "$unwired" >&2
 }
 report_unwired_hooks
 
