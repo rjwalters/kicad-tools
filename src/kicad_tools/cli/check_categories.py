@@ -50,6 +50,7 @@ CHECK_CATEGORIES = [
     "mask_negative_expansion",
     "mask_multi_segment",
     "thermal_asymmetry",
+    "tht_smd_spacing",
     "via_in_pad",
     "via_type",
     "via_under_body",

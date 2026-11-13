@@ -1916,10 +1916,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-    if only_set and "physical_copper_gap" in only_set and args.physical_copper_gap is None:
-        print("Error: physical_copper_gap requires --physical-copper-gap MM", file=sys.stderr)
-        return 1
-
     # Load PCB - resolve to absolute path for reliable file access
     # Handles both file paths and directory paths (like kct build)
     input_path = Path(args.pcb).resolve()
@@ -1984,6 +1980,15 @@ def main(argv: list[str] | None = None) -> int:
     # jlcpcb-tier1).  Precedence: explicit --mfr > fab_profile.json sidecar >
     # project.kct target_fab > jlcpcb default.  An explicit flag always wins.
     effective_mfr, mfr_notices, mfr_source = _resolve_effective_check_mfr(args.mfr, pcb_path)
+
+    if (
+        only_set
+        and "physical_copper_gap" in only_set
+        and args.physical_copper_gap is None
+        and effective_mfr != "jlcpcb"
+    ):
+        print("Error: physical_copper_gap requires --physical-copper-gap MM", file=sys.stderr)
+        return 1
     for _line in mfr_notices:
         print(_line, file=sys.stderr)
 
@@ -2462,6 +2467,9 @@ def main(argv: list[str] | None = None) -> int:
             # graceful no-op (AC5).
             emit_measurements=True,
             physical_copper_gap_mm=getattr(args, "physical_copper_gap", None),
+            # Issue #8843: net-agnostic fab view is default-on under jlcpcb.
+            fab_view=effective_mfr == "jlcpcb",
+            fab_view_copper_oz=resolved_copper_outer,
             courtyard_waivers=courtyard_waivers,
             # Issue #4673: strict (real-geometry) connectivity is the
             # default; --legacy-connectivity is the explicit opt-out and
@@ -3717,6 +3725,7 @@ def run_selected_checks(
         "thermal_asymmetry": checker.check_thermal_asymmetry,
         "via_in_pad": checker.check_via_in_pad,
         "via_type": checker.check_via_type_capability,
+        "tht_smd_spacing": checker.check_tht_smd_spacing,
         "via_under_body": checker.check_via_under_body,
         "width_consistency": checker.check_width_consistency,
         "zero_length_segment": checker.check_zero_length_segments,

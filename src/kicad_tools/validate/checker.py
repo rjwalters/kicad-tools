@@ -143,6 +143,8 @@ class DRCChecker:
         reinforcement_waived_nets: Iterable[str] | None = None,
         mask_copper_request: MaskCopperRequest | None = None,
         physical_copper_gap_mm: float | None = None,
+        fab_view: bool = False,
+        fab_view_copper_oz: float | None = None,
         authored_min_clearance_mm: float | None = None,
         require_routing_policy: bool = False,
         routing_policy_defer_pair_vias: bool = True,
@@ -318,6 +320,12 @@ class DRCChecker:
             if not math.isfinite(physical_copper_gap_mm) or physical_copper_gap_mm <= 0:
                 raise ValueError("Physical copper gap must be finite and positive")
         self.physical_copper_gap_mm = physical_copper_gap_mm
+        # Issue #8843: net-agnostic "fab view" (JLCDFM-style) passes, enabled
+        # by the CLI under ``--mfr jlcpcb``.  ``fab_view_copper_oz`` is the
+        # *declared* outer copper weight (None = unknown -> mask-bridge check
+        # fails closed rather than assuming 1 oz).
+        self.fab_view = fab_view
+        self.fab_view_copper_oz = fab_view_copper_oz
         self.emit_measurements = emit_measurements
         # The skew / continuity rules surface their measured info findings
         # when either the user asked for --verbose OR a caller wants the
@@ -415,6 +423,7 @@ class DRCChecker:
         "check_thermal_asymmetry",
         "check_via_in_pad",
         "check_via_type_capability",
+        "check_tht_smd_spacing",
         "check_via_under_body",
         "check_width_consistency",
         "check_zero_length_segments",
@@ -823,11 +832,32 @@ class DRCChecker:
 
     def check_physical_copper_gap(self) -> DRCResults:
         """Opt-in net-independent slit preflight on unioned copper geometry."""
-        if self.physical_copper_gap_mm is None:
-            return DRCResults()
-        from .rules.physical_gap import check_physical_copper_gap
+        from .rules import physical_gap
 
-        return self._absolutize(check_physical_copper_gap(self.pcb, self.physical_copper_gap_mm))
+        if self.physical_copper_gap_mm is not None:
+            # Explicit --physical-copper-gap wins: single threshold, all errors.
+            return self._absolutize(
+                physical_gap.check_physical_copper_gap(self.pcb, self.physical_copper_gap_mm)
+            )
+        if not self.fab_view:
+            return DRCResults()
+        # Issue #8843: JLCDFM-style default. gap < 0.10mm error, [0.10, 0.15) warning,
+        # plus the 2 oz pad mask-bridge check (fails closed on unknown weight).
+        results = physical_gap.check_physical_copper_gap(
+            self.pcb,
+            physical_gap.FAB_VIEW_GAP_WARNING_MM,
+            error_below_mm=physical_gap.FAB_VIEW_GAP_DANGER_MM,
+        )
+        results.merge(physical_gap.check_pad_mask_bridge(self.pcb, self.fab_view_copper_oz))
+        return self._absolutize(results)
+
+    def check_tht_smd_spacing(self) -> DRCResults:
+        """THT pad / via to SMD pad spacing (Issue #8843); fab-view (jlcpcb) only."""
+        if not self.fab_view:
+            return DRCResults()
+        from .rules.tht_smd_spacing import check_tht_smd_spacing
+
+        return self._absolutize(check_tht_smd_spacing(self.pcb))
 
     def check_clearances(self) -> DRCResults:
         """Check clearance rules (trace-to-trace, trace-to-pad, etc.).
