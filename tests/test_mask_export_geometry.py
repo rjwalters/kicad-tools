@@ -486,3 +486,47 @@ def test_duplicate_uuid_case_is_not_distinct_source_identity(tmp_path):
         d["feature"] == "source-identity" and d["source_uuid"] == lower.upper()
         for d in result.unsupported
     )
+
+
+def _sequential_flash_image(sequence):
+    """Reference image built one shape at a time, in file order (the pre-batching semantics)."""
+    from shapely.geometry import GeometryCollection
+
+    from kicad_tools.validate.mask_geometry import _buffer
+
+    image = GeometryCollection()
+    for dark, x, y in sequence:
+        disc = _buffer(Point(x, y), 0.5)
+        image = image.union(disc) if dark else image.difference(disc)
+    return image
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    [
+        [(True, 0, 0), (True, 0.4, 0), (True, 3, 3)],  # dark only, overlapping
+        [(True, 0, 0), (True, 0.8, 0), (False, 0.4, 0), (True, 3, 3)],  # dark, clear, dark
+        [(False, 0, 0), (True, 0, 0), (False, 0.3, 0), (True, 0.3, 0)],  # clear-then-dark order
+    ],
+)
+def test_batched_polarity_matches_sequential_image(sequence):
+    body = "%ADD10C,1*%\nD10*\n"
+    current = True
+    for dark, x, y in sequence:
+        if dark != current:
+            body += "%LPD*%\n" if dark else "%LPC*%\n"
+            current = dark
+        body += f"X{int(x * 10**6)}Y{int(y * 10**6)}D03*\n"
+    image = parse_gerber_geometry(HEADER + body + "M02*").geometry
+    # parse_gerber_geometry flips y to board y-down; mirror the reference accordingly.
+    from shapely.affinity import scale
+
+    expected = scale(_sequential_flash_image(sequence), yfact=-1, origin=(0, 0))
+    assert image.symmetric_difference(expected).area < 1e-9
+
+
+def test_empty_layer_and_invalid_polygon_still_handled():
+    assert parse_gerber_geometry(HEADER + "M02*").geometry.is_empty
+    bow_tie = "G36*X0Y0D02*X1000000Y1000000D01*X1000000Y0D01*X0Y1000000D01*X0Y0D01*G37*"
+    with pytest.raises(GerberGeometryError):
+        parse_gerber_geometry(HEADER + bow_tie + "M02*")
