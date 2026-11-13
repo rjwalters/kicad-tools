@@ -15,6 +15,13 @@ Rules for editing the table:
 * Every rule named in ``kct_rules`` of a ``covered`` / ``partial`` row must be a
   real ``kct check`` category (``cli/check_categories.py``); a test enforces it
   so the table cannot drift from the code.
+* The reverse drift -- a rule that shipped while its row still says
+  ``not_covered`` -- is caught by ``FAB_CATEGORY_RULES`` in
+  ``tests/test_fab_dfm_parity.py`` (issue #8902).  That mapping names the rule
+  id each category *will* be covered by, including ids that do not exist yet,
+  so registering one fails the test until this row is flipped.  A rule PR that
+  forgets its row therefore cannot merge green; add the new id to the mapping
+  in the same PR.
 * Bump :data:`TABLE_VERSION` on any row change.
 """
 
@@ -26,7 +33,7 @@ from typing import Literal
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Version of the table below; bump on any row change.
-TABLE_VERSION = 1
+TABLE_VERSION = 2
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -61,18 +68,22 @@ class ParityRow:
 PARITY_TABLE: tuple[ParityRow, ...] = (
     ParityRow(
         "trace_spacing",
-        ("clearance",),
+        ("clearance", "physical_copper_gap"),
         "partial",
         True,
-        "net-aware clearance only; same-net near-parallel copper unchecked. "
-        "Observed 2 danger (0.08 mm).",
+        "net-aware `clearance` always; the net-agnostic fab-view pass "
+        "(`physical_copper_gap`, #8843) adds same-net copper but runs only when the "
+        "effective --mfr is exactly `jlcpcb` -- a `jlcpcb-tier*` profile gets "
+        "`clearance` alone. Observed 2 danger (0.08 mm).",
     ),
     ParityRow(
         "pad_spacing",
-        ("clearance",),
+        ("clearance", "physical_copper_gap"),
         "partial",
         True,
-        "same-net trace-to-pad proximity and 2 oz mask-bridge spacing unchecked. "
+        "as `trace_spacing`, plus the 2 oz pad mask-bridge check inside "
+        "`physical_copper_gap`; that check judges a declared 2 oz outer weight only "
+        "and otherwise reports `physical_copper_gap_incomplete` at info. "
         "Observed 8 danger.",
     ),
     ParityRow(
@@ -80,10 +91,21 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("mask_to_copper",),
         "partial",
         True,
-        "mask_to_copper exists but is opt-in (--mask-copper-config), so it does not "
-        "run by default. Observed 5 danger.",
+        "`mask_to_copper` is default-on for an explicit --mfr `jlcpcb*` since #8842 "
+        "(interim 0.09 mm danger / 0.15 mm warning); a bare `kct check` with no "
+        "--mfr does not engage it, and the native path needs an unmodified saved "
+        "source. Observed 5 danger.",
     ),
-    ParityRow("tht_to_smd", (), "not_covered", True, "no rule. Observed 5 danger."),
+    ParityRow(
+        "tht_to_smd",
+        ("tht_smd_spacing",),
+        "partial",
+        True,
+        "`tht_smd_spacing` (#8843) judges plated through-hole *component* pads only: "
+        "vias are excluded by default and same-footprint pad pairs are skipped, "
+        "while JLCDFM flags through-hole pads and vias. Fab-view gated -- runs only "
+        "when the effective --mfr is exactly `jlcpcb`. Observed 5 danger.",
+    ),
     ParityRow(
         "silkscreen_to_pad",
         ("silkscreen",),
@@ -96,11 +118,35 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         (),
         "not_covered",
         True,
-        "no rule (silk over tented via holes). Observed 75 danger.",
+        "no rule (silk over tented via holes); `silk_hole_overlap` is in flight on "
+        "#8844. Observed 75 danger.",
     ),
-    ParityRow("annular_ring", (), "not_covered", False, "floor is not copper-weight aware."),
-    ParityRow("negative_soldermask_expansion", (), "not_covered", False, "no rule."),
-    ParityRow("soldermask_opening_multiple_segments", (), "not_covered", False, "no rule."),
+    ParityRow(
+        "annular_ring",
+        (),
+        "not_covered",
+        False,
+        "no rule: no copper-weight-aware annular-ring floor exists yet. Observed 100 warnings.",
+    ),
+    ParityRow(
+        "negative_soldermask_expansion",
+        ("mask_negative_expansion",),
+        "covered",
+        False,
+        "`mask_negative_expansion` (#8847) warns on every opening whose effective "
+        "margin is < 0 mm; default-on pure geometry read from the saved source, so "
+        "an unsaved or edited board reports coverage unknown rather than a pass. "
+        "The recorded 4 warnings were not re-measured.",
+    ),
+    ParityRow(
+        "soldermask_opening_multiple_segments",
+        ("mask_multi_segment",),
+        "covered",
+        False,
+        "`mask_multi_segment` (#8847) warns on every opening whose geometry is more "
+        "than one disjoint piece; same default-on saved-source snapshot as "
+        "`mask_negative_expansion`. The recorded 21 warnings were not re-measured.",
+    ),
     ParityRow(
         "unconnected_trace_end",
         ("dangling_copper",),
@@ -108,8 +154,20 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         False,
         "parity with the observed 5 warnings.",
     ),
-    ParityRow("sharp_trace_corner", (), "not_covered", False, "no rule."),
-    ParityRow("missing_plated_through_hole", (), "not_covered", False, "no rule."),
+    ParityRow(
+        "sharp_trace_corner",
+        (),
+        "not_covered",
+        False,
+        "no rule; `sharp_trace_corner` is in flight on #8840. Observed 3 warnings.",
+    ),
+    ParityRow(
+        "missing_plated_through_hole",
+        (),
+        "not_covered",
+        False,
+        "no rule; `missing_plated_hole` is in flight on #8840. Observed 2 warnings.",
+    ),
     ParityRow(
         "silkscreen_line_width",
         ("silkscreen",),
