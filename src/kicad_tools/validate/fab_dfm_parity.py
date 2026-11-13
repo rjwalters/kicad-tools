@@ -33,7 +33,7 @@ from typing import Literal
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Version of the table below; bump on any row change.
-TABLE_VERSION = 2
+TABLE_VERSION = 3
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -156,17 +156,21 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
     ),
     ParityRow(
         "sharp_trace_corner",
-        (),
-        "not_covered",
+        ("sharp_trace_corner",),
+        "covered",
         False,
-        "no rule; `sharp_trace_corner` is in flight on #8840. Observed 3 warnings.",
+        "`sharp_trace_corner` (#8840) reports all 3 observed vertices (pinned in its "
+        "tests). It is stricter than JLCDFM was observed to be: it also reports "
+        "branch junctions with an open wedge, which JLCDFM did not flag on that board.",
     ),
     ParityRow(
         "missing_plated_through_hole",
-        (),
-        "not_covered",
+        ("missing_plated_hole",),
+        "partial",
         False,
-        "no rule; `missing_plated_hole` is in flight on #8840. Observed 2 warnings.",
+        "`missing_plated_hole` (#8840) flags same-net top/bottom SMD pads whose "
+        "centres coincide (0.05 mm); overlapping pads with offset centres are not "
+        "checked. The observed 2 warnings were not re-measured.",
     ),
     ParityRow(
         "silkscreen_line_width",
