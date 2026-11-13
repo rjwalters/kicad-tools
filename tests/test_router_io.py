@@ -4692,7 +4692,7 @@ class TestExtractBoardDimensionsGrLine:
 
 # Two pads on net DIFF_P.  The auto-classifier assigns that name the built-in
 # ``Differential`` class, whose library-default ``trace_width`` is 0.15mm --
-# BELOW jlcpcb's 0.1524mm floor at 2oz copper, and the exact 0.150mm emission
+# BELOW jlcpcb's 0.16mm floor at 2oz copper, and the exact 0.150mm emission
 # the reporter measured 63 times.  Placed well inboard of a 20x20 outline so a
 # single straight segment routes deterministically in well under a second.
 _PARITY_PCB_TWO_PADS = """  (footprint "Resistor_SMD:R_0805"
@@ -4762,7 +4762,7 @@ class TestRouteCheckTraceWidthParity:
     tooling bug by construction.  ``route`` used to floor at the
     layer/copper-agnostic ``MfrLimits.min_trace`` (jlcpcb 0.127mm) while
     ``check`` enforces the per-``<layers>layer_<oz>oz`` ``min_trace_width_mm``
-    (0.1524mm at 2oz), so route emitted copper its own check rejected.
+    (0.16mm at 2oz), so route emitted copper its own check rejected.
     """
 
     def test_routed_copper_passes_the_matching_check(self, tmp_path):
@@ -4780,7 +4780,7 @@ class TestRouteCheckTraceWidthParity:
         assert segments, "fixture must actually emit copper for this to mean anything"
 
         floor = resolve_min_trace_width("jlcpcb", 2, 2.0)
-        assert floor == pytest.approx(0.1524)
+        assert floor == pytest.approx(0.16)
         assert min(seg.width for seg in segments) >= floor
         assert _trace_width_violations(out_file) == []
 
@@ -4828,14 +4828,14 @@ class TestRouteCheckTraceWidthParity:
         violations = _trace_width_violations(out_file)
         assert violations, "the naive floor must reproduce the reported failure"
         assert violations[0].actual_value == pytest.approx(0.15)
-        assert violations[0].required_value == pytest.approx(0.1524)
+        assert violations[0].required_value == pytest.approx(0.16)
 
     def test_sub_floor_width_is_warned_about_at_route_time(self, tmp_path, capsys):
         """An explicit sub-floor width is announced, not silently emitted."""
         _route_for_parity(tmp_path, extra_argv=("--trace-width", "0.15"), name="warned")
         err = capsys.readouterr().err
         assert "WARNING" in err
-        assert "0.1524" in err
+        assert "0.16" in err
         assert "dimension_trace_width" in err
 
     def test_no_manufacturer_floor_keeps_library_widths(self, tmp_path):
@@ -4854,9 +4854,9 @@ class TestRouteCheckTraceWidthParity:
             str(_write_parity_pcb(tmp_path, name="clamped")),
             rules=DesignRules(grid_resolution=0.25, manufacturer="jlcpcb"),
             validate_drc=False,
-            min_trace_width_floor=0.1524,
+            min_trace_width_floor=0.16,
         )
-        assert router.net_class_map["DIFF_P"].trace_width == pytest.approx(0.1524)
+        assert router.net_class_map["DIFF_P"].trace_width == pytest.approx(0.16)
         # Classes already above the floor are untouched (no widening).
         assert router.net_class_map["GND"].trace_width == pytest.approx(0.5)
 

@@ -98,9 +98,9 @@ class TestGetDesignRules:
         assert clearance == 0.2  # Default fallback
 
     def test_jlcpcb_2layer_2oz_clearance(self):
-        """JLCPCB 2-layer 2oz uses 6mil (0.1524mm) clearance."""
+        """JLCPCB 2-layer 2oz uses 0.16mm (JLCPCB-published 2oz 2-layer floor) clearance."""
         drill, diameter, annular, clearance = get_design_rules("jlcpcb", 2, 2.0, None, None)
-        assert clearance == 0.1524
+        assert clearance == 0.16
 
     def test_jlcpcb_2layer_annular_ring_unchanged(self):
         """2-layer profiles still use 0.15mm annular ring (unchanged)."""
