@@ -1222,11 +1222,19 @@ def create_stm32_pcb(output_dir: Path) -> Path:
             ((3.61, 3.16), (3.61, 3.61)),
             ((3.61, 3.61), (3.16, 3.61)),
         ]
+        # The top-right bracket's horizontal arm crosses the drill of the
+        # via at (152.85, 85.8) (``silk_hole_overlap``, #8844; operator ruling
+        # on #8854: fix in the board source, no waiver).  It is dropped; its
+        # UUID is still consumed so no later item's UUID shifts.
+        silk_dropped = {((3.16, -3.61), (3.61, -3.61))}
         silk_lines = [
             f"    (fp_line (start {sx} {sy}) (end {ex} {ey})\n"
             f'      (stroke (width 0.15) (type solid)) (layer "F.SilkS") '
-            f'(uuid "{generate_uuid()}"))'
-            for (sx, sy), (ex, ey) in silk_corners
+            f'(uuid "{uid}"))'
+            for ((sx, sy), (ex, ey)), uid in (
+                (c, generate_uuid()) for c in silk_corners
+            )
+            if ((sx, sy), (ex, ey)) not in silk_dropped
         ]
         silk_lines.append(
             "    (fp_poly (pts (xy -4.25 -3.16) (xy -4.59 -3.63) (xy -3.91 -3.63))\n"
