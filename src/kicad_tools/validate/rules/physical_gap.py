@@ -580,7 +580,10 @@ def check_physical_copper_gap(
                 connector = LineString([a, b])
                 # The open connector must contain no copper from a third
                 # primitive; union provenance alone is not electrical isolation.
-                if connector.intersection(union).length > 1e-8:
+                # Clip against only the sources whose bbox touches the connector:
+                # intersecting the whole-layer union dominated runtime (#8843).
+                near = source_tree.query(connector)
+                if any(connector.intersection(local[int(k)].geometry).length > 1e-8 for k in near):
                     continue
                 owner_indices = [
                     [

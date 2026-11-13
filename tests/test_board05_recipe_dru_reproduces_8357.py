@@ -24,6 +24,8 @@ import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 from kicad_tools.cli import main as kct_main
 from kicad_tools.export.manufacturing import ManufacturingPackage, ManufacturingResult
 from kicad_tools.manufacturers.attach_zone_dru import has_attach_zone_block
@@ -80,6 +82,10 @@ def test_committed_dru_carries_the_attach_zone_block():
     assert has_attach_zone_block((OUTPUT / f"{STEM}.kicad_dru").read_text(encoding="utf-8"))
 
 
+# Default-on fab view (#8843) roughly doubles `kct check --mfr jlcpcb` on board 07
+# (~10 s -> ~21 s locally, measured); each subprocess run is deliberately given
+# headroom above the global 60 s cap on the 2-vCPU CI runner.
+@pytest.mark.timeout(180)
 def test_recipe_emits_the_committed_dru_byte_for_byte(tmp_path):
     committed = (OUTPUT / f"{STEM}.kicad_dru").read_text(encoding="utf-8")
     assert _recipe_dru(tmp_path) == committed, (

@@ -314,6 +314,10 @@ class TestNetClassMapResolver:
 # update_ci_extended.py from moving it to "Test (extended)" (Issue #6102).
 @pytest.mark.pr_required
 @pytest.mark.xdist_group("board07_kct_check_parity")
+# Default-on fab view (#8843) roughly doubles `kct check --mfr jlcpcb` on board 07
+# (~10 s -> ~21 s locally, measured); each subprocess run is deliberately given
+# headroom above the global 60 s cap on the 2-vCPU CI runner.
+@pytest.mark.timeout(180)
 class TestBoard07KctCheckParity:
     """End-to-end parity on board 07's committed routed PCB (Issue #3151).
 
@@ -419,6 +423,7 @@ class TestBoard07KctCheckParity:
 # Issue #6805: not `slow`, so the PR "Test" job runs it; `pr_required` keeps
 # update_ci_extended.py from moving it to "Test (extended)" (Issue #6102).
 @pytest.mark.pr_required
+@pytest.mark.timeout(180)
 class TestCiGateCountsGatedFamilies:
     """The strict CI gate now counts the gated families (Issue #3151 AC #1)."""
 
