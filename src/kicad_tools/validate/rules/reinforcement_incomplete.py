@@ -140,6 +140,24 @@ class _Leg:
         return self.cum[-1]
 
 
+@dataclass
+class _WirePlan:
+    """Declared-eligible paths split by how their wire is found (Issue #8886)."""
+
+    resolved: dict[str, list[PathResolution]] = field(default_factory=dict)
+    located: dict[str, dict[str, list[Segment]]] = field(default_factory=dict)
+    no_wire: list[PathResolution] = field(default_factory=list)
+    skipped: list[PathResolution] = field(default_factory=list)
+
+
+_FLOAT_RE = re.compile(r"-?\d+\.\d{4,}")
+
+
+def _round_floats(text: str) -> str:
+    """Round float literals with more than 3 decimals to 3 dp (witness coordinates)."""
+    return _FLOAT_RE.sub(lambda m: f"{float(m.group()):.3f}", text)
+
+
 class ReinforcementIncompleteRule(DRCRule):
     """DRC rule verifying that reinforced runs are buildable (Issue #8746).
 
@@ -196,33 +214,6 @@ class ReinforcementIncompleteRule(DRCRule):
         from kicad_tools.pcb import reinforce as rf
         from kicad_tools.router.current_paths import reinforcement_path_resolutions
 
-        partition = reinforcement_path_resolutions(pcb, self.specs)
-        eligible = partition.eligible
-        # Declared reinforcement-eligible paths that did not resolve produce no
-        # legs to check; say so instead of staying silent (Issue #8797).
-        for res in partition.unresolved:
-            if not res.spec.reinforcement_eligible:
-                continue
-            net = res.spec.net_name
-            results.add(
-                DRCViolation(
-                    rule_id=self.rule_id,
-                    severity="warning",
-                    message=(
-                        f"Reinforcement not checked [skipped] net {net!r}: current path "
-                        f"{res.spec.name!r} (declared reinforcement_eligible) is {res.status}"
-                        + (f" ({res.reason})" if res.reason else "")
-                        + "; its anchors and mask openings were not verified"
-                    ),
-                    location=(0.0, 0.0),
-                    layer="",
-                    items=(net, f"skipped@{res.spec.name}"),
-                    nets=(net,),
-                )
-            )
-        if not eligible:
-            return results
-
         origin: tuple[float, float] = getattr(pcb, "board_origin", None) or (0.0, 0.0)
         self._ox: float = origin[0]
         self._oy: float = origin[1]
@@ -230,13 +221,186 @@ class ReinforcementIncompleteRule(DRCRule):
             self.end_offset_mm if self.end_offset_mm is not None else rf.DEFAULT_END_OFFSET_MM
         )
 
-        by_net: dict[str, list[PathResolution]] = {}
-        for res in eligible:
-            by_net.setdefault(res.spec.net_name, []).append(res)
-
-        for net in sorted(by_net):
-            self._check_net(pcb, rf, net, by_net[net], end_offset, results)
+        plan = self._plan(pcb, rf, reinforcement_path_resolutions(pcb, self.specs))
+        for res in plan.no_wire:
+            self._emit_no_wire(results, pcb, res)
+        for res in plan.skipped:
+            self._emit_skipped(results, pcb, res)
+        for net in sorted(set(plan.resolved) | set(plan.located)):
+            self._check_net(
+                pcb,
+                rf,
+                net,
+                plan.resolved.get(net, []),
+                end_offset,
+                results,
+                located=plan.located.get(net),
+            )
         return results
+
+    # ------------------------------------------- wire location (Issue #8886)
+
+    def _plan(self, pcb: PCB, rf: Any, partition: Any) -> _WirePlan:
+        """Split declared-eligible paths into checkable and non-checkable.
+
+        A path that resolved ``ok`` is checked from its resolved segments, as
+        before. A declared-eligible path that did not resolve (ambiguous
+        parallel/loop copper, or no continuous path) cannot be located from
+        the current split, but the *wire* does not need one: it is where the
+        solder-mask strip and the anchor holes are. Such a path is located
+        from the board geometry (:meth:`_locate_wire`).
+        """
+        plan = _WirePlan()
+        for res in partition.eligible:
+            plan.resolved.setdefault(res.spec.net_name, []).append(res)
+        for res in partition.unresolved:
+            if not res.spec.reinforcement_eligible:
+                continue
+            net = res.spec.net_name
+            if net in plan.located:
+                continue
+            if res.source is None or res.sink is None:
+                # An endpoint pad is missing or moved off the net: the
+                # declaration itself is stale, so say so rather than check.
+                plan.skipped.append(res)
+                continue
+            taken = {id(s) for r in plan.resolved.get(net, []) for s in r.segments}
+            located, any_strip, any_anchor = self._locate_wire(pcb, rf, net, taken)
+            if located:
+                plan.located[net] = located
+            elif not any_strip and not any_anchor:
+                plan.no_wire.append(res)
+            else:
+                plan.skipped.append(res)
+        # A net located once covers every unresolved spec on it.
+        plan.skipped = [
+            r
+            for r in plan.skipped
+            if r.source is None or r.sink is None or r.spec.net_name not in plan.located
+        ]
+        plan.no_wire = [r for r in plan.no_wire if r.spec.net_name not in plan.located]
+        return plan
+
+    def _locate_wire(
+        self, pcb: PCB, rf: Any, net: str, taken: set[int]
+    ) -> tuple[dict[str, list[Segment]], bool, bool]:
+        """Locate the wire copper of ``net`` from its mask strips and anchors.
+
+        Returns ``(segments by layer, any mask strip on the net, any anchor
+        hole on the net)``. A same-net segment is wire copper when a mask-layer
+        ``gr_line`` of its side lies along it (within :data:`MASK_TOLERANCE_MM`,
+        overlapping it). Copper a resolved path already owns is excluded.
+        """
+        from kicad_tools.core.geometry import rotate_pad_offset
+        from kicad_tools.physics.wire_gauge import anchor_drill_for_awg
+
+        netobj = pcb.get_net_by_name(net)
+        if netobj is None:
+            return {}, False, False
+        net_number = netobj.number
+        mask_lines: dict[str, list[tuple[_Point, _Point]]] = {}
+        for g in pcb.graphic_lines:
+            if g.layer in ("F.Mask", "B.Mask"):
+                mask_lines.setdefault(g.layer, []).append(
+                    (
+                        (g.start[0] - self._ox, g.start[1] - self._oy),
+                        (g.end[0] - self._ox, g.end[1] - self._oy),
+                    )
+                )
+        located: dict[str, list[Segment]] = {}
+        any_strip = False
+        for seg in pcb.segments:
+            if seg.net_number != net_number or id(seg) in taken or rf._seg_length(seg) <= 1e-9:
+                continue
+            mask_layer = rf.MASK_LAYER_FOR_COPPER.get(seg.layer)
+            if mask_layer is None:
+                continue
+            if any(
+                self._strip_along(seg.start, seg.end, a, b)
+                for a, b in mask_lines.get(mask_layer, [])
+            ):
+                any_strip = True
+                located.setdefault(seg.layer, []).append(seg)
+        drill = anchor_drill_for_awg(self._gauge(net, "", [(0.0, 0.0), (0.0, 0.0)]))
+        holes = self._anchor_holes(pcb, net_number, rotate_pad_offset)
+        any_anchor = any(
+            abs(v.drill - drill) <= DRILL_TOLERANCE_MM for v, _ in holes["vias"]
+        ) or any(abs(p.drill - drill) <= DRILL_TOLERANCE_MM for p, _, _ in holes["pads"])
+        return located, any_strip, any_anchor
+
+    @staticmethod
+    def _strip_along(s0: _Point, s1: _Point, a: _Point, b: _Point) -> bool:
+        """True when strip ``a``-``b`` lies along segment ``s0``-``s1`` and overlaps it."""
+        length = math.dist(s0, s1)
+        if length <= 1e-9:
+            return False
+        ux, uy = (s1[0] - s0[0]) / length, (s1[1] - s0[1]) / length
+        lo: list[float] = []
+        for p in (a, b):
+            rx, ry = p[0] - s0[0], p[1] - s0[1]
+            if abs(rx * uy - ry * ux) > MASK_TOLERANCE_MM:
+                return False
+            lo.append(rx * ux + ry * uy)
+        t0, t1 = min(lo), max(lo)
+        return min(t1, length) - max(t0, 0.0) > MASK_TOLERANCE_MM
+
+    def _emit_no_wire(self, results: DRCResults, pcb: PCB, res: PathResolution) -> None:
+        net = res.spec.net_name
+        where = self._on_path(pcb, res)
+        results.add(
+            DRCViolation(
+                rule_id=self.rule_id,
+                severity=self._severity(net),
+                message=(
+                    f"Reinforcement incomplete [no_wire] net {net!r}: current path "
+                    f"{res.spec.name!r} is declared reinforcement_eligible but no wire is "
+                    "present (no anchor holes and no solder-mask opening on the net); "
+                    "remove the declaration if this is intentionally doubled copper"
+                ),
+                location=where,
+                layer="",
+                items=(net, f"no_wire@{res.spec.name}"),
+                nets=(net,),
+            )
+        )
+
+    def _emit_skipped(self, results: DRCResults, pcb: PCB, res: PathResolution) -> None:
+        net = res.spec.net_name
+        reason = _round_floats(res.reason)
+        results.add(
+            DRCViolation(
+                rule_id=self.rule_id,
+                severity="warning",
+                message=(
+                    f"Reinforcement not checked [skipped] net {net!r}: current path "
+                    f"{res.spec.name!r} (declared reinforcement_eligible) is {res.status}"
+                    + (f" ({reason})" if reason else "")
+                    + "; its anchors and mask openings were not verified"
+                ),
+                location=self._on_path(pcb, res),
+                layer="",
+                items=(net, f"skipped@{res.spec.name}"),
+                nets=(net,),
+            )
+        )
+
+    def _on_path(self, pcb: PCB, res: PathResolution) -> _Point:
+        """A point on the path in sheet coordinates, rounded to 3 dp.
+
+        The resolved source/sink pad when there is one, else the start of the
+        net's first routed segment; the board origin only for a net with no copper.
+        """
+        end = res.source or res.sink
+        if end is not None:
+            pt: _Point = end.position
+        else:
+            net = pcb.get_net_by_name(res.spec.net_name)
+            seg = next((sg for sg in pcb.segments if net and sg.net_number == net.number), None)
+            if seg is None:
+                return (0.0, 0.0)
+            pt = seg.start
+        x, y = self._abs(pt)
+        return (round(x, 3), round(y, 3))
 
     # ------------------------------------------------------------- per net
 
@@ -336,6 +500,7 @@ class ReinforcementIncompleteRule(DRCRule):
         resolutions: list[PathResolution],
         end_offset: float,
         results: DRCResults,
+        located: dict[str, list[Segment]] | None = None,
     ) -> None:
         from kicad_tools.core.geometry import rotate_pad_offset
         from kicad_tools.physics.wire_gauge import anchor_drill_for_awg
@@ -345,6 +510,10 @@ class ReinforcementIncompleteRule(DRCRule):
         # --- eligible copper, by layer (deduplicated across specs) ---------
         seen: set[int] = set()
         by_layer: dict[str, list[Segment]] = {}
+        for layer, segs in (located or {}).items():
+            for seg in segs:
+                seen.add(id(seg))
+                by_layer.setdefault(layer, []).append(seg)
         for res in resolutions:
             for seg in res.segments:
                 if id(seg) in seen or rf._seg_length(seg) <= 1e-9:

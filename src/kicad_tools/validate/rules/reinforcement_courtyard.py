@@ -171,24 +171,30 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
         from kicad_tools.pcb import reinforce as rf
         from kicad_tools.router.current_paths import reinforcement_path_resolutions
 
-        eligible = reinforcement_path_resolutions(pcb, self.specs).eligible
-        if not eligible:
-            return results
-
         origin = getattr(pcb, "board_origin", None) or (0.0, 0.0)
         self._ox, self._oy = origin[0], origin[1]
 
-        by_net: dict[str, list] = {}
-        for res in eligible:
-            by_net.setdefault(res.spec.net_name, []).append(res)
-        for net in sorted(by_net):
-            self._check_net_bodies(pcb, rf, net, by_net[net], results)
+        # Same wire location as reinforcement_incomplete (Issue #8886): resolved
+        # paths from their segments, ambiguous/unresolved declared-eligible ones
+        # from the mask strip and anchor holes. "No wire" / unlocatable paths
+        # are reported by that rule, not here.
+        plan = self._plan(pcb, rf, reinforcement_path_resolutions(pcb, self.specs))
+        for net in sorted(set(plan.resolved) | set(plan.located)):
+            self._check_net_bodies(
+                pcb, rf, net, plan.resolved.get(net, []), results, located=plan.located.get(net)
+            )
         return results
 
     # ------------------------------------------------------------- per net
 
     def _check_net_bodies(
-        self, pcb: PCB, rf: Any, net: str, resolutions: list, results: DRCResults
+        self,
+        pcb: PCB,
+        rf: Any,
+        net: str,
+        resolutions: list,
+        results: DRCResults,
+        located: dict[str, list] | None = None,
     ) -> None:
         from shapely.geometry import LineString, Point, Polygon, box
 
@@ -197,6 +203,10 @@ class ReinforcementCourtyardRule(ReinforcementIncompleteRule):
 
         seen: set[int] = set()
         by_layer: dict[str, list] = {}
+        for layer, segs in (located or {}).items():
+            for seg in segs:
+                seen.add(id(seg))
+                by_layer.setdefault(layer, []).append(seg)
         for res in resolutions:
             for seg in res.segments:
                 if id(seg) in seen or rf._seg_length(seg) <= 1e-9:

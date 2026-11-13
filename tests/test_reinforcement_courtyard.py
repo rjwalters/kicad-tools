@@ -277,3 +277,15 @@ def test_doubled_copper_routed_around_body_is_clean():
     # Body sits on the chord between the ends, inside the detour.
     _body(pcb, "R1", 70.0, 50.0, half=3.0)
     assert not [v for v in _run(pcb) if "[run]" in v.message and "R1" in v.message]
+
+
+def test_ambiguous_net_wire_across_a_courtyard_is_reported():
+    """Issue #8886: a wire on a net with a loop-closing tap is still checked."""
+    from tests.test_reinforcement_incomplete import _ambiguous_wire_board, _resolution_status
+
+    pcb = _ambiguous_wire_board()
+    assert _resolution_status(pcb) == "ambiguous"
+    assert not list(_run(pcb))
+    _body(pcb, "R1", 80.0, 50.0, side="B")
+    runs = [v for v in _run(pcb) if "[run]" in v.message]
+    assert runs and "R1" in runs[0].message
