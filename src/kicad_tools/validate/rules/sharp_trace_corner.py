@@ -11,6 +11,18 @@ Threshold: :data:`~kicad_tools.explain.checks.acid_trap.MIN_TRACE_ANGLE_DEG`
 traced against a JLCDFM report or a fab capability page (retrieved
 2026-11-12: none consulted); it is the repo's existing acid-trap limit.
 
+Calibration (issue #8840, field data from the board behind epic #8838): JLC's
+DFM tool flagged three vertices, all two-segment 45 deg fold-backs on 0.2/0.3 mm
+tracks away from pads and vias.  The rule reports all three (pinned in
+``tests/test_validate_sharp_trace_corner.py``).  On that board JLC flagged none
+of the 95 joints that were branch points, at vias or inside pads; vertices
+under same-net pad/via copper are skipped here for that reason, and because
+there is no open wedge in the copper.  Branch junctions with an open wedge are
+still reported (operator ruling on PR #8848, 2026-11-12): this is stricter than
+the observed fab behaviour, not looser.  Eight unflagged two-segment bends on
+that board look like the flagged three; they are unknown, not negatives, so
+they were not used to narrow the rule.  The angle threshold was not changed.
+
 Rule ID generated:
     - sharp_trace_corner: two same-net, same-layer segments meet at an angle
       below the limit, away from same-net pad/via copper on that layer.
@@ -89,8 +101,8 @@ def _far_end(seg, junction: tuple[float, float]) -> tuple[float, float]:
         abs(seg.start[0] - junction[0]) < _JUNCTION_TOL
         and abs(seg.start[1] - junction[1]) < _JUNCTION_TOL
     ):
-        return seg.end
-    return seg.start
+        return (float(seg.end[0]), float(seg.end[1]))
+    return (float(seg.start[0]), float(seg.start[1]))
 
 
 def _point_segment_dist(p, a, b) -> float:

@@ -126,3 +126,38 @@ def test_stacked_duplicate_segments_reported_once(tmp_path):
         _seg((10, 0), (0, 3)),
     )
     assert len(v) == 1
+
+
+# The three vertices JLC's DFM tool flagged as "Sharp trace corner" on the
+# consumer board behind epic #8838, posted on issue #8840 relative to the
+# vertex: (width1, length1, heading1, width2, length2, heading2, layer).
+# Headings are degrees in KiCad axes, pointing away from the vertex.  These
+# are known fab positives, so the rule must report every one of them.  The
+# eight unflagged look-alikes on that board are deliberately NOT encoded as
+# negatives: the issue records them as unknown, not as clean.
+JLC_FLAGGED_VERTICES = [
+    (0.20, 0.40, 90, 0.20, 0.57, 45, "F.Cu"),
+    (0.20, 0.80, -90, 0.30, 1.41, -135, "F.Cu"),
+    (0.30, 2.20, -90, 0.20, 1.70, -135, "B.Cu"),
+]
+
+
+@pytest.mark.parametrize("vertex", JLC_FLAGGED_VERTICES)
+def test_jlc_flagged_fold_backs_are_reported(tmp_path, vertex):
+    import math
+
+    w1, l1, h1, w2, l2, h2, layer = vertex
+    o = (20.0, 20.0)
+
+    def far(length, heading):
+        r = math.radians(heading)
+        return (round(o[0] + length * math.cos(r), 4), round(o[1] + length * math.sin(r), 4))
+
+    v = _check(
+        tmp_path,
+        _wseg(far(l1, h1), o, w1, layer=layer),
+        _wseg(o, far(l2, h2), w2, layer=layer),
+    )
+    assert len(v) == 1
+    assert v[0].layer == layer
+    assert v[0].actual_value == pytest.approx(45.0, abs=0.5)
