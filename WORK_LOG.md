@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-13
 
+- **PR #8894**: feat(parts): add 'kct parts stock' for Mouser and DigiKey lookups
+- **Issue #8892** (closed): parts: live stock, price breaks and lead time from the DigiKey and Mouser product-search APIs
 - **PR #8890**: test: guard rule message coordinates against board-relative origin
 - **PR #8889**: perf(validate): batch same-polarity Gerber shapes into one unary_union
 - **PR #8887**: fix: locate reinforcement wire from mask strip and anchors on doubled-copper nets
