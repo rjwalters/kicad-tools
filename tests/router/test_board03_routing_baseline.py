@@ -193,6 +193,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._board03_check_cost import board03_check_timeout
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BOARD_DIR = REPO_ROOT / "boards" / "03-usb-joystick"
 UNROUTED_PCB = BOARD_DIR / "regression-fixture" / "usb_joystick.kicad_pcb"
@@ -309,6 +311,21 @@ EXPECTED_COMMITTED_DRC_RULES = {
     # flags short-jog staircases on the committed routing; tool-side rule
     # addition, not a board regression.
     "redundant_copper_staircase",
+    # Issue #8532 (commit d7bf1fe0b, 2026-11-07), surfaced here by #8901: the
+    # new ``fiducials_missing`` and ``board_id_missing`` rules each report 1
+    # WARNING on the committed routing.  Verified on the artifact itself --
+    # it carries zero fiducial footprints and no board-ID / revision silk
+    # text, and no commit in the window changed the artifact -- so these are
+    # the new rules reporting a pre-existing absence, not a board regression;
+    # the 0-error ceiling (MAX_COMMITTED_DRC_ERRORS) is unchanged, and ``kct
+    # readiness --generate`` is the documented way to add both.  Whether this
+    # board SHOULD carry fiducials and a board ID is a separate question,
+    # deliberately not settled here (the rules are warning-only).  They were
+    # invisible until #8901 gave this test timeout headroom: before that it
+    # died on the global 60 s cap in ``Test (extended)`` and never reached
+    # this assertion.
+    "fiducials_missing",
+    "board_id_missing",
     # Issue #8435 (PR #8444) / #8503: the new advisory ``pour_slot`` rule flags
     # parallel different-net tracks too close for the zone fill between them
     # (39 distinct pairs on the committed routing once duplicate segment copies
@@ -867,6 +884,7 @@ def test_routing_reach_deterministic_across_seeds(unrouted_pcb_path: Path, tmp_p
 BOARD03_KNOWN_NETCLASS_VIOLATIONS = 0
 
 
+@board03_check_timeout  # Issue #8901
 def test_committed_pcb_drc_state() -> None:
     """The shipped routed PCB does not silently degrade past its June 7 ceiling.
 

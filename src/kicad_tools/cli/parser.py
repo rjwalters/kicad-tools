@@ -644,10 +644,16 @@ def _add_bom_parser(subparsers) -> None:
     bom_parser.add_argument(
         "--sort", choices=["reference", "value", "footprint"], default="reference"
     )
-    # Issue #8893: these three must exist on BOTH parsers -- a flag added only to
-    # bom_cmd's inner parser never reaches it through `kct bom` (the #3159 drift
-    # trap); `kct bom ... --check-distributor-stock` exited 2 as an argparse
-    # error, which is also this feature's "lines flagged" code.
+    # Issue #8907 / #8893: these five are declared by the inner parser
+    # (cli/bom_cmd.py) and must be declared here too -- an inner flag the
+    # outer parser does not know is rejected before dispatch (the #3159 /
+    # #4691 drift trap). Keep types, defaults and help text in sync with
+    # bom_cmd.py, and forward each from the `bom` dispatch block.
+    bom_parser.add_argument(
+        "--check-availability",
+        action="store_true",
+        help="Check stock availability from LCSC/JLCPCB",
+    )
     bom_parser.add_argument(
         "--check-distributor-stock",
         action="store_true",
@@ -659,13 +665,21 @@ def _add_bom_parser(subparsers) -> None:
     bom_parser.add_argument(
         "--no-cache",
         action="store_true",
-        help=("With --check-distributor-stock, bypass the parts cache and fetch live"),
+        help=(
+            "With --check-availability/--check-distributor-stock, bypass the parts cache "
+            "and fetch live"
+        ),
+    )
+    bom_parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Validate BOM against JLCPCB/LCSC parts library for assembly",
     )
     bom_parser.add_argument(
         "--quantity",
         type=int,
         default=1,
-        help="Number of boards (for the distributor stock check)",
+        help="Number of boards (for availability check or validation)",
     )
 
 

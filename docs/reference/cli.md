@@ -676,12 +676,18 @@ kct bom <schematic> [options]
 | `--include-dnp` | Include DNP (Do Not Place) parts |
 | `--sort {reference,value,footprint}` | Sort order |
 | `--output`, `-o` | Output file |
+| `--check-availability` | Check stock availability from LCSC/JLCPCB |
+| `--no-cache` | With `--check-availability`, bypass the parts cache and fetch live |
+| `--validate` | Validate BOM against the JLCPCB/LCSC parts library for assembly |
+| `--quantity N` | Number of boards (for availability check or validation; default: 1) |
 
 **Examples:**
 ```bash
 kct bom project.kicad_sch
 kct bom project.kicad_sch --format csv --group -o bom.csv
 kct bom project.kicad_sch --exclude "TP*" --exclude "H*"
+kct bom project.kicad_sch --check-availability --quantity 5
+kct bom project.kicad_sch --validate
 ```
 
 ---
