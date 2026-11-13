@@ -2,7 +2,7 @@
 
 Prioritized roadmap generated from current GitHub label state. Maintained by the Guide triage agent.
 
-*Last updated: 2026-11-05*
+*Last updated: 2026-11-13*
 
 ---
 
@@ -35,14 +35,16 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#8821**: pcb reinforce: avoid same-side courtyards when planning wire runs (split from #8820)
-- **#8831**: Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free
+- **#8840**: Sharp trace corner and missing plated through-hole rules; fiducial parity check
+- **#8844**: Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width
+- **#8892**: parts: live stock, price breaks and lead time from the DigiKey and Mouser product-search APIs
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8829**: feat: reinforce refuses runs under same-side courtyards
+- **#8848**: feat(check): add sharp_trace_corner and missing_plated_hole rules
+- **#8894**: feat(parts): add 'kct parts stock' for Mouser and DigiKey lookups
 
 ## Approved (Awaiting Merge)
 
@@ -66,8 +68,10 @@ Issues carrying `loom:curated`.
 - **#8610**: route --complete chain pass commits ~282 shorts against Net 0 copper on dense mains board (rc 4) *(curated)*
 - **#8620**: Find the real cause of the 10-12x pure-Python routing slowdown with all extras on macOS *(curated)*
 - **#8629**: submit-jlcpcb --website: SELECTORS are placeholders that match nothing on the live quote page; CDP attach fails on a Chrome with no open tabs *(curated)*
-- **#8821**: pcb reinforce: avoid same-side courtyards when planning wire runs (split from #8820) *(curated)*
-- **#8831**: Trace quality: staircase of short jogs on a wide trace is not flagged or optimized when a straight diagonal is free *(curated)*
+- **#8840**: Sharp trace corner and missing plated through-hole rules; fiducial parity check *(curated)*
+- **#8844**: Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width *(curated)*
+- **#8858**: Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849) *(curated)*
+- **#8892**: parts: live stock, price breaks and lead time from the DigiKey and Mouser product-search APIs *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -78,6 +82,7 @@ _None._
 - **#4431**: route: per-net scalar clearance cannot express HV isolation — need class-pair (net-class × net-class) clearance rules in the router; both workarounds proven inadequate on a mains board
 - **#5509**: Epic: one clearance kernel — search, commit, and final validation must agree with kicad-cli DRC
 - **#5952**: Epic: Harness-neutral kicad-tools (Claude Code, Codex CLI, opencode)
+- **#8838**: Epic: fab DFM parity - a board that passes kct check --mfr jlcpcb must pass JLCPCB's DFM tool
 
 ## Backlog Balance
 
@@ -87,12 +92,12 @@ _None._
 | Very important | 0 |
 | Important | 1 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 1 |
+| In Progress (`loom:building`) | 3 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 1 |
-| Curated | 14 |
+| Curated | 16 |
 | Architect / Hermit proposals | 0 |
-| Active epics | 3 |
+| Active epics | 4 |
 <!-- guide:plan-body:end -->
 
 ## Release History (static archive)
