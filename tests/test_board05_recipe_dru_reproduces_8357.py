@@ -82,9 +82,10 @@ def test_committed_dru_carries_the_attach_zone_block():
     assert has_attach_zone_block((OUTPUT / f"{STEM}.kicad_dru").read_text(encoding="utf-8"))
 
 
-# Default-on fab view (#8843) roughly doubles `kct check --mfr jlcpcb` on board 07
-# (~10 s -> ~21 s locally, measured); each subprocess run is deliberately given
-# headroom above the global 60 s cap on the 2-vCPU CI runner.
+# Default-on fab view (#8843) makes `kct check --mfr jlcpcb` on this dense board
+# several times slower (~8 s on main -> ~40 s, measured on an 8-core host, one
+# run). The global 60 s cap is too tight for the 2-vCPU CI runner, so this gets
+# explicit headroom; follow-up profiling should cut the cost further.
 @pytest.mark.timeout(180)
 def test_recipe_emits_the_committed_dru_byte_for_byte(tmp_path):
     committed = (OUTPUT / f"{STEM}.kicad_dru").read_text(encoding="utf-8")

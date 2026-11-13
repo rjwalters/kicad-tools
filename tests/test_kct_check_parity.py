@@ -314,9 +314,11 @@ class TestNetClassMapResolver:
 # update_ci_extended.py from moving it to "Test (extended)" (Issue #6102).
 @pytest.mark.pr_required
 @pytest.mark.xdist_group("board07_kct_check_parity")
-# Default-on fab view (#8843) roughly doubles `kct check --mfr jlcpcb` on board 07
-# (~10 s -> ~21 s locally, measured); each subprocess run is deliberately given
-# headroom above the global 60 s cap on the 2-vCPU CI runner.
+# Default-on fab view (#8843) makes `kct check --mfr jlcpcb` several times slower
+# than before on dense boards (board 07: ~12-17 s per run; the board-05 recipe
+# below: ~8 s on main -> ~40 s, measured on an 8-core host, one run each). The
+# global 60 s cap is too tight for the 2-vCPU CI runner, so these are given
+# explicit headroom; the cost is not hidden, follow-up profiling should cut it.
 @pytest.mark.timeout(180)
 class TestBoard07KctCheckParity:
     """End-to-end parity on board 07's committed routed PCB (Issue #3151).

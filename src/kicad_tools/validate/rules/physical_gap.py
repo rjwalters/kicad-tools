@@ -38,6 +38,9 @@ from .clearance import _pad_on_layer, _pad_polygon, _repair_fill_polygon
 
 # Polygon approximation and comparison tolerance, in millimetres.
 TOLERANCE = 0.001
+# Per-end shave of a gap connector for the cheap copper-crossing prefilter; twice
+# this stays within the 1e-8 mm overlap threshold, so results are unchanged.
+_CONNECTOR_SHAVE_MM = 4e-9
 
 # Fab-view thresholds applied by default under ``--mfr jlcpcb`` (Issue #8843).
 # Source: JLCDFM observations recorded in epic #8838 (2026-11-12) -- observed
@@ -515,6 +518,8 @@ def check_physical_copper_gap(
     Facing-edge screening excludes local corners. This is a slit detector,
     not a guarantee about acute notches, etching chemistry or stale zone fills.
     """
+    import numpy as np
+    import shapely  # type: ignore[import-untyped]
     from shapely import STRtree, union_all
     from shapely.geometry import LineString
     from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
@@ -554,6 +559,9 @@ def check_physical_copper_gap(
                     normals.append((dy / length, -dx / length))  # outward into air
         tree = STRtree(edges)
         source_tree = STRtree([s.geometry for s in local])
+        prepared = np.asarray([s.geometry for s in local], dtype=object)
+        shapely.prepare(prepared)
+        boundaries = [s.geometry.boundary for s in local]
         findings: dict[tuple[tuple[str, ...], tuple[str, ...]], DRCViolation] = {}
         # One vectorised bulk query + numpy normal screen replaces ~one STRtree
         # query and a Python dot product per edge (Issue #8843: this pass is
@@ -580,16 +588,34 @@ def check_physical_copper_gap(
                 connector = LineString([a, b])
                 # The open connector must contain no copper from a third
                 # primitive; union provenance alone is not electrical isolation.
-                # Clip against only the sources whose bbox touches the connector:
-                # intersecting the whole-layer union dominated runtime (#8843).
+                # Clip against only the sources whose bbox touches the connector
+                # (intersecting the whole-layer union dominated runtime, #8843).
                 near = source_tree.query(connector)
-                if any(connector.intersection(local[int(k)].geometry).length > 1e-8 for k in near):
-                    continue
+                if near.size:
+                    # Cheap exact prefilter: shave 4e-9 mm off each end. If the
+                    # shaved line misses a source (indexed, prepared test), its
+                    # overlap is confined to the two shaved ends, <= 1e-8 mm, so
+                    # the ``> 1e-8`` test below could not fire for it either.
+                    # Only sources the shaved line touches pay for the exact
+                    # intersection.
+                    ux, uy = (b.x - a.x) / distance, (b.y - a.y) / distance
+                    shaved_line = LineString(
+                        [
+                            (a.x + ux * _CONNECTOR_SHAVE_MM, a.y + uy * _CONNECTOR_SHAVE_MM),
+                            (b.x - ux * _CONNECTOR_SHAVE_MM, b.y - uy * _CONNECTOR_SHAVE_MM),
+                        ]
+                    )
+                    touched = near[shapely.intersects(prepared[near], shaved_line)]
+                    if any(
+                        connector.intersection(local[int(k)].geometry).length > 1e-8
+                        for k in touched
+                    ):
+                        continue
                 owner_indices = [
                     [
                         int(k)
                         for k in source_tree.query(point, predicate="dwithin", distance=TOLERANCE)
-                        if local[int(k)].geometry.boundary.distance(point) <= TOLERANCE
+                        if boundaries[int(k)].distance(point) <= TOLERANCE
                     ]
                     for point in (a, b)
                 ]
@@ -605,17 +631,10 @@ def check_physical_copper_gap(
                     for right in owner_indices[1]
                 ):
                     continue
-                owners = []
-                for point in (a, b):
-                    owners.append(
-                        sorted(
-                            (local[int(k)].identity, local[int(k)].net)
-                            for k in source_tree.query(
-                                point, predicate="dwithin", distance=TOLERANCE
-                            )
-                            if local[int(k)].geometry.boundary.distance(point) <= TOLERANCE
-                        )
-                    )
+                owners = [
+                    sorted((local[k].identity, local[k].net) for k in side)
+                    for side in owner_indices
+                ]
                 ids = tuple(sorted({identity for side in owners for identity, _ in side}))
                 nets = tuple(sorted({net for side in owners for _, net in side}))
                 key = ids, nets
