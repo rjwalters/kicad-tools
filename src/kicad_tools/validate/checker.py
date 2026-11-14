@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.filters import ViolationFilter
-    from kicad_tools.validate.mask_copper import MaskCopperRequest
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment, MaskCopperRequest
     from kicad_tools.validate.rules.courtyard_waivers import CourtyardWaivers
 
 
@@ -284,6 +284,11 @@ class DRCChecker:
         # Issue #7206 (F3): declared nets whose copper pour could not be
         # rated by ``check_ampacity`` -- ``{net: reason}`` for coverage.
         self.ampacity_unmeasured_nets: dict[str, str] = {}
+        # Issue #8924: set by :meth:`check_mask_to_copper`; read by ``kct
+        # check`` coverage so the ``mask_to_copper`` row can report the
+        # assessment's own ``coverage`` instead of an unconditional
+        # ``checked``.  ``None`` until the check runs.
+        self.mask_copper_assessment: MaskCopperAssessment | None = None
         # Issue #6044: ``routing_policy`` options.  ``require_routing_policy``
         # makes a sensitive net class with no declared policy an error
         # (``kct check --require-routing-policy``).  With
@@ -1728,6 +1733,13 @@ class DRCChecker:
                         assessment.reasons.append("Source changed after checker object validation")
         except (OSError, ValueError) as exc:
             assessment = MaskCopperAssessment(coverage="incomplete", reasons=[str(exc)])
+        # Issue #8924: the assessment's own ``coverage`` is only knowable after
+        # the run, and ``assessment_results`` flattens it into findings.  Stash
+        # it so ``kct check``'s coverage loop can downgrade the row (the same
+        # post-hoc pattern as ``impedance_unmeasured_pairs`` / #7293 and
+        # ``ampacity_unmeasured_nets`` / #7206 F3).  Every path above assigns
+        # ``assessment``, so this is never stale when the method ran.
+        self.mask_copper_assessment = assessment
         return assessment_results(assessment)
 
     def check_solder_mask_pads(self) -> DRCResults:

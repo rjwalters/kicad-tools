@@ -30,6 +30,7 @@ unchanged: coverage is reported, and sign-off decides.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -136,6 +137,38 @@ def ampacity_pour_unknown(unmeasured: dict[str, str]) -> Coverage:
     """
     detail = "; ".join(f"{net}: {why}" for net, why in sorted(unmeasured.items()))
     return unknown("ampacity", f"pour not measurable ({detail})")
+
+
+def mask_copper_unknown(coverage: str, reasons: Sequence[str], *, limit: int = 3) -> Coverage:
+    """``mask_to_copper`` coverage when the assessment could not evaluate the board.
+
+    ``MaskCopperAssessment.coverage`` is the assessment's own verdict on
+    whether it saw the whole board: ``complete``, ``incomplete`` (it ran but
+    could not evaluate -- an unsupported native rule context, an unqualified
+    KiCad plot profile, unusable region geometry) or ``not_run`` (requested
+    via ``--only`` with no process policy, so it never evaluated anything).
+    Anything but ``complete`` means zero findings is **not** a pass, so the
+    row is ``unknown`` rather than ``checked`` (Issue #8924).
+
+    Keyed on ``coverage`` alone, never on ``MaskCopperAssessment.passed``:
+    ``passed`` is strictly stronger -- it also requires empty ``reasons``, a
+    policy and binding, and no ``violation``/``uncertain`` measurement.  A
+    board whose mask check ran fine and *found real violations* is a
+    ``checked`` row carrying error findings; reporting ``unknown`` there would
+    invert the row's meaning.  ``summarize_verdict`` keys on ``passed``, which
+    is correct for a *verdict* but not for this row.
+
+    The reason detail is de-duplicated (first-occurrence order) and truncated:
+    the live incomplete case carries 19 reason strings, 13 of them the same
+    ``"F.Mask: unattributed native mask region"`` line, and this string lands
+    verbatim in every committed report.
+    """
+    distinct = list(dict.fromkeys(reason for reason in reasons if reason))
+    shown = distinct[:limit]
+    detail = "; ".join(shown) if shown else "no reason reported"
+    if len(distinct) > len(shown):
+        detail += f" (+{len(distinct) - len(shown)} more)"
+    return unknown("mask_to_copper", f"assessment {coverage} ({detail})")
 
 
 def _unfilled_pour_zones(checker: DRCChecker) -> int:

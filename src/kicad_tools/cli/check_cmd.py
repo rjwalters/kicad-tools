@@ -3794,6 +3794,22 @@ def run_selected_checks(
         pour_unmeasured = getattr(checker, "ampacity_unmeasured_nets", None)
         if category == "ampacity" and pour_unmeasured and pre is None:
             cov_map[category] = cov.ampacity_pour_unknown(pour_unmeasured)
+        # Issue #8924: the mask assessment's own ``coverage`` is only knowable
+        # after the run, and the row defaulted to ``checked`` for an assessment
+        # the same report showed as ``incomplete``.  ``not_run`` is mapped
+        # explicitly rather than left to fall through: a *requested* check that
+        # never ran is not a pass either.  Keyed on ``coverage``, never on
+        # ``passed`` -- see ``cov.mask_copper_unknown``.
+        mask_assessment = getattr(checker, "mask_copper_assessment", None)
+        if (
+            category == "mask_to_copper"
+            and pre is None
+            and mask_assessment is not None
+            and mask_assessment.coverage != "complete"
+        ):
+            cov_map[category] = cov.mask_copper_unknown(
+                mask_assessment.coverage, mask_assessment.reasons
+            )
         # Issue #7743: a footprint whose models resolve only through a host
         # library variable was not judged by a host-independent report, so the
         # category is ``unknown`` -- on every host, so evidence bytes never
