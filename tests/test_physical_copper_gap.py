@@ -665,6 +665,87 @@ def test_mask_bridge_unknown_weight_fails_closed():
     assert not check_pad_mask_bridge(pcb, 1.0).violations  # known, not 2 oz: not judged here
 
 
+def board4(*items):
+    """A 4-layer stackup; ``board()`` above declares F.Cu/B.Cu only."""
+    return PCB(
+        parse_string(
+            """(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6))
+      (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal)
+              (31 "B.Cu" signal))
+      (net 0 "") (net 1 "GND") (net 2 "VCC")
+    """
+            + "\n".join(items)
+            + ")"
+        )
+    )
+
+
+def _tht_pad(ref, x, y, uuid, net=1):
+    """A through-hole pad: copper on every layer, mask on the outer two."""
+    return f'''(footprint "X" (layer "F.Cu") (at {x} {y})
+      (property "Reference" "{ref}")
+      (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.5)
+           (layers "*.Cu" "*.Mask") (net {net} "GND") (uuid "{uuid}")))'''
+
+
+def _inner_pad(ref, x, y, uuid, net=1, layer="In1.Cu"):
+    """An SMD pad on an inner layer only -- copper, but no solder mask."""
+    return f'''(footprint "X" (layer "F.Cu") (at {x} {y})
+      (property "Reference" "{ref}")
+      (pad "1" smd rect (at 0 0) (size 1 1) (layers "{layer}")
+           (net {net} "GND") (uuid "{uuid}")))'''
+
+
+def test_mask_bridge_tht_outer_layers_only():
+    """A THT pad pair is a mask bridge on the outer sides only (Issue #8913).
+
+    ``_collect`` expands a ``*.Cu`` pad onto every copper layer for the copper-gap
+    pass; inner layers have no solder mask, so they must not be reported here.
+    """
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board4(_tht_pad("U1", 0, 0, "p0"), _tht_pad("U2", 1.19, 0, "p1", net=2))
+    found = check_pad_mask_bridge(pcb, 2.0).violations
+    # Assert the layer SET, not just the count: a count-only assertion would
+    # pass if the two findings had landed on In1.Cu and In2.Cu instead.
+    assert {v.layer for v in found} == {"F.Cu", "B.Cu"}
+    assert len(found) == 2
+    assert all(v.rule_id == "physical_copper_gap" and v.severity == "error" for v in found)
+
+
+def test_mask_bridge_tht_above_threshold_still_clean():
+    """The outer-only filter must not move the threshold."""
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board4(_tht_pad("U1", 0, 0, "p0"), _tht_pad("U2", 1.22, 0, "p1", net=2))
+    assert not check_pad_mask_bridge(pcb, 2.0).violations
+
+
+def test_inner_only_pads_are_copper_gap_not_mask_bridge():
+    """The two passes must not be narrowed together (Issue #8913).
+
+    An inner-layer-only pad pair has no mask to bridge, but its inner copper gap
+    is real and ``check_physical_copper_gap`` must still report it.
+    """
+    from kicad_tools.validate.rules.physical_gap import (
+        check_pad_mask_bridge,
+        check_physical_copper_gap,
+    )
+
+    pcb = board4(
+        _inner_pad("U1", 0, 0, "p0"),
+        _inner_pad("U2", 1.19, 0, "p1", net=2),
+    )
+    assert not check_pad_mask_bridge(pcb, 2.0).violations
+    copper = [
+        v
+        for v in check_physical_copper_gap(pcb, 0.25).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+    assert copper and {v.layer for v in copper} == {"In1.Cu"}
+
+
 def test_checker_default_on_only_under_fab_view():
     from kicad_tools.validate.checker import DRCChecker
 
