@@ -40,7 +40,7 @@ zero violations and zero unconnected items. Label and physical copper LVS
 pass, with 153 bound pads. The development check guards every net and rejects
 signal traces on the inner ground layers.
 
-Manufacturing remains blocked. The manufacturer check reports 51 ampacity
+Manufacturing remains blocked. The manufacturer check reports 52 ampacity
 errors requiring branch-current and thermal review, and 22 component MPNs
 remain unselected. Strict KiCad-tools net status now agrees with native KiCad
 (32/32 nets complete; resolved by
@@ -50,7 +50,7 @@ remain unselected. Strict KiCad-tools net status now agrees with native KiCad
 The fleet 45-degree angle census
 (`tests/test_fleet_45_census.py`) now discovers `output/usbc_pd_power.kicad_pcb`
 independently of its filename (it does not carry a `_routed` suffix), but the
-board's 61 off-angle segments out of 318 are an explicit, hash-pinned
+board's 59 off-angle segments out of 320 are an explicit, hash-pinned
 exemption pending a source-emitter repair -- not a silent skip and not a
 manufacturing-readiness claim. See issue
 [#5084](https://github.com/rjwalters/kicad-tools/issues/5084).

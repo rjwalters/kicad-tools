@@ -4877,8 +4877,8 @@
 		(attr smd)
 		(duplicate_pad_numbers_are_jumpers no)
 		(fp_line
-			(start -2.11 -2.11)
-			(end -1.635 -2.11)
+			(start -2.11 -1.635)
+			(end -2.11 -1.87)
 			(stroke
 				(width 0.12)
 				(type solid)
@@ -4887,8 +4887,8 @@
 			(uuid "8bcbfc2a-354f-59b6-be79-3ab20ffbeb89")
 		)
 		(fp_line
-			(start -2.11 -1.635)
-			(end -2.11 -2.11)
+			(start -2.11 2.11)
+			(end -2.11 1.635)
 			(stroke
 				(width 0.12)
 				(type solid)
@@ -4897,8 +4897,8 @@
 			(uuid "3e77a493-ed6a-515f-8bd8-0e5a31ac2852")
 		)
 		(fp_line
-			(start -2.11 2.11)
-			(end -2.11 1.635)
+			(start -1.813241 -2.11)
+			(end -1.635 -2.11)
 			(stroke
 				(width 0.12)
 				(type solid)
@@ -4956,7 +4956,7 @@
 			(layer "F.SilkS")
 			(uuid "ab38d540-3002-5a19-8a64-00b719dc7e62")
 		)
-		(fp_poly (pts (xy -2.61 -1.25) (xy -2.94 -1.01) (xy -2.94 -1.49))
+		(fp_poly (pts (xy -2.11 -2.11) (xy -2.35 -2.44) (xy -1.87 -2.44))
 			(stroke
 				(width 0.12)
 				(type solid)
@@ -9268,6 +9268,14 @@
 		(uuid "000d6078-7caf-5a82-a958-2b6634add09c")
 	)
 	(segment
+		(start 160.9 107.5)
+		(end 154 107.5)
+		(width 0.25)
+		(layer "B.Cu")
+		(net "VIN")
+		(uuid "00d4796d-ceb6-5e28-8634-62b9d6b34d67")
+	)
+	(segment
 		(start 121.675 107.5)
 		(end 120.8 107.5)
 		(width 0.25)
@@ -9330,6 +9338,14 @@
 		(layer "F.Cu")
 		(net "VBUS_RAW")
 		(uuid "042a42c5-f798-5567-8085-bca2e59a6fdf")
+	)
+	(segment
+		(start 128 94.5)
+		(end 130.675 94.5)
+		(width 1.2)
+		(layer "F.Cu")
+		(net "PMOS_SOURCE")
+		(uuid "044de84f-4897-512a-b6d0-2cb6689ecebb")
 	)
 	(segment
 		(start 132.325 99.5)
@@ -9764,14 +9780,6 @@
 		(uuid "25c6711e-f252-5fb6-9a33-294a9352af3d")
 	)
 	(segment
-		(start 160.9 107.5)
-		(end 150.5 106)
-		(width 0.25)
-		(layer "B.Cu")
-		(net "VIN")
-		(uuid "25cc1b60-4a55-5202-9eb3-b0356c6dbd28")
-	)
-	(segment
 		(start 130.025 89.865)
 		(end 130.025 91.135)
 		(width 1.2)
@@ -9962,14 +9970,6 @@
 		(layers "F.Cu" "B.Cu")
 		(net "SCL")
 		(uuid "3283ee05-f753-55b7-93fe-dd2ab61992de")
-	)
-	(segment
-		(start 128 94.5)
-		(end 132.5 94.5)
-		(width 1.2)
-		(layer "F.Cu")
-		(net "PMOS_SOURCE")
-		(uuid "32ab9897-a197-5670-a142-16246b4fd1fb")
 	)
 	(segment
 		(start 119.75 98)
@@ -10178,6 +10178,14 @@
 		(layer "B.Cu")
 		(net "VBUS_RAW")
 		(uuid "4443dbc6-9d92-5386-b9be-125c77f5cd02")
+	)
+	(segment
+		(start 154 107.5)
+		(end 151.5 105)
+		(width 0.25)
+		(layer "B.Cu")
+		(net "VIN")
+		(uuid "444f210c-f99f-5386-a552-7b9166b8881c")
 	)
 	(via
 		(at 119.75 98)
@@ -10538,14 +10546,6 @@
 		(layer "B.Cu")
 		(net "PMOS_GATE")
 		(uuid "6209994e-26a0-5b18-9c35-55b63f20cad2")
-	)
-	(segment
-		(start 132.5 94.5)
-		(end 130.675 97.5)
-		(width 0.25)
-		(layer "F.Cu")
-		(net "PMOS_SOURCE")
-		(uuid "6314bc08-d18c-5fb5-b2ae-4cc64d2b3f12")
 	)
 	(segment
 		(start 163 100.775)
@@ -11747,6 +11747,14 @@
 		(net "GND")
 		(uuid "b8edb96a-13eb-5271-901c-abafbf02c8db")
 	)
+	(segment
+		(start 130.675 94.5)
+		(end 130.675 97.5)
+		(width 0.25)
+		(layer "F.Cu")
+		(net "PMOS_SOURCE")
+		(uuid "b94e206d-40e5-599e-a9ab-bf68b0ae062b")
+	)
 	(via
 		(at 171.5 93)
 		(size 0.6)
@@ -12058,6 +12066,14 @@
 		(layer "F.Cu")
 		(net "VOUT_PRE")
 		(uuid "d487b264-2d10-53c9-847d-989c31f9c4b1")
+	)
+	(segment
+		(start 130.675 94.5)
+		(end 132.5 94.5)
+		(width 1.2)
+		(layer "F.Cu")
+		(net "PMOS_SOURCE")
+		(uuid "d4f473f3-c5dd-5ebe-83ee-011cd918fe88")
 	)
 	(segment
 		(start 126 92.2)

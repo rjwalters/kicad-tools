@@ -195,8 +195,9 @@ def test_board01_item_inventory():
     kinds: dict[str, int] = {}
     for item in extract_items(PCB.load(BOARD01)):
         kinds[item.kind] = kinds.get(item.kind, 0) + 1
-    assert kinds["segment"] == 11
-    assert kinds["via"] == 3  # issue #6596 dropped the single-layer tee via
+    # Issue #8840: regenerated with the current router (no VOUT branch wedge).
+    assert kinds["segment"] == 9
+    assert kinds["via"] == 2
     assert kinds["footprint"] == 7  # R1, R2, J1, J2 + FID1-3 (Issue #8598)
     assert kinds["graphic"] >= 1
 
@@ -592,7 +593,7 @@ def test_to_json_counts_cover_unchanged():
     result = _diff(BOARD01, BOARD01)
     doc = to_json(result)
     assert doc["summary"]["unchanged"] == len(result.entries)
-    assert doc["by_kind"]["segment"]["unchanged"] == 11
+    assert doc["by_kind"]["segment"]["unchanged"] == 9
 
 
 def test_svg_overlay_classes(tmp_path: Path, capsys):

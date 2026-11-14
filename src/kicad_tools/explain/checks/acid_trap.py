@@ -108,16 +108,18 @@ class AcidTrapCheck:
         """Find the junction point between two segments if they connect."""
         tolerance = 0.01  # 0.01mm tolerance
 
-        # Check all endpoint combinations
-        endpoints1 = [seg1.start, seg1.end]
-        endpoints2 = [seg2.start, seg2.end]
-
-        for p1 in endpoints1:
-            for p2 in endpoints2:
-                if abs(p1[0] - p2[0]) < tolerance and abs(p1[1] - p2[1]) < tolerance:
-                    return p1
-
-        return None
+        # Pick the CLOSEST endpoint pair within tolerance, not the first: a
+        # near-zero-length segment makes start~start match before the true
+        # shared point (end==start) and yields a fake angle (PR #8848 review).
+        best: tuple[float, tuple[float, float]] | None = None
+        for p1 in (seg1.start, seg1.end):
+            for p2 in (seg2.start, seg2.end):
+                dx, dy = abs(p1[0] - p2[0]), abs(p1[1] - p2[1])
+                if dx < tolerance and dy < tolerance:
+                    d = math.hypot(dx, dy)
+                    if best is None or d < best[0]:
+                        best = (d, p1)
+        return best[1] if best else None
 
     def _calculate_angle(
         self,
@@ -151,7 +153,8 @@ class AcidTrapCheck:
         mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
         mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
 
-        if mag1 == 0 or mag2 == 0:
+        # Near-zero-length segments carry no direction (rounding artefacts).
+        if mag1 < tolerance or mag2 < tolerance:
             return None
 
         # Calculate dot product and angle

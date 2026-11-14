@@ -3703,6 +3703,8 @@ def run_selected_checks(
         "board_id": checker.check_board_id,
         "edge": checker.check_edge_clearances,
         "fiducials": checker.check_fiducials,
+        "sharp_trace_corner": checker.check_sharp_trace_corner,
+        "missing_plated_hole": checker.check_missing_plated_hole,
         "impedance": checker.check_impedance,
         "isolated_copper": checker.check_isolated_copper,
         "match_group_length_skew": checker.check_match_group_length_skew,

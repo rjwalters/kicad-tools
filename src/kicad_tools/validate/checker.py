@@ -422,6 +422,8 @@ class DRCChecker:
         "check_netlist",
         "check_pin1_markers",
         "check_fiducials",
+        "check_sharp_trace_corner",
+        "check_missing_plated_hole",
         "check_board_id",
         "check_single_pad_nets",
         "check_pad_grid_alignment",
@@ -597,6 +599,9 @@ class DRCChecker:
         "pin1_marker_obscured": CATEGORY_ADVISORY,
         # Assembly-prep advisories (Issue #8532); explicit like pin1 above.
         "fiducials_missing": CATEGORY_ADVISORY,
+        # JLCDFM geometry parity (Issue #8840); explicit like the above.
+        "sharp_trace_corner": CATEGORY_ADVISORY,
+        "missing_plated_hole": CATEGORY_ADVISORY,
         "board_id_missing": CATEGORY_ADVISORY,
         "silk_over_copper": CATEGORY_ADVISORY,
         # Silk inside a graphic mask opening (#8861): an error, fab-blocking.
@@ -1693,6 +1698,18 @@ class DRCChecker:
 
         rule = Pin1MarkerRule()
         return self._absolutize(rule.check(self.pcb, self.design_rules))
+
+    def check_sharp_trace_corner(self) -> DRCResults:
+        """Warn on acute trace corners (``sharp_trace_corner``, Issue #8840)."""
+        from .rules.sharp_trace_corner import SharpTraceCornerRule
+
+        return self._absolutize(SharpTraceCornerRule().check(self.pcb, self.design_rules))
+
+    def check_missing_plated_hole(self) -> DRCResults:
+        """Warn on co-located top/bottom SMD pads with no hole (Issue #8840)."""
+        from .rules.missing_plated_hole import MissingPlatedHoleRule
+
+        return self._absolutize(MissingPlatedHoleRule().check(self.pcb, self.design_rules))
 
     def check_fiducials(self) -> DRCResults:
         """Warn when a populated side has fewer than 3 global fiducials (``fiducials_missing``)."""

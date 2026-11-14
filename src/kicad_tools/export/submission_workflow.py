@@ -354,8 +354,8 @@ DFM_CATEGORY_RULES: dict[str, tuple[str, ...]] = {
     "negative_soldermask_expansion": (),
     "soldermask_opening_multiple_segments": (),
     "unconnected_trace_end": ("track_dangling",),
-    "sharp_trace_corner": (),
-    "missing_plated_through_hole": (),
+    "sharp_trace_corner": ("sharp_trace_corner",),
+    "missing_plated_through_hole": ("missing_plated_hole",),
     "silkscreen_line_width": ("min_text_thickness",),
     "fiducial": ("fiducials",),
 }
