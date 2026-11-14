@@ -191,19 +191,126 @@ def test_reproduces_the_8914_jlcdfm_danger_items():
     assert found[0].actual_value == pytest.approx(1.98, abs=0.002)
 
 
-def test_8914_item_5_via_to_via_is_a_known_remaining_gap():
-    """The fab's fifth danger pairs two holes; this rule's `smd` side is pads only.
+# Issue #8925: the fab's "SMD" side also counts an exposed via annulus.  A via
+# without a ``(tenting ...)`` node resolves as tented (absent-token default), so
+# the exposed fixtures carry an explicit override.
+UNTENTED = "(tenting (front no) (back no))"
+TENTED = "(tenting (front yes) (back yes))"
 
-    JLCDFM item 5 (bottom, 1.5 mm) is a 1.9 mm / 1.3 mm anchor via against an
-    ordinary 0.8 mm / 0.4 mm **via** pad -- so the fab's "smd" side also counts a
-    small exposed via annulus.  That pairing is deliberately still out of scope --
-    it needs its own calibration and no board in this repo has an anchor-sized via
-    to calibrate against (#8925) -- and this test pins the gap so a future change
-    to it is a visible decision rather than an accident.
+
+def ring(x, *, uuid, drill=0.4, size=0.8, tenting=UNTENTED):
+    """A via at ``(x, 0)``; ``tenting=""`` omits the node (absent-token path)."""
+    return (
+        f'(via (at {x} 0) (size {size}) (drill {drill}) (layers "F.Cu" "B.Cu") '
+        f'(net 1) {tenting} (uuid "{uuid}"))'
+    )
+
+
+def item5_board(*, small_tenting=UNTENTED, setup=""):
+    """JLCDFM #8914 item 5: 1.9/1.3 mm anchor via 1.5 mm (copper edge) from a 0.8/0.4 mm via."""
+    anchor = ring(0, uuid="anchor", drill=1.3, size=1.9)
+    small = ring(0.95 + 1.5 + 0.4, uuid="small", tenting=small_tenting)
+    return board(*([setup] if setup else []), anchor, small)
+
+
+def test_8914_item_5_anchor_via_against_exposed_via_annulus_is_reported():
+    """Replaces the #8914 known-gap test: item 5 is now one error (AC1).
+
+    The pair shares a net (as in the fab's report); the rule is net-agnostic.
+    Both faces are exposed, so the pair meets on F.Cu and B.Cu, but it is one
+    physical pair and is reported once, naming both layers.
     """
-    anchor = via(drill=1.3, size=1.9).replace('"v"', '"anchor"')
-    small = '(via (at 2.85 0) (size 0.8) (drill 0.4) (layers "F.Cu" "B.Cu") (net 1) (uuid "small"))'
-    assert not check_tht_smd_spacing(board(anchor, small)).violations
+    found = check_tht_smd_spacing(item5_board()).violations
+    assert [v.severity for v in found] == ["error"]
+    v = found[0]
+    assert v.actual_value == pytest.approx(1.5, abs=0.002)
+    assert "exposed via annulus" in v.message
+    assert "B.Cu, F.Cu" in v.message
+    assert v.layer == "B.Cu"
+    pcb = item5_board()
+    assert set(v.items) == {via_ref(x, (0.0, 0.0)) for x in pcb.vias}
+
+
+def test_8914_item_5_exposed_on_one_side_reports_that_side_only():
+    found = check_tht_smd_spacing(
+        item5_board(small_tenting="(tenting (front yes) (back no))")
+    ).violations
+    assert [(v.severity, v.layer) for v in found] == [("error", "B.Cu")]
+
+
+def test_two_fanout_vias_at_the_same_gap_report_nothing():
+    """AC2: fan-out vs fan-out is never judged, exposed or not."""
+    a = ring(0, uuid="a")
+    b = ring(0.4 + 1.5 + 0.4, uuid="b")
+    assert not check_tht_smd_spacing(board(a, b)).violations
+
+
+def test_tht_component_pad_is_never_paired_with_a_via_annulus():
+    """AC6: the anchor gate is *vias only* -- an anchor-class THT pad is not.
+
+    Fails under the "any hole past ANCHOR_DRILL_MM" reading, which measured
+    20 errors + 4 warnings on board 05.
+    """
+    pad = """(footprint "J" (layer "F.Cu") (at 0 0) (property "Reference" "J1")
+      (pad "1" thru_hole circle (at 0 0) (size 1.9 1.9) (drill 1.3)
+        (layers "*.Cu" "*.Mask") (net 1 "A") (uuid "tht13")))"""
+    exposed = ring(0.95 + 1.5 + 0.4, uuid="small")
+    assert not check_tht_smd_spacing(board(pad, exposed)).violations
+
+
+def test_two_exposed_anchor_vias_report_the_pair_once():
+    """AC7: each anchor via is on both sides of the comparison; one finding, not two."""
+    a = ring(0, uuid="a", drill=1.3, size=1.9)
+    b = ring(0.95 + 1.5 + 0.95, uuid="b", drill=1.3, size=1.9)
+    found = check_tht_smd_spacing(board(a, b)).violations
+    assert [v.severity for v in found] == ["error"]
+    # Front-only exposure: still one finding, never one per ordering.
+    a = ring(0, uuid="a", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
+    b = ring(3.4, uuid="b", drill=1.3, size=1.9, tenting="(tenting (front no) (back yes))")
+    found = check_tht_smd_spacing(board(a, b)).violations
+    assert [v.layer for v in found] == ["F.Cu"]
+
+
+@pytest.mark.parametrize(
+    ("small_tenting", "setup", "reported"),
+    [
+        # Explicit per-via override, both directions.
+        (TENTED, "", False),
+        (UNTENTED, "", True),
+        # Absent token, no board default: KiCad's measured default is tented.
+        ("", "", False),
+        # Absent token inheriting an untented / tented board default.
+        ("", "(setup (tenting (front no) (back no)))", True),
+        ("", "(setup (tenting (front yes) (back yes)))", False),
+    ],
+)
+def test_annulus_side_is_gated_on_exposure(small_tenting, setup, reported):
+    """AC8: a tented annulus takes no solder, so it is not the fab's SMD side."""
+    found = check_tht_smd_spacing(item5_board(small_tenting=small_tenting, setup=setup)).violations
+    assert bool(found) is reported
+
+
+def test_anchor_hole_side_is_not_exposure_gated():
+    """A tented anchor barrel is still a hole the fab floods."""
+    anchor = ring(0, uuid="anchor", drill=1.3, size=1.9, tenting=TENTED)
+    small = ring(0.95 + 1.5 + 0.4, uuid="small")
+    assert len(check_tht_smd_spacing(board(anchor, small)).violations) == 1
+
+
+def test_overlapping_annulus_stays_via_in_pad_territory():
+    anchor = ring(0, uuid="anchor", drill=1.3, size=1.9)
+    touching = ring(0.95 + 0.4, uuid="small")
+    assert not check_tht_smd_spacing(board(anchor, touching)).violations
+
+
+def test_inner_layer_only_via_annulus_is_never_a_candidate():
+    """An inner-layer ring has no mask opening; only outer layers can be exposed."""
+    anchor = ring(0, uuid="anchor", drill=1.3, size=1.9)
+    buried = (
+        '(via buried (at 2.85 0) (size 0.8) (drill 0.4) (layers "In1.Cu" "In2.Cu") '
+        f'(net 1) {UNTENTED} (uuid "small"))'
+    )
+    assert not check_tht_smd_spacing(board_4layer(anchor, buried)).violations
 
 
 def test_same_footprint_pads_are_not_compared():
