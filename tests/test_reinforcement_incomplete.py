@@ -7,6 +7,7 @@ a time.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from kicad_tools.manufacturers import DesignRules
 from kicad_tools.pcb.reinforce import reinforce_net
 from kicad_tools.router.current_paths import CurrentPathSpec, PathEndpoint
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.validate.checker import DRCChecker
 from kicad_tools.validate.rules.reinforcement_incomplete import (
     ReinforcementIncompleteRule,
     reinforcement_waived_nets,
@@ -365,9 +367,14 @@ class TestRecordedEndShift:
         assert self._check(pcb, self._wires(outcome, bound=None)) == ["a"]
 
 
-def _four_layer_wire_board() -> PCB:
-    """Wire-reinforced B.Cu run on a 4-layer board (Issue #8866, net A shape)."""
-    pcb = PCB.create(width=200, height=100, layers=4, center=False)
+def _four_layer_wire_board(*, center: bool = False) -> PCB:
+    """Wire-reinforced B.Cu run on a 4-layer board (Issue #8866, net A shape).
+
+    ``center=True`` places the outline in the middle of the sheet, giving the
+    board a genuine non-zero ``PCB.board_origin`` while leaving every
+    board-relative coordinate below unchanged (Issue #8912).
+    """
+    pcb = PCB.create(width=200, height=100, layers=4, center=center)
     pcb.add_trace((20, 50), (120, 50), width=2.0, layer="B.Cu", net=NET)
     _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=NET, drill=1.0, size=2.0)
     _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=NET, drill=1.0, size=2.0)
@@ -416,9 +423,9 @@ class TestWireRunWithOrdinaryTaps:
         assert _subchecks(_run(pcb)) == ["a"]
 
 
-def _ambiguous_wire_board() -> PCB:
+def _ambiguous_wire_board(*, center: bool = False) -> PCB:
     """A mask-strip wire on B.Cu whose net also has a loop-closing tap (Issue #8886)."""
-    pcb = _four_layer_wire_board()
+    pcb = _four_layer_wire_board(center=center)
     pcb.add_trace((50, 50), (50, 58), width=0.25, layer="B.Cu", net=NET)
     pcb.add_trace((50, 58), (70, 58), width=0.25, layer="B.Cu", net=NET)
     pcb.add_trace((70, 58), (70, 50), width=0.25, layer="B.Cu", net=NET)
@@ -469,6 +476,87 @@ class TestNoWireAndSkipLocation:
         from kicad_tools.validate.rules.reinforcement_incomplete import _round_floats
 
         assert _round_floats("at (10.799999999999997, 10.8)") == "at (10.800, 10.8)"
+
+
+class TestNonZeroBoardOriginLocations:
+    """Issue #8912: ``[no_wire]`` / ``[skipped]`` locations are not double-offset.
+
+    Rules build ``DRCViolation.location`` in the board-relative frame and
+    ``DRCChecker._absolutize`` adds ``board_origin`` back exactly once. These
+    assertions therefore run through the public ``check_reinforcement_incomplete``
+    -- asserting the sheet position against a bare ``rule.check()`` would be
+    inverted (it would pass while the rule double-offsets).
+    """
+
+    @staticmethod
+    def _wireless(*, center: bool) -> PCB:
+        pcb = _ambiguous_wire_board(center=center)
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
+        pcb.vias[:] = [v for v in pcb.vias if v.net_name != NET]
+        return pcb
+
+    @staticmethod
+    def _located(pcb: PCB, spec: CurrentPathSpec) -> tuple[str, tuple[float, float]]:
+        """``(sub-check, sheet-absolute location)`` of the rule's single finding."""
+        checker = DRCChecker(pcb, layers=4, current_path_specs=[spec])
+        (v,) = checker.check_reinforcement_incomplete().violations
+        return v.items[1].split("@")[0], v.location
+
+    def test_no_wire_location_is_the_sheet_position_of_the_path(self):
+        """The J1 pad sits at board-relative (20, 50) on both boards."""
+        flat = self._wireless(center=False)
+        shifted = self._wireless(center=True)
+        ox, oy = shifted.board_origin
+        assert (ox, oy) != (0.0, 0.0), "fixture must have a non-zero board origin"
+
+        kind_flat, loc_flat = self._located(flat, _spec())
+        kind_shifted, loc_shifted = self._located(shifted, _spec())
+        assert kind_flat == kind_shifted == "no_wire"
+        # One origin, not two: the location tracks the board, not 2x the shift.
+        assert loc_shifted == pytest.approx((loc_flat[0] + ox, loc_flat[1] + oy))
+
+    def test_skipped_location_is_the_sheet_position_of_the_path(self):
+        spec = dataclasses.replace(_spec(True), source=PathEndpoint("NOPE", "1"))
+        flat = _ambiguous_wire_board(center=False)
+        shifted = _ambiguous_wire_board(center=True)
+        ox, oy = shifted.board_origin
+
+        kind_flat, loc_flat = self._located(flat, spec)
+        kind_shifted, loc_shifted = self._located(shifted, spec)
+        assert kind_flat == kind_shifted == "skipped"
+        assert loc_shifted == pytest.approx((loc_flat[0] + ox, loc_flat[1] + oy))
+
+    def test_no_wire_location_lands_inside_the_board_outline(self):
+        """A double-offset location falls outside the outline -- unclickable."""
+        pcb = self._wireless(center=True)
+        ox, oy = pcb.board_origin
+        _, (x, y) = self._located(pcb, _spec())
+        assert ox <= x <= ox + 200.0, f"x={x} outside [{ox}, {ox + 200.0}]"
+        assert oy <= y <= oy + 100.0, f"y={y} outside [{oy}, {oy + 100.0}]"
+
+    def test_net_without_copper_reports_the_board_origin(self):
+        """``_on_path``'s no-copper fallback absolutizes to the board origin.
+
+        Both endpoints must be unresolvable *and* the net stripped of copper to
+        reach that branch -- a resolved pad short-circuits it.
+        """
+        pcb = self._wireless(center=True)
+        net = pcb.get_net_by_name(NET)
+        assert net is not None
+        pcb.segments[:] = [s for s in pcb.segments if s.net_number != net.number]
+        spec = dataclasses.replace(
+            _spec(True), source=PathEndpoint("NOPE", "1"), sink=PathEndpoint("NOPE", "2")
+        )
+        kind, loc = self._located(pcb, spec)
+        assert kind == "skipped"
+        # Board-relative (0, 0) is the board origin -- not (0, 0), not 2x the shift.
+        assert loc == pytest.approx(tuple(pcb.board_origin))
+
+    def test_zero_origin_locations_are_unchanged(self):
+        """The common case keeps reporting board-relative == sheet coordinates."""
+        pcb = self._wireless(center=False)
+        assert tuple(pcb.board_origin) == (0.0, 0.0)
+        assert self._located(pcb, _spec()) == ("no_wire", pytest.approx((20.0, 50.0)))
 
 
 class TestStitchedDoubledCopper:

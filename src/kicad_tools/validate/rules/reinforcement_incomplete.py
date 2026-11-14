@@ -385,10 +385,18 @@ class ReinforcementIncompleteRule(DRCRule):
         )
 
     def _on_path(self, pcb: PCB, res: PathResolution) -> _Point:
-        """A point on the path in sheet coordinates, rounded to 3 dp.
+        """A point on the path in board-relative coordinates, rounded to 3 dp.
 
         The resolved source/sink pad when there is one, else the start of the
-        net's first routed segment; the board origin only for a net with no copper.
+        net's first routed segment; board-relative ``(0, 0)`` -- which
+        absolutizes to the board origin -- only for a net with no copper.
+
+        This is a ``DRCViolation.location`` value, so it must NOT absolutize:
+        :meth:`~kicad_tools.validate.checker.DRCChecker._absolutize` adds
+        ``board_origin`` back exactly once for every rule-backed ``check_*``.
+        Calling :meth:`_abs` here shifted ``[no_wire]`` / ``[skipped]``
+        locations by one origin too many (Issue #8912). Use :meth:`_fmt` --
+        which does absolutize -- for message text instead.
         """
         end = res.source or res.sink
         if end is not None:
@@ -399,8 +407,7 @@ class ReinforcementIncompleteRule(DRCRule):
             if seg is None:
                 return (0.0, 0.0)
             pt = seg.start
-        x, y = self._abs(pt)
-        return (round(x, 3), round(y, 3))
+        return (round(pt[0], 3), round(pt[1], 3))
 
     # ------------------------------------------------------------- per net
 
