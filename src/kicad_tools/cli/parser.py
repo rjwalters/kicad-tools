@@ -2683,12 +2683,29 @@ def _add_pcb_parser(subparsers) -> None:
         "mode every eligible leg is anchored regardless.",
     )
     pcb_reinforce.add_argument(
+        "--min-wire-length",
+        dest="min_wire_length",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Minimum buttress-wire length in mm (ends mode default: 15.0). A "
+        "wire needs a through-hole at each end, and each hole needs both outer "
+        "layers and the inner planes clear, so the two rarely fit on a shorter "
+        "link -- a leg below this is reported and gets no wire and no mask "
+        "opening, and no entry in the .reinforcement.json wire list. Pass 0 for "
+        "no minimum (the pre-#8915 behaviour). --anchor-mode spaced has no "
+        "default minimum; a value given here still applies to it.",
+    )
+    pcb_reinforce.add_argument(
         "--min-run-length",
         dest="min_run_length",
         type=float,
         default=None,
-        help="Only anchor runs (ends mode: legs) at least this long, in mm. "
-        "Shorter ones are reported but not anchored. Composes with --all-runs.",
+        metavar="MM",
+        help="Alias for --min-wire-length, kept for existing invocations. Only "
+        "anchor runs (ends mode: legs) at least this long, in mm; shorter ones "
+        "are reported but not anchored. Composes with --all-runs. If both flags "
+        "are given, the larger wins.",
     )
     pcb_reinforce.add_argument(
         "--current-paths",

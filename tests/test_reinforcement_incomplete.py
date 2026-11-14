@@ -584,3 +584,32 @@ class TestStitchedDoubledCopper:
     def test_declared_eligible_doubled_copper_is_flagged_as_designed(self):
         results = _run(self._board(), eligible=True)
         assert set(_subchecks(results)) == {"a", "b", "d"}
+
+
+class TestBelowMinWireLengthInteraction:
+    """Issue #8915 asked what this rule reports once a declared-eligible path's
+    only leg falls under the default 15 mm minimum. Measured, not changed here:
+    the path still resolves ``ok``, so it is checked from its resolved segments
+    and yields the ``a`` (no anchor holes) + ``b`` (no mask opening) warnings --
+    **not** ``no_wire``, which only fires for an *unresolved* declared-eligible
+    path. Changing that belongs to the ``--strategy`` issue (#8916).
+    """
+
+    @staticmethod
+    def _reinforced_short(length: float, **kw) -> PCB:
+        pcb = _board(length=length)
+        reinforce_net(pcb, NET, current_paths=[_spec(True)], **kw)
+        return pcb
+
+    def test_below_minimum_reports_a_and_b_not_no_wire(self):
+        results = _run(self._reinforced_short(12.0))
+        assert set(_subchecks(results)) == {"a", "b"}
+        assert "no_wire" not in _subchecks(results)
+        assert {v.severity for v in results.violations} == {"warning"}
+
+    def test_pinning_the_minimum_off_leaves_the_path_clean(self):
+        """The findings above are the minimum's doing, not the 12 mm leg's."""
+        assert _subchecks(_run(self._reinforced_short(12.0, min_wire_length_mm=0.0))) == []
+
+    def test_leg_above_the_minimum_is_clean(self):
+        assert _subchecks(_run(self._reinforced_short(25.0))) == []

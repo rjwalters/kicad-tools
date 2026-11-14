@@ -33,11 +33,23 @@ def _pt(x: float, y: float) -> dict[str, float]:
 
 
 def build_wire_records(outcome: Any, origin_x: float, origin_y: float) -> list[dict[str, Any]]:
-    """Wire records from a ``ReinforceResult``'s legs (empty in spaced mode)."""
+    """Wire records from a ``ReinforceResult``'s legs (empty in spaced mode).
+
+    Legs the minimum-wire-length filter skipped are omitted entirely (Issue
+    #8915): the owner does not want a wire there, so it is not on the list.
+    """
     records: list[dict[str, Any]] = []
     bare = round(bare_copper_diameter_mm(outcome.wire_gauge_awg), 4)
     for leg in outcome.legs:
         if not leg.polyline:
+            continue
+        # A leg below the minimum buttress-wire length gets no wire at all
+        # (Issue #8915), so it gets no record either -- the sidecar is the
+        # owner's cut-and-bend list. Every other unanchored leg still earns a
+        # record: it names copper that WANTS a wire and says why it has none.
+        # (The record would also be unreachable for ``drop_wires``, which
+        # matches on anchors, and this one has none.)
+        if getattr(leg, "below_min_wire_length", False):
             continue
         sx, sy = leg.polyline[0]
         ex, ey = leg.polyline[-1]
