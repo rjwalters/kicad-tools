@@ -1649,6 +1649,30 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 out[key] = _sheet(out[key])
         return out
 
+    def _min_width_fields(resolution) -> dict[str, Any]:
+        """Narrowest copper of one resolved path, in sheet coordinates (#8917).
+
+        All four keys are ``null`` for an ``unresolved``/``ambiguous`` path --
+        never ``0``, which would read as "zero-width copper" rather than "not
+        measured".
+        """
+        found = resolution.min_width
+        if found is None:
+            return {
+                "min_width_mm": None,
+                "min_width_at": None,
+                "min_width_layer": None,
+                "min_width_parallel_group": None,
+            }
+        return {
+            "min_width_mm": round(found.width_mm, 4),
+            # Board coordinates come out of the resolver; the audit reports
+            # sheet coordinates, like its layer-change positions (#8798).
+            "min_width_at": _sheet(found.position),
+            "min_width_layer": found.layer,
+            "min_width_parallel_group": found.parallel_group,
+        }
+
     result: dict[str, Any] = {
         "input": str(pcb_path),
         "current_paths": current_paths_arg,
@@ -1680,6 +1704,7 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 "witness": _sheet_witness(r.witness),
                 "segment_count": len(r.segments),
                 "length_mm": round(r.length_mm, 4),
+                **_min_width_fields(r),
                 "layer_changes": [
                     {
                         "position": _sheet(c.position),
@@ -1748,6 +1773,16 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 )
                 if thermal.assumption:
                     print(f"      assumption: {thermal.assumption}")
+                narrowest = r.min_width
+                if narrowest is not None:
+                    nx, ny = _sheet(narrowest.position)
+                    # Say when the figure is a group's summed width, so
+                    # 2.0 mm is not misread as one trace's width (#8917).
+                    doubled = " (summed parallel group)" if narrowest.parallel_group else ""
+                    print(
+                        f"      min width {narrowest.width_mm:.3f} mm on "
+                        f"{narrowest.layer} at ({nx:.3f}, {ny:.3f}){doubled}"
+                    )
                 for c in r.layer_changes:
                     cx, cy = _sheet(c.position)
                     print(
