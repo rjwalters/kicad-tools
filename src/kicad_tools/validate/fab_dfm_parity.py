@@ -82,9 +82,9 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "partial",
         True,
         "as `trace_spacing`, plus the 2 oz pad mask-bridge check inside "
-        "`physical_copper_gap`; that check judges a declared 2 oz outer weight only "
-        "and otherwise reports `physical_copper_gap_incomplete` at info. "
-        "Observed 8 danger.",
+        "`physical_copper_gap`; that check runs on outer layers only (#8913) and "
+        "judges a declared 2 oz outer weight only, otherwise reporting "
+        "`physical_copper_gap_incomplete` at info. Observed 8 danger.",
     ),
     ParityRow(
         "solder_mask_opening_exposing_trace",

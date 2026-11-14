@@ -52,6 +52,11 @@ FAB_VIEW_GAP_WARNING_MM = 0.15  # gap below this: JLCDFM "warning" -> warning
 FAB_VIEW_MASK_BRIDGE_2OZ_MM = 0.20  # pad-to-pad mask-bridge spacing on 2 oz copper
 FAB_VIEW_MASK_BRIDGE_OZ = 2.0
 
+# Solder mask exists only as F.Mask / B.Mask, which sit over F.Cu / B.Cu, so a
+# mask bridge is definitionally an outer-layer feature (Issue #8913).  Same
+# spelling as ``validate/pour_ampacity.py`` and ``rules/ampacity.py``.
+_EXTERNAL_LAYERS = ("F.Cu", "B.Cu")
+
 
 @dataclass
 class CopperSource:
@@ -667,12 +672,28 @@ def check_physical_copper_gap(
 
 
 def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
-    """Pad-to-pad mask-bridge spacing on 2 oz copper (Issue #8843).
+    """Pad-to-pad mask-bridge spacing on 2 oz **outer** copper (Issue #8843).
 
-    Net-agnostic: two distinct pads on one layer whose copper boundaries are
-    closer than :data:`FAB_VIEW_MASK_BRIDGE_2OZ_MM` leave no room for a solder
-    mask bridge. Only the 2 oz threshold is known (epic #8838); other weights
-    are not judged here (the versioned table is epic item 2).
+    Net-agnostic: two distinct pads on one outer copper layer whose copper
+    boundaries are closer than :data:`FAB_VIEW_MASK_BRIDGE_2OZ_MM` leave no room
+    for a solder mask bridge. Only the 2 oz threshold is known (epic #8838);
+    other weights are not judged here (the versioned table is epic item 2).
+
+    Outer layers only (:data:`_EXTERNAL_LAYERS`, Issue #8913). ``_collect``
+    deliberately expands a through-hole pad onto every copper layer because
+    :func:`check_physical_copper_gap` genuinely needs inner-layer copper, but
+    there is no inner-layer solder mask to bridge, so an inner-layer finding
+    here is simply wrong. One THT pad pair therefore yields at most one finding
+    per outer side (two), not one per copper layer.
+
+    This is also why ``copper_oz`` is the correct weight to judge against even
+    though callers pass the *outer* weight (``resolved_copper_outer``, see
+    ``cli/check_cmd.py``): :data:`FAB_VIEW_MASK_BRIDGE_2OZ_MM` is the only
+    copper-weight-dependent threshold in this module -- :data:`FAB_VIEW_GAP_DANGER_MM`
+    and :data:`FAB_VIEW_GAP_WARNING_MM` do not scale with weight -- and it now
+    runs only on layers whose weight *is* the outer weight. A per-weight /
+    per-layer-class threshold table (which would need the inner weight,
+    already plumbed as ``DRCChecker(copper_oz_inner=...)``) is epic #8838 item 2.
 
     Fail closed: ``copper_oz is None`` (weight not declared by stackup or
     ``--copper``) reports a ``physical_copper_gap_incomplete`` *info* finding instead
@@ -703,7 +724,7 @@ def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
         # The gap pass already reports incomplete geometry; stay quiet here.
         return results
     ox, oy = getattr(pcb, "board_origin", (0.0, 0.0))
-    for layer in sorted({s.layer for s in sources}):
+    for layer in sorted({s.layer for s in sources} & set(_EXTERNAL_LAYERS)):
         pads = [
             s for s in sources if s.layer == layer and s.kind == "pad" and not s.geometry.is_empty
         ]
