@@ -35,7 +35,7 @@ from typing import Literal
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Version of the table below; bump on any row change.
-TABLE_VERSION = 4
+TABLE_VERSION = 5
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
