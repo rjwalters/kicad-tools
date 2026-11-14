@@ -3,10 +3,10 @@
 JLCDFM reported 63 line-width warnings on the epic #8838 board while
 ``kct check --mfr jlcpcb`` reported none.  The board's own gerbers have no silk
 stroke below 0.150 mm (every front-silk draw uses one 0.150 mm aperture), and
-JLCPCB publishes ">= 0.15 mm" as the minimum line width.  So the gap is the
-fab tool's warning threshold sitting *above* the published floor -- not a silk
-primitive kct skips and not a zero-width stroke.  These tests pin each half of
-that:
+JLCPCB publishes ">= 0.15 mm" as the minimum line width.  So JLCDFM flags silk
+that meets the published floor, and the gap is not a silk primitive kct skips
+and not a zero-width stroke.  How JLCDFM selects the items it flags is unknown
+(#8943).  These tests pin the kct side of that:
 
 * every silk graphic primitive type is measured (a 0.149 mm one is flagged),
 * the published floor is inclusive (0.150 mm passes),

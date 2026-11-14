@@ -192,9 +192,9 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         False,
         "`silkscreen_line_width` (every silk graphic primitive) and "
         "`silkscreen_text_thickness` (text) enforce JLCPCB's published >= 0.15 mm. "
-        "Not covered: JLCDFM warns above that floor (#8844: its 63 warnings came "
-        "from gerbers with no silk stroke below 0.150 mm), and its warning "
-        "threshold has not been recorded (#8943).",
+        "Not covered: JLCDFM flags silk that meets that floor (#8844: 63 "
+        "warnings on gerbers with no silk stroke below 0.150 mm). How JLCDFM "
+        "selects the items it flags is unknown (#8943).",
     ),
     ParityRow("fiducial", ("fiducials",), "covered", False, "checked; no finding on the board."),
 )
