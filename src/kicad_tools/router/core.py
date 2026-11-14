@@ -21408,6 +21408,162 @@ class Autorouter:
             flush_print(f"  Cleanup: removed {removed} single-layer junction via(s) (issue #6596)")
         return removed
 
+    def _foldback_copper_discs(self, fixed_routes: list[Route]) -> list:
+        """Pad/via copper that can bury a trace vertex (Issue #8919).
+
+        One :class:`~.acute_foldback.CopperDisc` per same-net pad and via, the
+        pads measured by their **inscribed** circle (half the smaller
+        dimension) so a vertex counts as buried only when it is certainly
+        under copper -- the same conservative choice ``sharp_trace_corner``
+        makes.  A through-hole pad or a via spanning both outer layers covers
+        every copper layer of the stack, inner ones included.
+        """
+        from .acute_foldback import CopperDisc
+
+        discs: list[CopperDisc] = []
+        outer = frozenset({Layer.F_CU, Layer.B_CU})
+        for pad in self.pads.values():
+            if pad.net == 0 or pad.steiner_point:
+                continue
+            radius = min(pad.width, pad.height) / 2
+            if radius <= 0:
+                continue
+            layers = outer if pad.through_hole else frozenset({pad.layer})
+            discs.append(CopperDisc(x=pad.x, y=pad.y, radius=radius, layers=layers, net=pad.net))
+        for route in (*self.routes, *fixed_routes):
+            for via in route.vias:
+                if via.net == 0 or via.diameter <= 0:
+                    continue
+                discs.append(
+                    CopperDisc(
+                        x=via.x,
+                        y=via.y,
+                        radius=via.diameter / 2,
+                        layers=frozenset(via.drilled_layers),
+                        net=via.net,
+                    )
+                )
+        return discs
+
+    def _repair_acute_foldbacks(self) -> tuple[int, int]:
+        """Repair two-segment acute fold-backs in router copper (Issue #8919).
+
+        A fold-back is a degree-2 vertex where the track overshoots and turns
+        back on itself, leaving the open acute wedge JLC's DFM tool flags and
+        ``kct check``'s ``sharp_trace_corner`` rule gates.  The trace optimizer
+        cannot reach these: ``shorten_detour_pass`` is a no-op below three
+        segments, and a two-segment fold-back is exactly that case.
+
+        The vertex is moved along the longer leg (or, failing that, the whole
+        two-segment detour collapses to the shortest 45-degree path between
+        the two far ends) -- see :mod:`~.acute_foldback` for the constructions
+        and the validation every candidate must survive.  Copper preserved
+        from the input board is visible to the detector but never rewritten.
+
+        Returns:
+            ``(repaired, skipped)`` -- gating fold-backs repaired, and those
+            left in place because no candidate survived validation.
+        """
+        from .acute_foldback import plan_foldback_repairs
+        from .optimizer.collision import make_collision_checker
+
+        owner_of: dict[int, Route] = {}
+        for route in self.routes:
+            for seg in route.segments:
+                if seg.net != 0:
+                    owner_of[id(seg)] = route
+        if not owner_of:
+            return (0, 0)
+
+        own_ids = {id(r) for r in self.routes}
+        fixed_routes = [
+            r
+            for r in (
+                *getattr(self, "existing_routes", ()),
+                *getattr(self, "placement_preserved_routes", ()),
+            )
+            if id(r) not in own_ids
+        ]
+        fixed_segments = [s for r in fixed_routes for s in r.segments]
+
+        try:
+            discs = self._foldback_copper_discs(fixed_routes)
+            checker = make_collision_checker(self.grid)
+            path_is_clear = checker.path_is_clear
+        except (AttributeError, TypeError, ValueError):
+            # Grids built by older test fixtures may not support the vector
+            # checker; without a collision model the rewrite is unsafe, so
+            # skip the pass entirely rather than force unchecked copper.
+            return (0, 0)
+
+        all_segments = [s for r in self.routes for s in r.segments] + fixed_segments
+        result = plan_foldback_repairs(
+            all_segments,
+            discs=discs,
+            path_is_clear=path_is_clear,
+            is_mutable=lambda s: id(s) in owner_of,
+        )
+        if not result.repairs:
+            if result.skipped:
+                self._report_unrepairable_foldbacks(result.skipped)
+            return (0, result.skipped)
+
+        # Connectivity guard, as Step 4 does for removals: snapshot, apply,
+        # and revert the whole step if any net gained a component.
+        snapshot = {id(r): list(r.segments) for r in self.routes}
+        pre_components = self._count_net_components(self.routes)
+
+        for repair in result.repairs:
+            owners = [owner_of[id(s)] for s in repair.removed if id(s) in owner_of]
+            if not owners:
+                continue
+            target = owners[0]
+            for seg in repair.removed:
+                # ``target`` as the default is a defensive no-op: ``is_mutable``
+                # already kept immutable copper out of ``repair.removed``.
+                holder = owner_of.pop(id(seg), target)
+                # Identity, not equality: Segment is a comparing dataclass, so
+                # ``list.remove`` could drop a coincident twin instead.
+                holder.segments = [s for s in holder.segments if s is not seg]
+            for seg in repair.added:
+                target.segments.append(seg)
+                owner_of[id(seg)] = target
+
+        post_components = self._count_net_components(self.routes)
+        degraded = {net for net, pre in pre_components.items() if post_components.get(net, 0) > pre}
+        if degraded:
+            for route in self.routes:
+                if id(route) in snapshot:
+                    route.segments = snapshot[id(route)]
+            flush_print(
+                f"  Cleanup: reverted acute fold-back repair on {len(degraded)} "
+                f"net(s) to preserve connectivity (issue #8919)"
+            )
+            unrepaired = result.repaired + result.skipped
+            self._report_unrepairable_foldbacks(unrepaired)
+            return (0, unrepaired)
+
+        if result.repaired:
+            flush_print(
+                f"  Cleanup: repaired {result.repaired} acute trace fold-back(s) (issue #8919)"
+            )
+        if result.skipped:
+            self._report_unrepairable_foldbacks(result.skipped)
+        return (result.repaired, result.skipped)
+
+    @staticmethod
+    def _report_unrepairable_foldbacks(count: int) -> None:
+        """Say so when gating fold-backs survive the pass (Issue #8919).
+
+        A non-zero count is actionable: ``kct check`` will report each of
+        these as a ``sharp_trace_corner`` warning, so the board's strict gate
+        will fail until the copper changes.
+        """
+        flush_print(
+            f"  Cleanup: {count} acute trace fold-back(s) NOT repairable "
+            f"-- kct check will flag them as sharp_trace_corner (issue #8919)"
+        )
+
     def cleanup_artifacts(
         self,
         oob_margin: float = 0.5,
@@ -21449,6 +21605,17 @@ class Autorouter:
               sits on one layer only, dropped because removing them leaves
               the net's layer-aware copper exactly as connected
               (Issue #6596; see :meth:`_remove_single_layer_vias`).
+            - ``acute_foldbacks_repaired``: Two-segment acute fold-backs
+              (the open wedge ``kct check``'s ``sharp_trace_corner`` gates)
+              rewritten into a 90/135-degree corner, or collapsed to the
+              shortest 45-degree path between their far ends
+              (Issue #8919; see :meth:`_repair_acute_foldbacks`).
+            - ``acute_foldbacks_skipped``: Gating fold-backs left in place
+              because no candidate survived validation -- a clearance veto,
+              a lost same-net pad/via anchor, a rewrite that would have
+              created a new acute corner, or a leg of copper preserved from
+              the input board that the router may not rewrite (Issue #8919).
+              Non-zero means the board still has copper the gate will flag.
         """
         stats: dict[str, int] = {
             "net0_routes_removed": 0,
@@ -21460,6 +21627,8 @@ class Autorouter:
             "vias_restored": 0,
             "orphan_escape_routes_removed": 0,
             "single_layer_vias_removed": 0,
+            "acute_foldbacks_repaired": 0,
+            "acute_foldbacks_skipped": 0,
         }
 
         # -- Step 0 (Issue #3441): Drop orphan escape stubs --
@@ -21629,6 +21798,15 @@ class Autorouter:
 
         # -- Step 5 (Issue #6596): Drop single-layer junction vias --
         stats["single_layer_vias_removed"] = self._remove_single_layer_vias()
+
+        # -- Step 6 (Issue #8919): Repair acute two-segment fold-backs --
+        # Runs after Step 5 so the via discs that bury a vertex reflect the
+        # vias that actually survive, and BEFORE ``rebuild_via_index()`` below
+        # so the via index is rebuilt against the rewritten copper.
+        (
+            stats["acute_foldbacks_repaired"],
+            stats["acute_foldbacks_skipped"],
+        ) = self._repair_acute_foldbacks()
 
         # Issue #2960: ``cleanup_artifacts`` may remove entire routes
         # (Step 1) or strip vias from surviving routes (Steps 2/3), and
