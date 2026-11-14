@@ -17,6 +17,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from kicad_tools.pcb.reinforce import LEG_COPY, STRATEGY_PARALLEL, STRATEGY_WIRE
 from kicad_tools.physics.wire_gauge import bare_copper_diameter_mm
 
 SIDECAR_VERSION = 1
@@ -37,19 +38,29 @@ def build_wire_records(outcome: Any, origin_x: float, origin_y: float) -> list[d
 
     Legs the minimum-wire-length filter skipped are omitted entirely (Issue
     #8915): the owner does not want a wire there, so it is not on the list.
+    A leg reinforced by a parallel copy instead (Issue #8916) is recorded
+    whatever its length, with ``"strategy": "parallel"`` and the copy's
+    copper, so ``--clear`` / ``--replace`` can remove it and
+    ``reinforcement_incomplete`` stops asking it for a wire. The leg that IS
+    such a copy (status ``copy``) gets no record of its own.
     """
     records: list[dict[str, Any]] = []
     bare = round(bare_copper_diameter_mm(outcome.wire_gauge_awg), 4)
     for leg in outcome.legs:
         if not leg.polyline:
             continue
+        parallel = getattr(leg, "strategy", STRATEGY_WIRE) == STRATEGY_PARALLEL
+        if parallel and leg.status == LEG_COPY:
+            continue
         # A leg below the minimum buttress-wire length gets no wire at all
         # (Issue #8915), so it gets no record either -- the sidecar is the
         # owner's cut-and-bend list. Every other unanchored leg still earns a
         # record: it names copper that WANTS a wire and says why it has none.
         # (The record would also be unreachable for ``drop_wires``, which
-        # matches on anchors, and this one has none.)
-        if getattr(leg, "below_min_wire_length", False):
+        # matches on anchors, and this one has none.) A short leg that got
+        # parallel copper instead (#8916) IS reinforced, so it is recorded.
+        copy = getattr(leg, "copy", None)
+        if getattr(leg, "below_min_wire_length", False) and copy is None:
             continue
         sx, sy = leg.polyline[0]
         ex, ey = leg.polyline[-1]
@@ -84,17 +95,62 @@ def build_wire_records(outcome: Any, origin_x: float, origin_y: float) -> list[d
                 "reason": leg.reason,
             }
         )
+        if parallel:
+            records[-1].update(_parallel_fields(leg, copy, origin_x, origin_y))
     return sort_wires(records)
 
 
+def _parallel_fields(leg: Any, copy: Any, origin_x: float, origin_y: float) -> dict[str, Any]:
+    """The extra keys of a parallel-copy record (Issue #8916).
+
+    Absent ``strategy`` means ``wire``, so pre-#8916 sidecars read unchanged
+    and the version stays :data:`SIDECAR_VERSION`.
+    """
+    fields: dict[str, Any] = {
+        "strategy": STRATEGY_PARALLEL,
+        "copy_status": leg.copy_status,
+        "copy_layer": copy.layer if copy is not None else None,
+        "polyline": [_pt(x + origin_x, y + origin_y) for x, y in leg.polyline],
+        "copy_segments": [],
+        "stitch_vias": [],
+        "stitch_via_size_mm": None,
+        "stitch_via_drill_mm": None,
+    }
+    if copy is not None:
+        fields["copy_segments"] = [
+            {
+                "start": _pt(a[0] + origin_x, a[1] + origin_y),
+                "end": _pt(b[0] + origin_x, b[1] + origin_y),
+                "width_mm": round(w, 4),
+            }
+            for a, b, w in copy.segments
+        ]
+        fields["stitch_vias"] = [_pt(x + origin_x, y + origin_y) for x, y in copy.stitch_vias]
+        fields["stitch_via_size_mm"] = round(copy.via_size_mm, 4)
+        fields["stitch_via_drill_mm"] = round(copy.via_drill_mm, 4)
+    return fields
+
+
+def is_parallel(wire: dict[str, Any]) -> bool:
+    """True for a parallel-copy record; an absent ``strategy`` is a wire."""
+    return bool(wire.get("strategy", STRATEGY_WIRE) == STRATEGY_PARALLEL)
+
+
 def wire_key(wire: dict[str, Any]) -> tuple[Any, ...]:
-    """Identity of a wire: net + layer + leg start/end (end order ignored)."""
+    """Identity of a wire: net + layer + leg start/end (end order ignored).
+
+    A parallel copy (Issue #8916) is keyed on BOTH its layers, so a re-run
+    that meets the leg from its copy's side replaces the record, not adds one.
+    """
     ends = sorted(
         [
             (wire["leg_start"]["x"], wire["leg_start"]["y"]),
             (wire["leg_end"]["x"], wire["leg_end"]["y"]),
         ]
     )
+    if is_parallel(wire):
+        layers = "+".join(sorted({wire["layer"], wire.get("copy_layer") or ""} - {""}))
+        return (wire["net"], f"parallel:{layers}", tuple(ends))
     return (wire["net"], wire["layer"], tuple(ends))
 
 
@@ -129,15 +185,24 @@ def wires_with_anchors(
     ]
 
 
-def drop_wires(path: Path, net: str, removed: list[tuple[float, float]]) -> int:
+def drop_wires(
+    path: Path,
+    net: str,
+    removed: list[tuple[float, float]],
+    removed_copies: list[tuple[Any, ...]] | None = None,
+) -> int:
     """Delete the sidecar wires of ``net`` anchored at a removed point; returns the count.
 
-    A no-op when the sidecar is absent. The file is rewritten deterministically.
+    ``removed_copies`` are the :func:`wire_key` s of parallel-copy records whose
+    copper was removed (Issue #8916); those records go too. A no-op when the
+    sidecar is absent. The file is rewritten deterministically.
     """
     if not path.is_file():
         return 0
     wires = load_wires(path)
     gone = wires_with_anchors(wires, net, removed)
+    keys = set(removed_copies or ())
+    gone += [w for w in wires_for_net(wires, net) if is_parallel(w) and wire_key(w) in keys]
     if not gone:
         return 0
     gone_ids = {id(w) for w in gone}
@@ -192,6 +257,12 @@ def format_wire_list(wires: list[dict[str, Any]]) -> str:
             f"  {i}. {w['net']} {w['layer']} {w['length_mm']:.1f} mm "
             f"{w['wire_gauge_awg']} AWG [{w['status']}] anchors: {anchors}"
         )
+        if is_parallel(w):
+            lines.append(
+                f"     parallel copy on {w.get('copy_layer') or '-'} "
+                f"[{w.get('copy_status') or '-'}]: {len(w.get('copy_segments') or [])} "
+                f"segment(s), {len(w.get('stitch_vias') or [])} stitching via(s)"
+            )
         if w.get("path"):
             lines.append(f"     path: {w['path']}")
     return "\n".join(lines)

@@ -472,6 +472,89 @@ class ReinforcementIncompleteRule(DRCRule):
                     return bound
         return None
 
+    def _parallel_reinforced(self, pcb: PCB, leg: _Leg) -> bool:
+        """True when a placed parallel-copy record covers ``leg`` (Issue #8916).
+
+        The record is not taken on trust: the leg must lie on the recorded
+        polyline, on the record's leg layer or copy layer, AND every recorded
+        copy segment must still be on the board (same net, copy layer, same
+        two ends), AND so must the original leg (each piece of the recorded
+        polyline on the record's leg layer). A wire leg, a refused copy, or a
+        copy or original someone deleted is checked as a wire as before.
+        """
+        from kicad_tools.pcb.reinforcement_sidecar import is_parallel
+
+        tol = leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM
+        for w in self.wires:
+            try:
+                if w.get("net") != leg.net or not is_parallel(w):
+                    continue
+                if w.get("copy_status") != "placed" or leg.layer not in (
+                    w["layer"],
+                    w["copy_layer"],
+                ):
+                    continue
+                poly = [(p["x"] - self._ox, p["y"] - self._oy) for p in w["polyline"]]
+                recs = [
+                    (
+                        (r["start"]["x"] - self._ox, r["start"]["y"] - self._oy),
+                        (r["end"]["x"] - self._ox, r["end"]["y"] - self._oy),
+                    )
+                    for r in w["copy_segments"]
+                ]
+                copy_layer = w["copy_layer"]
+            except (KeyError, TypeError, AttributeError):
+                continue
+            if len(poly) < 2 or not recs:
+                continue
+            if any(self._dist_to_polyline(poly, p) > tol for p in leg.points):
+                continue
+            netobj = pcb.get_net_by_name(leg.net)
+
+            def board_on(layer: str, _netobj=netobj) -> list[tuple[_Point, _Point]]:
+                return [
+                    (s.start, s.end)
+                    for s in pcb.segments
+                    if s.layer == layer
+                    and (
+                        s.net_name == leg.net
+                        or (_netobj is not None and s.net_number == _netobj.number)
+                    )
+                ]
+
+            board = board_on(copy_layer)
+            copy_present = all(
+                any(
+                    (math.dist(a, sa) < 0.05 and math.dist(b, sb) < 0.05)
+                    or (math.dist(a, sb) < 0.05 and math.dist(b, sa) < 0.05)
+                    for sa, sb in board
+                )
+                for a, b in recs
+            )
+            # The original leg it doubles must still be there too: the
+            # recorded polyline covered by same-net copper on the record's leg
+            # layer along its length. A lone copy whose original was deleted is
+            # a plain leg again.
+            if copy_present and self._polyline_covered(poly, board_on(w["layer"])):
+                return True
+        return False
+
+    @staticmethod
+    def _polyline_covered(poly: list[_Point], lines: list[tuple[_Point, _Point]]) -> bool:
+        """True when every point along ``poly`` (sampled 0.5 mm) lies on one of ``lines``."""
+        if not lines:
+            return False
+        for (x0, y0), (x1, y1) in zip(poly, poly[1:], strict=False):
+            n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / 0.5))
+            for k in range(n + 1):
+                p = (x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n)
+                if all(
+                    ReinforcementIncompleteRule._dist_to_polyline([a, b], p) > 0.05
+                    for a, b in lines
+                ):
+                    return False
+        return True
+
     def _gauge(self, net: str, layer: str, points: list[_Point]) -> int:
         """Wire gauge from the sidecar: end-point match, else net+layer, else 16."""
         ends = [self._abs(points[0]), self._abs(points[-1])]
@@ -536,10 +619,13 @@ class ReinforcementIncompleteRule(DRCRule):
         changes: dict[tuple[float, float], Any] = {}
         for res in resolutions:
             for change in res.layer_changes:
+                change_vias.extend(v[0] for v in change.vias)
+            # (d) judges only series layer changes: a stitching via inside
+            # doubled copper is not where the current leaves a layer (#8916).
+            for change in res.series_layer_changes:
                 changes.setdefault(
                     (round(change.position[0], 3), round(change.position[1], 3)), change
                 )
-                change_vias.extend(v[0] for v in change.vias)
 
         def is_change_via(p: _Point) -> bool:
             return any(math.dist(p, q) < 0.05 for q in change_vias)
@@ -565,6 +651,10 @@ class ReinforcementIncompleteRule(DRCRule):
         claimed: set[int] = set()
         drills_seen: set[float] = set()
         for leg in legs:
+            # Issue #8916: a leg reinforced by a parallel copy -- the original
+            # or the copy itself -- is not a wire: (a)-(c) do not apply to it.
+            if self._parallel_reinforced(pcb, leg):
+                continue
             drill = anchor_drill_for_awg(leg.gauge)
             drills_seen.add(round(drill, 4))
             self._check_leg(

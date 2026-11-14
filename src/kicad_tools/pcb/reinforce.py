@@ -36,6 +36,14 @@ Two placement modes (``anchor_mode``, Issue #8742):
 * ``"spaced"``: the historical row of anchors every ``spacing_mm`` along the
   longest run (or every run with ``all_runs``), unchanged.
 
+``strategy`` (Issue #8916) chooses per leg between that buttress wire
+(``"wire"``, the default) and **parallel copper** (``"parallel"``): a same-net,
+same-width, vertex-for-vertex copy of the leg on the opposite outer layer, tied
+to it at both ends and by stitching vias, which ``path_ampacity`` credits as a
+parallel group on its summed cross-section. ``"auto"`` copies a leg below the
+minimum wire length and wires the rest. A copy is refused whole, never written
+in part (:class:`RefusedCopy`).
+
 Until #8743 lands, anchors are still plain same-net vias that inherit the
 board's via tenting, and no solder-mask opening is emitted along the run, so
 the trace is not yet exposed for soldering.
@@ -140,8 +148,31 @@ END_NUDGE_STEPS = 8
 #
 # ``spaced`` mode does NOT apply this default (its output must not change);
 # only an explicit ``min_wire_length_mm`` / ``min_run_length_mm`` filters there.
-# ``--strategy auto`` (#8916) reads this same constant as its threshold.
+# ``--strategy auto`` (#8916) takes its threshold from
+# :func:`resolve_min_wire_length_mm`, which applies this default.
 DEFAULT_MIN_WIRE_LENGTH_MM = 15.0
+
+# Reinforcement strategies per leg (Issue #8916). ``wire`` is the buttress
+# wire (two end anchors and a mask opening) and stays the default.
+# ``parallel`` copies the leg onto the opposite outer layer and pins the copy
+# to it with stitching vias. ``auto`` gives ``parallel`` to a leg shorter than
+# the minimum wire length and ``wire`` to every other leg.
+STRATEGY_WIRE = "wire"
+STRATEGY_PARALLEL = "parallel"
+STRATEGY_AUTO = "auto"
+STRATEGIES = (STRATEGY_WIRE, STRATEGY_PARALLEL, STRATEGY_AUTO)
+DEFAULT_STRATEGY = STRATEGY_WIRE
+
+#: Nominal pitch (mm) of the stitching vias along a parallel copy; floored by
+#: the same-net via spacing ``kct stitch`` uses (Issue #8916).
+STITCH_PITCH_MM = 5.0
+
+#: Copper layer -> the outer layer that takes its parallel copy (#8916).
+OPPOSITE_OUTER_LAYER = {"F.Cu": "B.Cu", "B.Cu": "F.Cu"}
+
+#: ``LegSummary.copy_status`` values (#8916).
+COPY_PLACED = "placed"
+COPY_REFUSED = "refused"
 
 # Issue #8797: how far inward a refused end candidate may be searched. The
 # default bound is a fraction of the leg's length (never less than
@@ -185,6 +216,11 @@ LEG_PARTIAL = "partial"
 LEG_UNANCHORED = "unanchored"
 LEG_TOO_SHORT = "too_short"
 LEG_UNHANDLED = "unhandled"
+#: Reinforced by a parallel copy on the opposite outer layer (#8916).
+LEG_PARALLEL = "parallel"
+#: This leg IS the parallel copy of another leg of the same pass (#8916): it
+#: is reinforced together with that leg and gets no copy of its own.
+LEG_COPY = "copy"
 
 # Step (mm) of the march that finds where a leg leaves the copper it starts
 # on; the crossing is then bisected to well below a micron.
@@ -223,6 +259,12 @@ RULE_ANCHOR_SPACING = "anchor_spacing"
 RULE_MASK_OPENING_PAIRWISE = "mask_opening_voltage_map_pairwise"
 #: Same, when a class floor / custom DRU rule (not the voltage map) governs.
 RULE_MASK_OPENING_CLEARANCE = "mask_opening_clearance"
+#: A parallel copy's track would sit closer than KiCad's hole-to-copper
+#: clearance to another net's drilled hole (#8916).
+RULE_HOLE_CLEARANCE = "hole_clearance"
+#: A parallel copy has no room: too short between its end ties, or its leg is
+#: on an inner layer (no opposite outer layer to copy onto) (#8916).
+RULE_COPY_GEOMETRY = "copy_geometry"
 
 #: Copper layer -> the solder-mask layer on the same side (#8743).
 MASK_LAYER_FOR_COPPER = {"F.Cu": "F.Mask", "B.Cu": "B.Mask"}
@@ -327,6 +369,53 @@ class LegSummary:
     #: :func:`kicad_tools.pcb.reinforcement_sidecar.build_wire_records` can
     #: omit exactly these legs from the wire list and no others.
     below_min_wire_length: bool = False
+    #: Strategy this leg was reinforced with (Issue #8916): ``wire`` (two end
+    #: anchors and a mask opening) or ``parallel`` (a copy on the opposite
+    #: outer layer). Legs no strategy reached (unhandled, not selected) keep
+    #: the pass's default ``wire``.
+    strategy: str = DEFAULT_STRATEGY
+    #: ``parallel`` legs: ``placed`` or ``refused`` (empty otherwise), why it
+    #: was refused, and the copy itself (``None`` unless placed).
+    copy_status: str = ""
+    copy_reason: str = ""
+    copy: ParallelCopy | None = None
+
+
+@dataclass
+class ParallelCopy:
+    """A leg's same-net copy on the opposite outer layer (Issue #8916).
+
+    Coordinates are board-relative. ``segments`` follow the leg vertex for
+    vertex (``(start, end, width)`` each), so the path model sees the two as
+    one doubled conductor; at an end that is not a through-hole pad (or a
+    through via) the copy stops at the tie via there.
+    """
+
+    layer: str
+    segments: list[tuple[tuple[float, float], tuple[float, float], float]]
+    #: End ties and interior stitching vias, in leg order.
+    stitch_vias: list[tuple[float, float]]
+    via_size_mm: float
+    via_drill_mm: float
+    #: How many of the segments / vias were already on the board (re-run).
+    existing_segments: int = 0
+    existing_vias: int = 0
+
+
+@dataclass
+class RefusedCopy:
+    """A parallel copy refused whole by a clearance or geometry rule (#8916)."""
+
+    leg_layer: str
+    copy_layer: str
+    #: Where the copy (or its via) failed, board-relative.
+    x: float
+    y: float
+    rule: str
+    required_mm: float
+    actual_mm: float
+    obstacle_net: str = ""
+    reason: str = ""
 
 
 @dataclass
@@ -456,10 +545,20 @@ class ReinforceResult:
     openings: list[MaskOpening] = field(default_factory=list)
     #: Legs whose opening was refused (never a partial opening).
     refused_openings: list[RefusedOpening] = field(default_factory=list)
+    #: ``wire`` / ``parallel`` / ``auto`` (Issue #8916).
+    strategy: str = DEFAULT_STRATEGY
+    #: Parallel copies planned this pass (written unless ``dry_run``) and the
+    #: ones refused whole (never a partial copy).
+    copies: list[ParallelCopy] = field(default_factory=list)
+    refused_copies: list[RefusedCopy] = field(default_factory=list)
 
     @property
     def placed_count(self) -> int:
         return len(self.placed)
+
+    @property
+    def copies_placed_count(self) -> int:
+        return len(self.copies)
 
     @property
     def refused_count(self) -> int:
@@ -518,6 +617,22 @@ class RefusedClear:
 
 
 @dataclass
+class ClearedCopy:
+    """A recorded parallel copy (Issue #8916) removed by ``--clear`` / ``--replace``.
+
+    ``key`` is the sidecar record's :func:`~kicad_tools.pcb.reinforcement_sidecar.wire_key`,
+    so the record can be dropped with its copper. Counts are of the board
+    items matched to the record (a copy someone already deleted counts 0).
+    """
+
+    layer: str
+    key: tuple
+    segments: int = 0
+    vias: int = 0
+    reason: str = ""
+
+
+@dataclass
 class ClearResult:
     """Outcome of a :func:`clear_anchors` pass."""
 
@@ -531,6 +646,10 @@ class ClearResult:
     openings_removed: list[MaskOpening] = field(default_factory=list)
     #: ``"sidecar"`` when the wire-list sidecar named the anchors, else ``"size"``.
     identified_by: str = "size"
+    #: Parallel copies removed (Issue #8916), from the sidecar's records only.
+    copies_removed: list[ClearedCopy] = field(default_factory=list)
+    #: Parallel copies left in place by the connectivity guard.
+    copies_refused: list[ClearedCopy] = field(default_factory=list)
 
     @property
     def removed_count(self) -> int:
@@ -624,7 +743,8 @@ def clear_anchors(
         if w.get("net") == net_name
         for a in w.get("anchors", [])
     ]
-    if listed:
+    copies = _recorded_copies(pcb, net_name, net_number, sidecar_wires or [])
+    if listed or copies:
         result.identified_by = "sidecar"
         candidates = [
             v
@@ -642,16 +762,36 @@ def clear_anchors(
             if abs(v.drill - drill) <= _ANCHOR_SIZE_TOL_MM
             and abs(v.size - pad) <= _ANCHOR_SIZE_TOL_MM
         ]
-    if not candidates:
+    if not candidates and not copies:
         return result
 
-    model = _build_net_models(pcb).get(candidates[0].net_number)
+    model = _build_net_models(pcb).get(net_number) if net_number is not None else None
+    if model is None and candidates:
+        model = _build_net_models(pcb).get(candidates[0].net_number)
     node_of = {}
     if model is not None:
-        node_of = {id(n.ref): i for i, n in enumerate(model.nodes) if n.kind == "via"}
+        node_of = {id(n.ref): i for i, n in enumerate(model.nodes) if n.kind in ("via", "seg")}
 
     gone: set[int] = set()
     baseline = _copper_component_count(model, set()) if model is not None else 0
+    # Issue #8916: a recorded parallel copy goes whole (its tracks and its
+    # stitching vias) or not at all, under the same connectivity guard.
+    copy_segments: list[Segment] = []
+    copy_vias: list = []
+    for cleared, segs, vias in copies:
+        idxs = {node_of[id(x)] for x in (*segs, *vias) if id(x) in node_of}
+        if model is not None and _copper_component_count(model, gone | idxs) > baseline:
+            cleared.reason = CLEAR_REFUSED_SEVERS_NET
+            result.copies_refused.append(cleared)
+            continue
+        gone |= idxs
+        copy_segments.extend(segs)
+        copy_vias.extend(vias)
+        result.copies_removed.append(cleared)
+    if not dry_run:
+        pcb.remove_segments(copy_segments)
+        pcb.remove_vias(copy_vias)
+
     accepted = []
     for via in candidates:
         idx = node_of.get(id(via))
@@ -670,6 +810,67 @@ def clear_anchors(
             pcb.remove_vias(accepted)
             pcb.remove_graphic_lines([g for _, g in stale])
     return result
+
+
+def _recorded_copies(
+    pcb: PCB, net_name: str, net_number: int | None, wires: list[dict]
+) -> list[tuple[ClearedCopy, list[Segment], list]]:
+    """Board copper of the sidecar's parallel-copy records for ``net_name`` (#8916).
+
+    Only what a record names is matched -- a same-net track on the copy layer
+    whose two ends equal one recorded copy segment's, and a same-net via at a
+    recorded stitching position with the recorded size -- never copper found
+    by shape alone.
+    """
+    from kicad_tools.pcb.reinforcement_sidecar import is_parallel, wire_key
+
+    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    tol = _SIDECAR_ANCHOR_TOL_MM
+
+    def on_net(item) -> bool:
+        if net_number is not None:
+            return bool(item.net_number == net_number)
+        return bool(item.net_name == net_name)
+
+    def near(p, rec) -> bool:
+        return bool(abs(p[0] + ox - rec["x"]) <= tol and abs(p[1] + oy - rec["y"]) <= tol)
+
+    out = []
+    for w in wires:
+        if w.get("net") != net_name or not is_parallel(w) or not w.get("copy_layer"):
+            continue
+        layer = w["copy_layer"]
+        try:
+            recs = [(r["start"], r["end"], r.get("width_mm")) for r in w.get("copy_segments") or []]
+            stitches = list(w.get("stitch_vias") or [])
+            size = w.get("stitch_via_size_mm")
+            drill = w.get("stitch_via_drill_mm")
+            key = wire_key(w)
+        except (KeyError, TypeError):
+            continue
+        segs = [
+            s
+            for s in pcb.segments
+            if s.layer == layer
+            and on_net(s)
+            and any(
+                ((near(s.start, a) and near(s.end, b)) or (near(s.start, b) and near(s.end, a)))
+                and (width is None or abs(s.width - float(width)) <= _ANCHOR_SIZE_TOL_MM)
+                for a, b, width in recs
+            )
+        ]
+        vias = [
+            v
+            for v in pcb.vias
+            if on_net(v)
+            and any(near(v.position, r) for r in stitches)
+            and (size is None or abs(v.size - float(size)) <= _ANCHOR_SIZE_TOL_MM)
+            and (drill is None or abs(v.drill - float(drill)) <= _ANCHOR_SIZE_TOL_MM)
+        ]
+        out.append(
+            (ClearedCopy(layer=layer, key=key, segments=len(segs), vias=len(vias)), segs, vias)
+        )
+    return out
 
 
 def _dist_to_segment(
@@ -1243,6 +1444,8 @@ def reinforce_net(
     max_end_shift_mm: float | None = None,
     mask_opening: bool | None = None,
     mask_width_mm: float | None = None,
+    strategy: str = DEFAULT_STRATEGY,
+    sidecar_wires: list[dict] | None = None,
 ) -> ReinforceResult:
     """Emit same-net PTH buttress-wire anchors along a routed net's trace.
 
@@ -1332,6 +1535,34 @@ def reinforce_net(
             anchor to anchor) and write the anchors with per-via tenting off.
             ``None`` (default) = on in ``ends`` mode, off in ``spaced``.
         mask_width_mm: Opening width override (default: the leg's trace width).
+        strategy: Issue #8916. ``"wire"`` (default): the buttress wire above.
+            ``"parallel"``: every selected leg instead gets a same-net,
+            same-width copy of its polyline on the opposite outer layer, tied
+            to it at both ends (the through-hole pad or through via the leg
+            ends on, else a stitching via) and by stitching vias every
+            :data:`STITCH_PITCH_MM` (floored by the ``kct stitch`` same-net
+            spacing) -- no anchors, no mask opening. The minimum wire length
+            does not filter ``parallel`` legs: it exists because two
+            through-holes rarely fit on a short leg, and a copy needs none.
+            ``"auto"``: ``parallel`` for a leg shorter than the minimum wire
+            length (:func:`resolve_min_wire_length_mm`, so 15 mm unless
+            ``min_wire_length_mm`` / ``min_run_length_mm`` say otherwise;
+            ``0`` makes every leg a wire), ``wire`` for the rest. Every copy
+            track and via is checked against the same clearance rules as an
+            anchor; a copy that cannot be placed whole is refused and
+            reported (:attr:`ReinforceResult.refused_copies`), never written
+            in part. ``parallel`` and ``auto`` need ``anchor_mode="ends"``:
+            ``spaced`` mode has no legs, and has no default minimum for
+            ``auto`` to compare against.
+        sidecar_wires: Issue #8916. The board's wire-list records (the
+            #8744 sidecar) from earlier passes. They are the only evidence
+            that a same-net via or copy-layer track is this tool's own
+            parallel copper: a re-run recognises (and reuses) exactly the
+            copper a record names. Every other via or track -- even one of
+            the stitching-via size -- predates the tool: a leg end on such a
+            via is already tied, and it is never written into a new record,
+            so ``--clear`` can never remove it. Without the records a
+            re-run treats the earlier copy as pre-existing copper.
 
     Returns:
         A :class:`ReinforceResult` summarising placed/refused anchors, the
@@ -1357,6 +1588,21 @@ def reinforce_net(
         raise ReinforceError(f"max_end_shift_mm must be >= 0, got {max_end_shift_mm}")
     if mask_width_mm is not None and (mask_width_mm <= 0 or not math.isfinite(mask_width_mm)):
         raise ReinforceError(f"mask_width_mm must be positive, got {mask_width_mm}")
+    if strategy not in STRATEGIES:
+        raise ReinforceError(f"strategy must be one of {', '.join(STRATEGIES)}, got {strategy!r}")
+    if strategy != STRATEGY_WIRE and anchor_mode != ANCHOR_MODE_ENDS:
+        # Issue #8916: a copy is planned per leg, and spaced mode has none.
+        # For ``auto`` it also has no threshold: resolve_min_wire_length_mm()
+        # gives spaced mode no default minimum. Refuse rather than guess.
+        raise ReinforceError(
+            f"strategy {strategy!r} needs anchor_mode 'ends': spaced mode has no "
+            "per-leg layout"
+            + (
+                " and no default minimum wire length for auto to compare against"
+                if strategy == STRATEGY_AUTO
+                else ""
+            )
+        )
     if mask_opening is None:
         mask_opening = anchor_mode == ANCHOR_MODE_ENDS
 
@@ -1393,6 +1639,7 @@ def reinforce_net(
         max_end_shift_mm=max_end_shift_mm,
         mask_opening=bool(mask_opening) and anchor_mode == ANCHOR_MODE_ENDS,
         mask_width_mm=mask_width_mm,
+        strategy=strategy,
     )
 
     if not net_segments:
@@ -1431,6 +1678,7 @@ def reinforce_net(
                 board_rules=board_rules,
             ),
             dry_run=dry_run,
+            sidecar_wires=sidecar_wires,
         )
 
     # Group by layer; pick the layer with the most cumulative length (MVP).
@@ -1614,6 +1862,8 @@ class _LegCandidate:
     #: out before placement; ``None`` when it may be anchored.
     status: str | None = None
     reason: str = ""
+    #: Unhandled only because this call processes another copper layer.
+    off_layer: bool = False
 
 
 def _run_points(run: list[Segment]) -> list[tuple[float, float]]:
@@ -2163,6 +2413,224 @@ def _courtyard_overlaps(
     ]
 
 
+# --------------------------------------------------------------------------
+# ``--strategy parallel`` (Issue #8916): copy a leg onto the opposite outer layer
+# --------------------------------------------------------------------------
+
+#: Margin (mm) around a copy's bounding box inside which other-net copper is
+#: gathered for its clearance test; generous enough for any creepage figure.
+_COPY_OBSTACLE_MARGIN_MM = 25.0
+
+
+def stitch_via_geometry(rules: DesignRules) -> tuple[float, float]:
+    """``(pad, drill)`` of the stitching vias on a parallel copy (Issue #8916).
+
+    The board's default via as ``kct stitch`` derives it from the same design
+    rules: the minimum drill, and the larger of the minimum via diameter and
+    that drill plus two minimum annular rings.
+    """
+    drill = rules.min_via_drill_mm
+    return max(rules.min_via_diameter_mm, drill + 2.0 * rules.min_annular_ring_mm), drill
+
+
+def _same_net_stitch_spacing(via_size: float, via_drill: float, rules: DesignRules) -> float:
+    """Minimum centre distance of two stitching vias: ``kct stitch``'s own rule."""
+    from kicad_tools.cli.stitch_cmd import _same_net_via_spacing
+
+    return _same_net_via_spacing(
+        via_size, rules.min_clearance_mm, via_drill, rules.min_hole_to_hole_mm
+    )
+
+
+def _clip_run(
+    run: list[Segment], t0: float, t1: float
+) -> list[tuple[tuple[float, float], tuple[float, float], float]]:
+    """The oriented ``run`` between arc lengths ``t0 <= t1``, vertex for vertex.
+
+    Each piece keeps its own segment's width; only the two ends are cut.
+    """
+    out: list[tuple[tuple[float, float], tuple[float, float], float]] = []
+    arc = 0.0
+    for seg in run:
+        length = _seg_length(seg)
+        s0, s1 = arc, arc + length
+        arc = s1
+        lo, hi = max(s0, t0), min(s1, t1)
+        if hi - lo <= 1e-6 or length <= 1e-12:
+            continue
+        (x0, y0), (x1, y1) = seg.start, seg.end
+
+        def at(t: float, x0=x0, y0=y0, x1=x1, y1=y1, s0=s0, length=length):
+            f = (t - s0) / length
+            return (x0 + f * (x1 - x0), y0 + f * (y1 - y0))
+
+        out.append(
+            (
+                seg.start if lo <= s0 + 1e-9 else at(lo),
+                seg.end if hi >= s1 - 1e-9 else at(hi),
+                seg.width,
+            )
+        )
+    return out
+
+
+def _close(p: tuple[float, float], q: tuple[float, float]) -> bool:
+    """Same point within the sidecar's matching tolerance (what ``--clear`` uses)."""
+    return abs(p[0] - q[0]) <= _SIDECAR_ANCHOR_TOL_MM and abs(p[1] - q[1]) <= _SIDECAR_ANCHOR_TOL_MM
+
+
+def _coincident(
+    points: list[tuple[float, float]], other: list[tuple[float, float]], tol: float
+) -> bool:
+    """True when polyline ``points`` lies within ``tol`` of polyline ``other`` along its length.
+
+    Not just its vertices: each segment of ``points`` is sampled at most
+    ``tol`` apart, so a straight chord whose two ends sit on a bent ``other``
+    (its body crossing open board) is not coincident (PR #8945 review).
+    Sampling at ``tol`` bounds the error between samples by ``tol / 2``.
+    """
+    if len(other) < 2 or not points:
+        return False
+    pairs = list(zip(other, other[1:], strict=False))
+
+    def on_other(p: tuple[float, float]) -> bool:
+        return min(_segment_distance(p, a, b) for a, b in pairs) <= tol
+
+    if len(points) == 1:
+        return on_other(points[0])
+    step = max(tol, 1e-3)
+    for (x0, y0), (x1, y1) in zip(points, points[1:], strict=False):
+        n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / step))
+        for k in range(n + 1):
+            if not on_other((x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n)):
+                return False
+    return True
+
+
+def _layer_obstacles(
+    pcb: PCB,
+    target_net: int,
+    layer: str,
+    bbox: tuple[float, float, float, float],
+) -> tuple[_OtherNetCopper, list[tuple[float, float, float, int]]]:
+    """Other-net copper ON ``layer`` near ``bbox``, plus other nets' drilled holes.
+
+    The copy's own obstacle set (Issue #8916). Unlike the layer-agnostic
+    anchor set (:func:`_collect_other_net_copper`), a track on one layer only
+    meets copper on that layer -- tracks and zone fills of ``layer``, pads with
+    copper there (every plated through-hole pad), and the vias that span it --
+    and the other nets' holes (plus unplated holes), for KiCad's
+    hole-to-copper clearance. Pads are discs of the circumscribed radius (an
+    over-estimate for a rectangle, so never a short).
+    """
+    from kicad_tools.core.layers import via_spans_layer
+
+    x0, y0, x1, y1 = bbox
+
+    def near(xa: float, ya: float, xb: float, yb: float) -> bool:
+        return xb >= x0 and xa <= x1 and yb >= y0 and ya <= y1
+
+    other = _OtherNetCopper()
+    other.net_names = {n.number: n.name for n in pcb.nets.values()}
+    drills: list[tuple[float, float, float, int]] = []
+
+    def group(net_number: int) -> _NetCopper:
+        return other.by_net.setdefault(net_number, _NetCopper())
+
+    for seg in pcb.segments:
+        if seg.net_number == target_net or seg.layer != layer:
+            continue
+        (sx, sy), (ex, ey) = seg.start, seg.end
+        if near(min(sx, ex), min(sy, ey), max(sx, ex), max(sy, ey)):
+            group(seg.net_number).tracks.append(_TrackObstacle(sx, sy, ex, ey, seg.width))
+    for via in pcb.vias:
+        if via.net_number == target_net:
+            continue
+        vx, vy = via.position
+        if not near(vx, vy, vx, vy):
+            continue
+        if via.drill > 0:
+            drills.append((vx, vy, via.drill, via.net_number))
+        if not via.layers or via_spans_layer(via.layers, layer):
+            group(via.net_number).vias.append((vx, vy, via.size, via.net_number))
+    for fp in pcb.footprints:
+        for pad in fp.pads:
+            if pad.net_number == target_net and pad.type != "np_thru_hole":
+                continue
+            pos = pcb.get_pad_position(fp.reference, pad.number)
+            if pos is None or not near(pos[0], pos[1], pos[0], pos[1]):
+                continue
+            px, py = pos
+            if pad.drill > 0:
+                drills.append((px, py, pad.drill, pad.net_number))
+            if pad.type == "np_thru_hole":
+                continue
+            if pad.type != "thru_hole" and layer not in pad.layers and "*.Cu" not in pad.layers:
+                continue
+            try:
+                w, h = float(pad.size[0]), float(pad.size[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            radius = max(w, h) / 2.0 if pad.shape == "circle" else math.hypot(w, h) / 2.0
+            group(pad.net_number).pads.append((px, py, radius, pad.net_number))
+    for zone in pcb.zones:
+        if zone.net_number == target_net:
+            continue
+        for i, poly in enumerate(zone.filled_polygons):
+            if len(poly) < 3 or zone.filled_polygon_layer(i) != layer:
+                continue
+            obstacle = _FilledPolyObstacle(list(poly))
+            if near(obstacle.min_x, obstacle.min_y, obstacle.max_x, obstacle.max_y):
+                group(zone.net_number).filled_polygons.append(obstacle)
+    return other, drills
+
+
+def _copy_track_violation(
+    segments: list[tuple[tuple[float, float], tuple[float, float], float]],
+    other: _OtherNetCopper,
+    drills: list[tuple[float, float, float, int]],
+    policy: _ClearancePolicy,
+) -> tuple[_Violation, tuple[float, float]] | None:
+    """Clearance test of a parallel copy's tracks; the first breach and where.
+
+    Copper: each track is a chain of discs of its width (the anchor/opening
+    predicate), and the chain's shortfall against the true capsule is added
+    to every requirement, so a breach is never missed between two discs.
+    Holes: the exact segment distance against KiCad's hole-to-copper
+    clearance.
+    """
+    from kicad_tools.cli.stitch_cmd import KICAD_HOLE_TO_COPPER_CLEARANCE
+
+    for a, b, width in segments:
+        r = width / 2.0
+        step = max(0.02, min(_MASK_SAMPLE_STEP_MM, r))
+        deficit = r - math.sqrt(max(0.0, r * r - (step / 2.0) ** 2))
+        n = max(1, math.ceil(math.dist(a, b) / step))
+        samples = [
+            (a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n) for k in range(n + 1)
+        ]
+        for net_number, grp in other.by_net.items():
+            net = other.net_names.get(net_number, "")
+            required, rule = policy.required(net)
+            for x, y in samples:
+                if not _group_clear(x, y, width, required + deficit, grp):
+                    gap = max(0.0, _actual_gap(x, y, width, required + deficit, grp) - deficit)
+                    return _Violation(rule, required, gap, net), (x, y)
+        for hx, hy, drill, net_number in drills:
+            gap = _segment_distance((hx, hy), a, b) - r - drill / 2.0
+            if gap < KICAD_HOLE_TO_COPPER_CLEARANCE - _RULE_EPS:
+                return (
+                    _Violation(
+                        RULE_HOLE_CLEARANCE,
+                        KICAD_HOLE_TO_COPPER_CLEARANCE,
+                        max(0.0, gap),
+                        other.net_names.get(net_number, ""),
+                    ),
+                    (hx, hy),
+                )
+    return None
+
+
 def _reinforce_ends(
     pcb: PCB,
     result: ReinforceResult,
@@ -2176,6 +2644,7 @@ def _reinforce_ends(
     rules: DesignRules,
     policy: _ClearancePolicy,
     dry_run: bool,
+    sidecar_wires: list[dict] | None = None,
 ) -> ReinforceResult:
     """``anchor_mode="ends"``: two anchors per leg (Issue #8742)."""
     net_name = result.net_name
@@ -2220,6 +2689,7 @@ def _reinforce_ends(
                     if c.status is None:
                         c.status = LEG_UNHANDLED
                         c.reason = f"on {lay}: --layer restricts this call to {layer}"
+                        c.off_layer = True
             candidates.extend(legs)
     else:
         if target_layer is None:
@@ -2245,6 +2715,7 @@ def _reinforce_ends(
                 for c in legs:
                     if c.status is None:
                         c.status = LEG_UNHANDLED
+                        c.off_layer = True
                         c.reason = (
                             f"on {lay}: without --current-paths one copper layer is "
                             f"processed per call (this call: {target_layer}; pass "
@@ -2266,15 +2737,19 @@ def _reinforce_ends(
     #: other ``not_selected`` reasons, which still earn a wire record.
     below_min: set[int] = set()
     selectable = [i for i, c in enumerate(candidates) if c.status is None]
+    strategy = result.strategy
     if min_wire_length_mm is not None:
         for i in selectable:
             if geoms[i].length_mm < min_wire_length_mm:
-                not_selected[i] = (
-                    f"shorter than the {min_wire_length_mm:g} mm minimum buttress-wire "
-                    "length (--min-wire-length): a wire needs a through-hole at each "
-                    "end and the two rarely fit on a shorter link"
-                )
                 below_min.add(i)
+                # Issue #8916: under ``parallel`` / ``auto`` a short leg is
+                # still selected -- it is exactly the leg a copy is for.
+                if strategy == STRATEGY_WIRE:
+                    not_selected[i] = (
+                        f"shorter than the {min_wire_length_mm:g} mm minimum buttress-wire "
+                        "length (--min-wire-length): a wire needs a through-hole at each "
+                        "end and the two rarely fit on a shorter link"
+                    )
         selectable = [i for i in selectable if i not in not_selected]
     if not gated and not all_runs and selectable:
         longest = max(selectable, key=lambda i: (geoms[i].length_mm, -i))
@@ -2283,6 +2758,45 @@ def _reinforce_ends(
                 not_selected[i] = (
                     "not selected: without --all-runs only the longest leg is anchored"
                 )
+
+    # Issue #8916: the strategy each selected leg gets. ``auto`` reuses the
+    # minimum's own verdict (``below_min``) rather than a second comparison.
+    def leg_strategy(i: int) -> str:
+        if strategy == STRATEGY_PARALLEL or (strategy == STRATEGY_AUTO and i in below_min):
+            return STRATEGY_PARALLEL
+        return STRATEGY_WIRE
+
+    # A leg already doubled by an earlier pass is two selected legs, one per
+    # outer layer, that coincide. The shorter one (on a tie the later) is the
+    # copy: it is reinforced with the other and must not be copied back, so a
+    # re-run adds no copper and no second wire-list record.
+    copy_of: dict[int, int] = {}
+    if strategy != STRATEGY_WIRE:
+        par = [
+            i for i in selectable if i not in not_selected and leg_strategy(i) == STRATEGY_PARALLEL
+        ]
+        for i in par:
+            for j in par:
+                if j <= i or i in copy_of or j in copy_of:
+                    continue
+                if OPPOSITE_OUTER_LAYER.get(candidates[i].layer) != candidates[j].layer:
+                    continue
+                tol = min(s.width for s in candidates[i].run + candidates[j].run) / 2.0
+                keep, dup = (i, j) if geoms[j].length_mm <= geoms[i].length_mm + 1e-6 else (j, i)
+                if _coincident(geoms[dup].points, geoms[keep].points, tol):
+                    copy_of[dup] = keep
+        # The copy is on the layer this call does not process: still the copy.
+        for i in par:
+            for j, c in enumerate(candidates):
+                if not c.off_layer or j in copy_of:
+                    continue
+                if OPPOSITE_OUTER_LAYER.get(candidates[i].layer) != c.layer:
+                    continue
+                tol = min(s.width for s in candidates[i].run + c.run) / 2.0
+                if geoms[j].length_mm <= geoms[i].length_mm + 1e-6 and _coincident(
+                    geoms[j].points, geoms[i].points, tol
+                ):
+                    copy_of[j] = i
 
     # Trunks / plain runs before branches, so a branch's junction-side anchor
     # steers clear of the trunk anchors; longest first within each.
@@ -2313,7 +2827,281 @@ def _reinforce_ends(
                         RULE_HOLE_TO_HOLE, rules.min_hole_to_hole_mm, max(0.0, hole_gap)
                     )
                 return _Violation(RULE_ANCHOR_SPACING, anchor_pad, near)
+        for hx, hy, hd in pass_stitch_holes:
+            gap = math.hypot(p[0] - hx, p[1] - hy) - anchor_drill / 2.0 - hd / 2.0
+            if gap < rules.min_hole_to_hole_mm - 1e-9:
+                return _Violation(RULE_HOLE_TO_HOLE, rules.min_hole_to_hole_mm, max(0.0, gap))
         return _position_violation(p[0], p[1], anchor_pad, anchor_drill, rules, other, policy)
+
+    # ---- parallel copies (Issue #8916) ----------------------------------
+    via_size, via_drill = stitch_via_geometry(rules)
+    #: Stitching vias decided this pass (anchors are in ``placed_positions``).
+    pass_stitch_holes: list[tuple[float, float, float]] = []
+    stitch_floor = _same_net_stitch_spacing(via_size, via_drill, rules)
+    board_drills: list[tuple[float, float, float, bool]] = []
+    #: Copper an earlier pass recorded as its own (the sidecar, never size or
+    #: shape): ``id()`` s of the vias and copy-layer tracks a record names.
+    owned_vias: set[int] = set()
+    owned_segments: set[int] = set()
+    if strategy != STRATEGY_WIRE:
+        for _cleared, segs, vias in _recorded_copies(
+            pcb, net_name, target_net_number, sidecar_wires or []
+        ):
+            owned_segments.update(id(s) for s in segs)
+            owned_vias.update(id(v) for v in vias)
+        for via in pcb.vias:
+            if via.drill > 0:
+                own_stitch = id(via) in owned_vias
+                board_drills.append((via.position[0], via.position[1], via.drill, own_stitch))
+        for fp in pcb.footprints:
+            for pad in fp.pads:
+                if pad.drill > 0:
+                    pos = pcb.get_pad_position(fp.reference, pad.number)
+                    if pos is not None:
+                        board_drills.append((pos[0], pos[1], pad.drill, False))
+
+    def stitch_violation(p: tuple[float, float], planned) -> _Violation | None:
+        """Rule check of one stitching-via candidate; ``None`` when clear.
+
+        A via an earlier pass recorded (``owned_vias``) already at ``p`` is
+        this tool's own via (idempotent re-run), not an obstacle. Any other
+        via, whatever its size, is an obstacle, so a stitch is never planned
+        on top of copper that predates the tool.
+        """
+        holes = [(q[0], q[1], anchor_drill) for q in placed_positions]
+        holes += pass_stitch_holes + [(q[0], q[1], via_drill) for q in planned]
+        for hx, hy, hd in holes:
+            gap = math.hypot(p[0] - hx, p[1] - hy) - via_drill / 2.0 - hd / 2.0
+            if gap < rules.min_hole_to_hole_mm - 1e-9:
+                return _Violation(RULE_HOLE_TO_HOLE, rules.min_hole_to_hole_mm, max(0.0, gap))
+        drills = [
+            (x, y, d)
+            for x, y, d, own in board_drills
+            if not (own and math.hypot(p[0] - x, p[1] - y) <= 0.01)
+        ]
+        view = _OtherNetCopper(by_net=other.by_net, net_names=other.net_names, all_drills=drills)
+        return _position_violation(p[0], p[1], via_size, via_drill, rules, view, policy)
+
+    def end_tie(points, cum, layer: str, cap: float):
+        """How the copy is tied at the leg end ``points[0]``.
+
+        ``(False, 0.0)``: the end lands on a plated through-hole pad or a
+        through via that predates this tool (any via no sidecar record names,
+        whatever its size), whose barrel already joins the layers -- the copy
+        runs to the vertex and nothing is placed or recorded there. ``(True, arc)``: a stitching via ties it at ``arc`` -- the
+        vertex itself for a free track end or a junction, or the first point
+        whose via clears the SMD pad the leg ends on (no via in an SMD pad).
+        ``None``: a pad covers the whole leg.
+        """
+        copper = _end_copper(points, layer, features, [], cap)
+        if copper is None:
+            return None
+        start = points[0]
+        for feat in copper:
+            if feat.pad is not None and feat.pad.type == "thru_hole":
+                return False, 0.0
+        for via in pcb.vias:
+            if via.net_number != target_net_number or via.via_type not in (None, "through"):
+                continue
+            if id(via) in owned_vias:
+                continue  # an earlier pass's recorded tie via: re-planned, not relied on
+            if math.dist(via.position, start) <= via.size / 2.0 + cap + 1e-6:
+                return False, 0.0
+        smd = [f for f in copper if f.pad is not None]
+        if not smd:
+            return True, 0.0
+        extent = _end_extent(points, smd)
+
+        def clear(p, _smd=smd):
+            return all(
+                f.distance(p) - via_size / 2.0 >= rules.min_clearance_mm - 1e-6 for f in _smd
+            )
+
+        t = _clear_arc(points, cum, extent, cum[-1], clear)
+        return (True, t) if t is not None else None
+
+    def refuse_copy(leg: LegSummary, copy_layer: str, pos, violation: _Violation, why: str) -> None:
+        leg.status = LEG_UNANCHORED
+        leg.copy_status = COPY_REFUSED
+        detail = (
+            f" ({violation.rule}: need {violation.required_mm:.3f} mm, have "
+            f"{violation.actual_mm:.3f} mm"
+            + (f", vs net {violation.obstacle_net!r}" if violation.obstacle_net else "")
+            + ")"
+            if violation.rule != RULE_COPY_GEOMETRY
+            else ""
+        )
+        leg.copy_reason = f"parallel copy on {copy_layer or 'another layer'} refused: {why}{detail}"
+        leg.reason = leg.copy_reason + "; nothing written for this leg"
+        result.refused_copies.append(
+            RefusedCopy(
+                leg_layer=leg.layer,
+                copy_layer=copy_layer,
+                x=pos[0],
+                y=pos[1],
+                rule=violation.rule,
+                required_mm=violation.required_mm,
+                actual_mm=violation.actual_mm,
+                obstacle_net=violation.obstacle_net,
+                reason=leg.copy_reason,
+            )
+        )
+
+    def plan_copy(cand: _LegCandidate, g: _RunGeom, leg: LegSummary) -> None:
+        """Copy one leg onto the opposite outer layer, whole or not at all."""
+        leg.strategy = STRATEGY_PARALLEL
+        points = g.points
+        cum = _cumulative_arc(points)
+        total = cum[-1]
+        copy_layer = OPPOSITE_OUTER_LAYER.get(cand.layer, "")
+        no_room = _Violation(RULE_COPY_GEOMETRY, 0.0, 0.0)
+        if not copy_layer:
+            refuse_copy(leg, "", points[0], no_room, f"{cand.layer} is an inner layer")
+            return
+        ties = [
+            end_tie(points, cum, cand.layer, cand.run[0].width / 2.0),
+            end_tie(points[::-1], cum, cand.layer, cand.run[-1].width / 2.0),
+        ]
+        if ties[0] is None or ties[1] is None:
+            refuse_copy(leg, copy_layer, points[0], no_room, "same-net pad copper covers the leg")
+            return
+        planned: list[tuple[float, float]] = []
+        span = [ties[0][1], total - ties[1][1]]
+        reach = STITCH_PITCH_MM / 2.0
+        steps = max(1, round(reach / (END_NUDGE_MAX_MM / END_NUDGE_STEPS)))
+        for end, sign in ((0, 1.0), (1, -1.0)):
+            needs_via, _ = ties[end]
+            if not needs_via:
+                continue
+            base = span[end]
+            first: tuple[tuple[float, float], _Violation] | None = None
+            chosen = None
+            for k in range(steps + 1):
+                t = base + sign * reach * k / steps
+                if not 0.0 <= t <= total:
+                    break
+                p = _point_at_arc(points, cum, t)
+                v = stitch_violation(p, planned)
+                if v is None:
+                    chosen = (t, p)
+                    break
+                first = first or (p, v)
+            if chosen is None:
+                assert first is not None
+                refuse_copy(
+                    leg, copy_layer, first[0], first[1], "no clear position for an end tie via"
+                )
+                return
+            span[end] = chosen[0]
+            planned.append(chosen[1])
+        lo, hi = span
+        if hi - lo < stitch_floor - 1e-9:
+            refuse_copy(
+                leg,
+                copy_layer,
+                points[0],
+                no_room,
+                f"{max(0.0, hi - lo):.3f} mm between its end ties, need {stitch_floor:.3f} mm",
+            )
+            return
+        n = max(0, math.ceil((hi - lo) / STITCH_PITCH_MM - 1e-9) - 1)
+        while n > 0 and (hi - lo) / (n + 1) < stitch_floor - 1e-9:
+            n -= 1
+        pitch = (hi - lo) / (n + 1)
+        for k in range(1, n + 1):
+            target = lo + k * pitch
+            first = None
+            chosen_p = None
+            for t in _nudge_arc_candidates(target, total, pitch):
+                if not lo + stitch_floor - 1e-9 <= t <= hi - stitch_floor + 1e-9:
+                    continue
+                p = _point_at_arc(points, cum, t)
+                if _too_close(p, planned, stitch_floor):
+                    continue
+                v = stitch_violation(p, planned)
+                if v is None:
+                    chosen_p = p
+                    break
+                first = first or (p, v)
+            if chosen_p is None:
+                pos, v = (
+                    first if first is not None else (_point_at_arc(points, cum, target), no_room)
+                )
+                refuse_copy(leg, copy_layer, pos, v, "no clear position for a stitching via")
+                return
+            planned.append(chosen_p)
+        planned.sort(key=lambda p: _arc_of_point(points, cum, p))
+        segments = _clip_run(cand.run, lo, hi)
+        xs = [c for a, b, _ in segments for c in (a[0], b[0])]
+        ys = [c for a, b, _ in segments for c in (a[1], b[1])]
+        m = _COPY_OBSTACLE_MARGIN_MM
+        obstacles, drills = _layer_obstacles(
+            pcb, target_net_number, copy_layer, (min(xs) - m, min(ys) - m, max(xs) + m, max(ys) + m)
+        )
+        hit = _copy_track_violation(segments, obstacles, drills, policy)
+        if hit is not None:
+            v, pos = hit
+            refuse_copy(leg, copy_layer, pos, v, "its track would break a clearance rule")
+            return
+        # A piece already on the copy layer that no record names predates the
+        # tool: it is the copy's copper there, but neither written again nor
+        # recorded, so ``--clear`` can never remove it.
+        foreign = [
+            (a, b, width)
+            for a, b, width in segments
+            if any(
+                id(s) not in owned_segments
+                and s.layer == copy_layer
+                and s.net_number == target_net_number
+                and abs(s.width - width) <= _ANCHOR_SIZE_TOL_MM
+                and (
+                    (_close(s.start, a) and _close(s.end, b))
+                    or (_close(s.start, b) and _close(s.end, a))
+                )
+                for s in pcb.segments
+            )
+        ]
+        copy = ParallelCopy(
+            layer=copy_layer,
+            segments=[piece for piece in segments if piece not in foreign],
+            stitch_vias=planned,
+            via_size_mm=via_size,
+            via_drill_mm=via_drill,
+            existing_segments=len(foreign),
+        )
+        for a, b, width in copy.segments:
+            if dry_run:
+                continue
+            if not pcb.add_trace(a, b, width=width, layer=copy_layer, net=net_name, dedupe=True):
+                copy.existing_segments += 1
+        for p in planned:
+            pass_stitch_holes.append((p[0], p[1], via_drill))
+            if dry_run:
+                continue
+            if (
+                pcb.add_via(
+                    p[0],
+                    p[1],
+                    size=via_size,
+                    drill=via_drill,
+                    layers=("F.Cu", "B.Cu"),
+                    net=net_name,
+                    dedupe=True,
+                )
+                is None
+            ):
+                copy.existing_vias += 1
+        leg.status = LEG_PARALLEL
+        leg.copy_status = COPY_PLACED
+        leg.copy = copy
+        result.copies.append(copy)
+        ends = " / ".join("its through hole" if not tie[0] else "a tie via" for tie in ties)
+        # Same text on a re-run (copper already present is counted on the
+        # copy, not here), so the wire-list record stays byte-identical.
+        leg.reason = (
+            f"parallel copy on {copy_layer} (ends tied by {ends}), "
+            f"{len(planned)} stitching via(s) of {via_size:.2f} mm pad / {via_drill:.2f} mm drill"
+        )
 
     def plan_pair(points, cum, t0: float, t1: float, clear):
         """Decide BOTH end anchors before either is written (PR #8751 review).
@@ -2425,11 +3213,25 @@ def _reinforce_ends(
         )
         refused_here = 0
         attempted_here = False
-        if cand.status is not None:
+        if index in copy_of:
+            # Issue #8916: the copy an earlier pass made; reinforced with its twin.
+            twin = candidates[copy_of[index]]
+            leg.strategy = STRATEGY_PARALLEL
+            leg.below_min_wire_length = index in below_min
+            leg.status = LEG_COPY
+            leg.reason = (
+                f"the parallel copy of the {twin.layer} leg it coincides with; "
+                "reinforced together with it, so it gets no copy of its own"
+            )
+        elif cand.status is not None:
             leg.status, leg.reason = cand.status, cand.reason
         elif index in not_selected:
             leg.status, leg.reason = LEG_UNANCHORED, not_selected[index]
             leg.below_min_wire_length = index in below_min
+        elif leg_strategy(index) == STRATEGY_PARALLEL:
+            attempted_here = True
+            leg.below_min_wire_length = index in below_min
+            plan_copy(cand, g, leg)
         elif overlaps := _courtyard_overlaps(pcb, cand.layer, g.points, result.wire_gauge_awg):
             attempted_here = True
             leg.status = LEG_UNANCHORED
@@ -2593,7 +3395,8 @@ def _reinforce_ends(
                 run_index=len(result.runs),
                 length_mm=g.length_mm,
                 segment_count=g.segment_count,
-                anchors_needed=2,
+                # A parallel copy needs no anchors (Issue #8916).
+                anchors_needed=0 if leg.strategy == STRATEGY_PARALLEL else 2,
                 anchors_placed=len(leg.anchors),
                 anchors_refused=refused_here,
             )
