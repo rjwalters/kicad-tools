@@ -244,6 +244,7 @@ __all__ = [
     "ThermalDesignCurrent",
     "UnmodeledCopper",
     "LayerChange",
+    "MinimumWidth",
     "audit_current_paths",
     "current_paths_sidecar_candidates",
     "discover_current_paths_sidecar",
@@ -260,6 +261,12 @@ __all__ = [
 # ``pcb/reinforce.py::_chain_polylines`` already uses to re-match router
 # segments back to schema segments.
 _COORD_DECIMALS = 6
+
+# Rounding for :attr:`MinimumWidth.position`, matching the 4 decimals
+# ``_layer_changes`` already rounds :attr:`LayerChange.position` to.
+# Coarser than node identity on purpose: a reported position is a figure a
+# human reads off a board, not a graph key.
+_POSITION_DECIMALS = 4
 
 # Slack on pad-extent containment (:func:`_pad_covers`), in mm. Absorbs
 # floating-point error in the pad-center/rotation transform only -- it is far
@@ -803,6 +810,44 @@ class ParallelGroup:
         return "parallel group " + " + ".join(parts)
 
 
+def _segment_midpoint(segment: Segment) -> tuple[float, float]:
+    """Midpoint of ``segment`` in **board** coordinates (mm).
+
+    Board coordinates, like every other position this module reports
+    (:attr:`LayerChange.position`, the ambiguity witness): a consumer that
+    prints sheet coordinates adds the board origin itself (#8798).
+    """
+    (x1, y1), (x2, y2) = segment.start, segment.end
+    return (
+        round((x1 + x2) / 2.0, _POSITION_DECIMALS),
+        round((y1 + y2) / 2.0, _POSITION_DECIMALS),
+    )
+
+
+@dataclass(frozen=True)
+class MinimumWidth:
+    """The narrowest copper on a resolved path (issue #8917).
+
+    Attributes:
+        width_mm: The narrowest width along the whole path. A deliberately
+            doubled stretch (:class:`ParallelGroup`) contributes its
+            **summed** width -- the same expression ``path_ampacity``
+            prints for that group -- not one branch's width, so a 2 x 1.0 mm
+            run counts as 2.0 mm rather than 1.0 mm.
+        layer: Copper layer of the element that set ``width_mm``. For a
+            parallel group, the layer of its narrowest branch's pinch
+            segment.
+        position: Midpoint of that segment, in **board** coordinates (mm).
+        parallel_group: True when ``width_mm`` is a group's summed width,
+            so a reader never mistakes it for one trace's width.
+    """
+
+    width_mm: float
+    layer: str
+    position: tuple[float, float]
+    parallel_group: bool = False
+
+
 @dataclass(frozen=True)
 class LayerChange:
     """One layer change on a resolved path, with the vias that carry it.
@@ -936,6 +981,78 @@ class PathResolution:
     @property
     def ok(self) -> bool:
         return self.status == STATUS_RESOLVED
+
+    @property
+    def min_width(self) -> MinimumWidth | None:
+        """Narrowest copper on this path, or ``None`` when not resolved (#8917).
+
+        ``None`` -- never ``0`` -- for an ``unresolved``/``ambiguous`` path and
+        for a resolved path with no segments: ``segments`` is populated only
+        when the status is ``resolved``, so there is nothing to measure.
+
+        Deliberately doubled copper is measured as one conductor, mirroring
+        how ``path_ampacity`` judges it: a :class:`ParallelGroup` contributes
+        a single candidate, its **summed** width
+        ``sum(min(seg.width for seg in branch) for branch in branches)`` --
+        the same expression that rule's own message prints -- while every
+        ungrouped segment contributes its own width. So a stretch doubled on
+        two layers at 1.0 mm enters as 2.0 mm, not twice as 1.0 mm.
+
+        ``sense_taps`` are excluded by construction: a Kelvin sense tap is
+        never part of ``segments``, so thin sense copper off an endpoint pad
+        cannot become the reported minimum.
+
+        Ties resolve to the first candidate in path order (and, within a
+        group, to its first narrowest branch's first narrowest segment, as
+        :meth:`ParallelGroup.describe` reports each branch).
+        """
+        if self.status != STATUS_RESOLVED:
+            return None
+
+        group_index: dict[int, int] = {
+            id(seg): i for i, group in enumerate(self.parallel_groups) for seg in group.segments
+        }
+
+        def _group_candidate(group: ParallelGroup) -> MinimumWidth:
+            # The summed-width expression ``path_ampacity`` prints for this
+            # group, so the audit and the check never report two different
+            # "summed width" figures for one group.
+            width = sum(min(seg.width for seg in branch) for branch in group.branches)
+            branch = min(group.branches, key=lambda b: min(seg.width for seg in b))
+            pinch = min(branch, key=lambda seg: seg.width)
+            return MinimumWidth(
+                width_mm=width,
+                layer=pinch.layer,
+                position=_segment_midpoint(pinch),
+                parallel_group=True,
+            )
+
+        candidates: list[MinimumWidth] = []
+        seen: set[int] = set()
+        for seg in self.segments:
+            index = group_index.get(id(seg))
+            if index is None:
+                candidates.append(
+                    MinimumWidth(
+                        width_mm=seg.width,
+                        layer=seg.layer,
+                        position=_segment_midpoint(seg),
+                    )
+                )
+            elif index not in seen:
+                seen.add(index)
+                candidates.append(_group_candidate(self.parallel_groups[index]))
+        # Defensive: a group whose segments are all absent from ``segments``
+        # would otherwise go unmeasured.
+        candidates += [
+            _group_candidate(group)
+            for i, group in enumerate(self.parallel_groups)
+            if i not in seen and group.branches
+        ]
+
+        if not candidates:
+            return None
+        return min(candidates, key=lambda c: c.width_mm)
 
 
 def _node_key(point: tuple[float, float]) -> tuple[float, float]:
