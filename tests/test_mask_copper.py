@@ -114,6 +114,49 @@ def test_same_net_and_overlapped_neighbor_remain_independent():
     assert result.measurements[0].exposed_area_mm2 == pytest.approx(0.12, abs=0.000002)
 
 
+@pytest.mark.parametrize(
+    "conductor_x,exposed_area_mm2",
+    [(1.05, 0.01), (1.08, 0.004)],
+)
+def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
+    conductor_x, exposed_area_mm2
+):
+    """A same-net trace inside a pad's mask opening is an error (issues #8914, #8932).
+
+    This is the shape JLCDFM reports as danger-level "solder mask opening
+    exposing trace": a track passing an SMD pad of *its own net* within the
+    pad's mask margin, without overlapping the pad. It is measured exactly like
+    cross-net exposure -- the measurement loop never reads ``net``, whose only
+    gate is the ``MaskEscapeIntent`` path. Guards against a same-net exclusion
+    being reintroduced into that loop, which would silently drop the
+    measurement and the finding while still reporting complete coverage.
+    """
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, other = toy_geometry(conductor_x=conductor_x, overlap_owner=False)
+    result = assess_attributed_geometry(
+        geometry,
+        # Interim JLCPCB values written literally: a future threshold table
+        # must not silently move what this test asserts.
+        MaskCopperPolicy(
+            clearance_mm=0.09,
+            source="order",
+            process="process",
+            revision="rev",
+            warning_clearance_mm=0.15,
+        ),
+    )
+    assert result.coverage == "complete"
+    assert len(result.measurements) == 1
+    measurement = result.measurements[0]
+    assert measurement.conductor_uuid == other
+    assert measurement.disposition == "violation"
+    assert measurement.exposed_area_mm2 == pytest.approx(exposed_area_mm2, abs=0.000002)
+    assert [(v.rule_id, v.severity) for v in assessment_results(result).violations] == [
+        ("mask_to_copper", "error")
+    ]
+
+
 @pytest.mark.parametrize("mode", ["valid", "stale", "wrong_uuid", "wrong_layer", "disconnected"])
 def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode):
     from dataclasses import replace
