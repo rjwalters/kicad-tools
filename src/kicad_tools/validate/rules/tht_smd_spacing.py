@@ -45,6 +45,36 @@ each of them judged exactly as the vias-excluded default did -- the fix adds the
 fab's anchor-hole class without adding a single finding to a board that has
 none.
 
+**An exposed via annulus also counts as the "SMD" side** (Issue #8925).
+JLCDFM's fifth #8914 danger item paired a 1.9 mm / 1.3 mm-drill anchor via
+with an ordinary 0.8 mm / 0.4 mm fan-out via 1.5 mm away (same net): the fab's
+"SMD" side includes a small exposed via pad, not only footprint SMD pads. Two
+gates keep this from becoming the via flood above:
+
+* **Hole side: anchor vias only.** Only a *via* already judged as a hole (drill
+  at least ``via_drill_mm``, :data:`ANCHOR_DRILL_MM` by default) is paired
+  against via annuli. A THT *component* pad is never paired against a via
+  annulus: nothing in the fab report shows that pairing, and allowing it added
+  20 errors + 4 warnings to board 05 (measured 2026-11-14, #8925 curation).
+  Fan-out-vs-fan-out pairs are never judged.
+* **Annulus side: exposed copper only (tenting decision).** The fab's hazard is
+  exposed copper taking solder, so a via annulus is a candidate on ``F.Cu`` /
+  ``B.Cu`` only where it is *not tented* on that side, resolved by
+  :func:`~kicad_tools.validate.rules.silkscreen._via_is_tented` (per-via
+  override -> board setup default -> absent-token default: tented). Inner
+  layers carry no mask and take no solder, so an annulus there is never a
+  candidate. The hole side is not exposure-gated: a plated barrel is a hole
+  regardless of what covers its ring. The reporter noted the anchor via of
+  their item 1 was untented on both sides, which suggests tenting is part of
+  the fab's test, but **the fab's exact test is unverified**.
+
+No board in this repo's regression set has an anchor-sized via, and every via
+on boards 03 / 05 / 06 / 07 resolves as tented, so this pairing adds nothing to
+their counts (6 / 0 / 0 / 0); its live calibration is unverified. A pair is
+reported **once**, even when it meets on both faces or both vias are anchors
+(each then sits on both sides of the comparison); the message names every
+layer it meets on.
+
 A pad whose ``shape`` this rule cannot measure is **reported as unmeasured**
 (``tht_smd_spacing_incomplete``, info) rather than silently dropped: a shape the
 rule cannot judge must not look like a pad it cleared (Issue #8914).
@@ -58,6 +88,7 @@ from typing import Any
 from ..copper_refs import board_origin, via_ref
 from ..violations import DRCResults, DRCViolation
 from .clearance import _pad_on_layer, _pad_polygon
+from .silkscreen import _via_is_tented
 
 TOLERANCE = 0.001
 DANGER_MM = 2.0
@@ -69,6 +100,10 @@ WARNING_MM = 2.7
 #: board in this repo) is not.  Calibrated against the #8914 report, whose
 #: missed anchor vias drill 1.3-1.42 mm.
 ANCHOR_DRILL_MM = 1.0
+
+#: Outer copper layers and the solder-mask side :func:`_via_is_tented` resolves
+#: for each.  An inner-layer annulus has no mask opening and takes no solder.
+_MASK_SIDE = {"F.Cu": "F", "B.Cu": "B"}
 
 #: Pad shapes whose true copper outline :func:`_pad_polygon` reproduces.  Any
 #: other shape (``custom``, ``trapezoid``) would be approximated by its
@@ -89,6 +124,9 @@ def check_tht_smd_spacing(
     via_drill_mm: float = ANCHOR_DRILL_MM,
 ) -> DRCResults:
     """Report THT pads and anchor-sized vias closer than the thresholds to any SMD pad.
+
+    Anchor-sized vias are also judged against every *exposed* via annulus
+    (Issue #8925); THT component pads are not.
 
     ``via_drill_mm`` is the drill diameter at which a via starts being judged
     like a THT component pad (:data:`ANCHOR_DRILL_MM` by default; see the module
@@ -151,22 +189,53 @@ def check_tht_smd_spacing(
                 f"unjudged, not cleared: {listed}",
             )
         )
+    # Exposed via annuli: the fab's other "SMD" side (Issue #8925), judged only
+    # against anchor vias -- never against THT component pads.
+    # (layer, identity, geometry, net)
+    annuli: list[tuple[str, str, Any, str]] = []
+    # Indices into ``tht`` of the entries that are anchor vias.
+    anchor_vias: list[int] = []
+    setup = getattr(pcb, "setup", None)
     for via in pcb.vias:
+        if any(layer not in layers for layer in via.layers):
+            continue
+        first, last = sorted(layers.index(layer) for layer in via.layers)
+        span = set(layers[first : last + 1])
+        identity = via_ref(via, origin)
+        geom = Point(via.position).buffer(via.size / 2, quad_segs=64)
+        net = str(via.net_number)
+        for layer in sorted(span):
+            side = _MASK_SIDE.get(layer)
+            if side is not None and not _via_is_tented(via, setup, side):
+                annuli.append((layer, identity, geom, net))
         # ``not (drill >= limit)`` rather than ``drill < limit`` so a NaN drill
         # is skipped instead of silently judged, and so ``math.inf`` disables
         # via judging outright.
         if not via.drill >= via_drill_mm - TOLERANCE:
             continue
-        if any(layer not in layers for layer in via.layers):
-            continue
-        first, last = sorted(layers.index(layer) for layer in via.layers)
-        tht.append(
-            (
-                set(layers[first : last + 1]),
-                via_ref(via, origin),
-                Point(via.position).buffer(via.size / 2, quad_segs=64),
-                str(via.net_number),
-                None,
+        anchor_vias.append(len(tht))
+        tht.append((span, identity, geom, net, None))
+
+    def report(layer, identity, geom, net, other_id, other_geom, other_net, what, where=None):
+        distance = geom.distance(other_geom)
+        if distance <= TOLERANCE or distance >= warning_mm - TOLERANCE:
+            return
+        a, b = nearest_points(geom, other_geom)
+        is_error = distance < danger_mm - TOLERANCE
+        results.add(
+            DRCViolation(
+                "tht_smd_spacing",
+                "error" if is_error else "warning",
+                f"THT/via to {what} spacing {distance:.3f}mm < "
+                f"{(danger_mm if is_error else warning_mm):.1f}mm "
+                f"(copper edge to copper edge) on {where or layer}; closest points "
+                f"({a.x + ox:.6f}, {a.y + oy:.6f}) and ({b.x + ox:.6f}, {b.y + oy:.6f})",
+                location=((a.x + b.x) / 2, (a.y + b.y) / 2),
+                layer=layer,
+                actual_value=distance,
+                required_value=danger_mm if is_error else warning_mm,
+                items=tuple(sorted((identity, other_id))),
+                nets=tuple(sorted({net, other_net})),
             )
         )
 
@@ -180,25 +249,44 @@ def check_tht_smd_spacing(
                 _, smd_id, smd_geom, smd_net, smd_owner = pads[int(raw)]
                 if smd_id == identity or (tht_owner is not None and tht_owner == smd_owner):
                     continue
-                distance = geom.distance(smd_geom)
-                if distance <= TOLERANCE or distance >= warning_mm - TOLERANCE:
+                report(layer, identity, geom, net, smd_id, smd_geom, smd_net, "SMD pad")
+
+    # An anchor-vs-annulus pair is one physical feature pair: two anchor vias
+    # are each on both sides of this comparison, and a pair exposed on both
+    # faces meets on two layers.  Report it once (``DRCResults.add`` does not
+    # de-duplicate), on the first layer, naming every layer it meets on.
+    # pair -> (layers, hole entry, ring entry)
+    pairs: dict[tuple[str, str], tuple[list[str], tuple[str, Any, str], tuple[str, Any, str]]] = {}
+    for layer in sorted({a[0] for a in annuli}):
+        rings = [a for a in annuli if a[0] == layer]
+        tree = STRtree([r[2] for r in rings])
+        for index in anchor_vias:
+            span, identity, geom, net, _ = tht[index]
+            if layer not in span:
+                continue
+            for raw in tree.query(geom, predicate="dwithin", distance=warning_mm):
+                _, ring_id, ring_geom, ring_net = rings[int(raw)]
+                if ring_id == identity:
                     continue
-                a, b = nearest_points(geom, smd_geom)
-                is_error = distance < danger_mm - TOLERANCE
-                results.add(
-                    DRCViolation(
-                        "tht_smd_spacing",
-                        "error" if is_error else "warning",
-                        f"THT/via to SMD pad spacing {distance:.3f}mm < "
-                        f"{(danger_mm if is_error else warning_mm):.1f}mm "
-                        f"(copper edge to copper edge) on {layer}; closest points "
-                        f"({a.x + ox:.6f}, {a.y + oy:.6f}) and ({b.x + ox:.6f}, {b.y + oy:.6f})",
-                        location=((a.x + b.x) / 2, (a.y + b.y) / 2),
-                        layer=layer,
-                        actual_value=distance,
-                        required_value=danger_mm if is_error else warning_mm,
-                        items=tuple(sorted((identity, smd_id))),
-                        nets=tuple(sorted({net, smd_net})),
-                    )
+                key = (min(identity, ring_id), max(identity, ring_id))
+                entry = pairs.setdefault(
+                    key, ([], (identity, geom, net), (ring_id, ring_geom, ring_net))
                 )
+                if layer not in entry[0]:
+                    entry[0].append(layer)
+    for key in sorted(pairs):
+        pair_layers, hole, ring = pairs[key]
+        hole_id, hole_geom, hole_net = hole
+        ring_id, ring_geom, ring_net = ring
+        report(
+            pair_layers[0],
+            hole_id,
+            hole_geom,
+            hole_net,
+            ring_id,
+            ring_geom,
+            ring_net,
+            "exposed via annulus",
+            ", ".join(pair_layers),
+        )
     return results

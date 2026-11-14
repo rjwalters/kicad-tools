@@ -14,7 +14,7 @@ limits, and live in one table at the top of `validate/rules/physical_gap.py`:
 | Copper gap (tracks, pads, vias, fills; same-net included) | < 0.10 mm | `error` |
 | Copper gap | 0.10 to < 0.15 mm | `warning` |
 | Pad-to-pad mask bridge on **2 oz** copper | < 0.20 mm | `error` |
-| THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad (`tht_smd_spacing`) | < 2.0 mm / < 2.7 mm | `error` / `warning` |
+| THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad; via drilled >= 1.0 mm, to exposed via annulus (`tht_smd_spacing`) | < 2.0 mm / < 2.7 mm | `error` / `warning` |
 
 Same-net near-parallel copper (e.g. 0.08 mm) is always listed; it uses the same
 tiers. The mask-bridge check needs a known copper weight (stackup or `--copper`);
@@ -36,6 +36,17 @@ where every via drills 0.15-0.3 mm. A THT or SMD pad whose `shape` the rule
 cannot reproduce exactly (`custom`, `trapezoid`) reports
 `tht_smd_spacing_incomplete` at *info* rather than being dropped silently, so
 missing coverage never looks like a cleared pad.
+
+An **exposed via annulus** also counts as the "SMD" side (Issue #8925): JLCDFM
+flagged a 1.9 mm / 1.3 mm-drill anchor via 1.5 mm from an ordinary 0.8 mm /
+0.4 mm via. Only an anchor *via* (drill >= `ANCHOR_DRILL_MM`) is paired against
+via annuli -- a THT component pad never is (that reading added 24 findings to
+board 05), and fan-out-vs-fan-out pairs are never judged. An annulus counts only
+on an outer face where it is **not tented** (per-via `(tenting ...)` override,
+then the board setup default, then KiCad's absent-token default: tented); the
+fab's exact tenting test is unverified. A pair is reported once, naming every
+layer it meets on. Every via on boards 03 / 05 / 06 / 07 resolves as tented, so
+their counts are unchanged and the live calibration of this pairing is unverified.
 
 **Design decision: flattened board geometry, not exported gerbers.** The pass runs
 on the same per-layer copper union as the opt-in check: it exists and is tested,
