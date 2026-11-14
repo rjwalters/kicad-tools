@@ -247,6 +247,7 @@ __all__ = [
     "MinimumWidth",
     "audit_current_paths",
     "current_paths_sidecar_candidates",
+    "describe_witness",
     "discover_current_paths_sidecar",
     "dump_current_path_specs",
     "load_current_path_specs",
@@ -255,6 +256,7 @@ __all__ = [
     "reinforcement_path_resolutions",
     "resolve_current_path",
     "unmodeled_copper",
+    "witness_text",
 ]
 
 # Coordinate rounding for graph-node identity. Matches the tolerance
@@ -949,6 +951,10 @@ class PathResolution:
             reachable from them -- current could split across parallel
             branches, so a single linear path cannot be trusted).
         reason: Human-readable explanation. Empty only when resolved.
+            Prose only -- it never quotes a coordinate (Issue #8928), so it
+            is the same in every frame. A surface that wants to name the
+            loop appends :func:`describe_witness` of :attr:`witness` with
+            the origin it reports in.
         source: The resolved source endpoint, when resolvable.
         sink: The resolved sink endpoint, when resolvable.
         segments: The ordered copper segments covering this path. Only
@@ -972,7 +978,9 @@ class PathResolution:
     layer_changes: tuple[LayerChange, ...] = ()
     #: For a loop/parallel ambiguity (issue #8368): the closing edge that
     #: proves the cycle, as ``{"kind": "segment"|"via", "layer", "start",
-    #: "end"}`` / ``{"kind": "via", "position"}``. Empty otherwise.
+    #: "end"}`` / ``{"kind": "via", "position"}``, board-relative, plus
+    #: ``"blocking_branches"`` when a doubled group failed to qualify.
+    #: Rendered by :func:`describe_witness`. Empty otherwise.
     witness: dict[str, object] = field(default_factory=dict)
     #: Doubled-copper groups the resolution relied on to clear a cycle
     #: (issue #8790). Their segments are part of ``segments``.
@@ -1877,15 +1885,50 @@ def _reduce_parallel_groups(
     return groups
 
 
-def _describe_witness(witness: dict[str, object]) -> str:
+def _witness_point(point: object, origin: tuple[float, float]) -> str:
+    x, y = cast("list[float]", point)[:2]
+    return f"({x + origin[0]:.3f}, {y + origin[1]:.3f})"
+
+
+def witness_text(witness: dict[str, object], origin: tuple[float, float] = (0.0, 0.0)) -> str:
+    """The witness object alone, e.g. ``segment (x, y)->(x, y) on B.Cu`` (Issue #8928).
+
+    :attr:`PathResolution.witness` is board-relative, like every router
+    coordinate. ``origin`` is the frame the caller reports in: pass
+    ``PCB.board_origin`` to quote sheet positions (what the KiCad GUI shows),
+    or leave the default to quote board-relative ones. Coordinates are
+    formatted to 3 dp. Empty string for an empty witness.
+    """
     if not witness:
         return ""
     if witness.get("kind") == "segment":
-        start = tuple(cast("list[float]", witness["start"]))
-        end = tuple(cast("list[float]", witness["end"]))
-        return f" [witness: segment {start}->{end} on {witness['layer']}]"
-    position = tuple(cast("list[float]", witness["position"]))
-    return f" [witness: via barrel at {position}]"
+        start = _witness_point(witness["start"], origin)
+        end = _witness_point(witness["end"], origin)
+        return f"segment {start}->{end} on {witness['layer']}"
+    return f"via barrel at {_witness_point(witness['position'], origin)}"
+
+
+def describe_witness(witness: dict[str, object], origin: tuple[float, float] = (0.0, 0.0)) -> str:
+    """Render ``witness`` as the `` [witness: ...] [blocking branches: ...]`` suffix.
+
+    The one renderer for :attr:`PathResolution.witness` (Issue #8928).
+    :attr:`PathResolution.reason` carries no coordinates, so each surface that
+    reports an ambiguous path appends this with its own ``origin`` -- the
+    resolution itself stays frame-free. See :func:`witness_text` for the frame
+    and format. Empty string for an empty witness.
+    """
+    if not witness:
+        return ""
+    out = f" [witness: {witness_text(witness, origin)}]"
+    branches = cast("list[dict[str, object]]", witness.get("blocking_branches") or [])
+    if branches:
+        parts = [
+            f"{_witness_point(b['start'], origin)}->{_witness_point(b['end'], origin)}"
+            f" on {b['layer']}"
+            for b in branches
+        ]
+        out += f" [blocking branches: {'; '.join(parts)}]"
+    return out
 
 
 def _blocking_branches_witness(blockers: list[list[Segment]]) -> list[dict[str, object]]:
@@ -1897,18 +1940,6 @@ def _blocking_branches_witness(blockers: list[list[Segment]]) -> list[dict[str, 
         }
         for b in blockers
     ]
-
-
-def _describe_blockers(witness: dict[str, object]) -> str:
-    branches = cast("list[dict[str, object]]", witness.get("blocking_branches") or [])
-    if not branches:
-        return ""
-    parts = [
-        f"{tuple(cast('list[float]', b['start']))}->{tuple(cast('list[float]', b['end']))}"
-        f" on {b['layer']}"
-        for b in branches
-    ]
-    return f" [blocking branches: {'; '.join(parts)}]"
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
@@ -2213,8 +2244,6 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                 "declared endpoints sit on a net whose routed copper contains a "
                 "loop/parallel return path reachable from them -- current split "
                 "between branches cannot be determined from a single resolved path"
-                + _describe_witness(witness)
-                + _describe_blockers(witness)
             ),
             source=source,
             sink=sink,
