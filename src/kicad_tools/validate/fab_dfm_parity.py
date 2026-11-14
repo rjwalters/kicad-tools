@@ -35,7 +35,7 @@ from typing import Literal
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Version of the table below; bump on any row change.
-TABLE_VERSION = 3
+TABLE_VERSION = 4
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -111,9 +111,12 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`tht_smd_spacing` (#8843) judges plated through-hole component pads plus, "
         "since #8914, vias whose drill is at least 1.0 mm (the fab classes a hole "
         "by size: the three top-side dangers kct missed on the #8914 board were all "
-        "1.3-1.42 mm wire-anchor vias). Still skipped: same-footprint pad pairs, "
-        "sub-1.0 mm fan-out vias, and the fab's via-to-via pairing (its `smd` side "
-        "also counts a small exposed via pad: #8914 item 5, tracked in #8925). A "
+        "1.3-1.42 mm wire-anchor vias). Since #8925 an anchor via is also "
+        "judged against any exposed (untented) via annulus -- the fab's `smd` side "
+        "counts a small exposed via pad (#8914 item 5); THT component pads are not "
+        "paired with via annuli, and tented annuli are skipped (the fab's exact "
+        "tenting test is unverified). Still skipped: same-footprint pad pairs and "
+        "sub-1.0 mm fan-out vias as the hole side. A "
         "pad shape the rule "
         "cannot measure now reports `tht_smd_spacing_incomplete` at info instead of "
         "vanishing. Fab-view gated -- runs only when the effective --mfr is exactly "
