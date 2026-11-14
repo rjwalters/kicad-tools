@@ -126,3 +126,72 @@ def test_json_embeds_wires(tmp_path, capsys):
     assert run_pcb_command(_args(p, format="json")) == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["wires"] == load_wires(sidecar_path(p))
+
+
+# --------------------------------------------------------------------------
+# Issue #8915: a leg below the minimum wire length is not on the cut list
+# --------------------------------------------------------------------------
+
+
+def _short_board(tmp_path: Path, length: float) -> Path:
+    p = tmp_path / "short.kicad_pcb"
+    _two_net_pcb(length=length).save(p)
+    return p
+
+
+def test_leg_below_min_wire_length_writes_no_record(tmp_path):
+    """The owner does not want a wire on a sub-15 mm leg, so it is absent from
+    the cut-and-bend list -- not listed with an empty ``anchors``."""
+    p = _short_board(tmp_path, 12.0)
+    assert run_pcb_command(_args(p)) == 0
+    # No wire at all on the net -> nothing to write, so no sidecar is created.
+    assert not sidecar_path(p).exists()
+
+
+def test_min_wire_length_zero_still_writes_the_record(tmp_path):
+    """Control for the test above: the record's absence is the minimum's doing,
+    not something else about a 12 mm leg."""
+    p = _short_board(tmp_path, 12.0)
+    assert run_pcb_command(_args(p, min_wire_length=0.0)) == 0
+    wires = load_wires(sidecar_path(p))
+    assert [(w["net"], w["status"], len(w["anchors"])) for w in wires] == [("NET_A", "full", 2)]
+
+
+def test_short_leg_does_not_displace_another_net_s_wire(tmp_path):
+    """A skipped leg must not be written, and must not disturb the entries a
+    previous pass wrote for a different net."""
+    p = tmp_path / "mixed.kicad_pcb"
+    pcb = PCB.create(width=200, height=100, center=False)
+    # NET_A is long enough for a wire; NET_B is below the minimum.
+    pcb.add_trace((20.0, 30.0), (120.0, 30.0), width=2.0, layer="F.Cu", net="NET_A")
+    pcb.add_trace((20.0, 70.0), (32.0, 70.0), width=2.0, layer="F.Cu", net="NET_B")
+    pcb.save(p)
+
+    assert run_pcb_command(_args(p, net="NET_A")) == 0
+    after_a = load_wires(sidecar_path(p))
+    assert [w["net"] for w in after_a] == ["NET_A"]
+
+    assert run_pcb_command(_args(p, net="NET_B")) == 0
+    after_b = load_wires(sidecar_path(p))
+    assert after_b == after_a, "NET_B has no wire; NET_A's entry must be untouched"
+
+
+def test_unanchored_leg_that_still_wants_a_wire_keeps_its_record(tmp_path):
+    """Only the length filter removes a record. A leg left unanchored for any
+    other reason still names copper that WANTS a wire, so it stays on the list
+    with its reason -- the pre-#8915 behaviour."""
+    p = tmp_path / "unselected.kicad_pcb"
+    pcb = PCB.create(width=200, height=100, center=False)
+    # Two legs on one net, both over the minimum; without --all-runs only the
+    # longest is anchored and the other is reported ``unanchored``.
+    pcb.add_trace((20.0, 30.0), (120.0, 30.0), width=2.0, layer="F.Cu", net="NET_A")
+    pcb.add_trace((20.0, 70.0), (60.0, 70.0), width=2.0, layer="F.Cu", net="NET_A")
+    pcb.save(p)
+
+    assert run_pcb_command(_args(p, net="NET_A")) == 0
+    wires = load_wires(sidecar_path(p))
+    statuses = sorted(w["status"] for w in wires)
+    assert statuses == ["full", "unanchored"], wires
+    unanchored = next(w for w in wires if w["status"] == "unanchored")
+    assert unanchored["anchors"] == []
+    assert "only the longest leg" in unanchored["reason"]

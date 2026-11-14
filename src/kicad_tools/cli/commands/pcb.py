@@ -1168,7 +1168,12 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     are refused and reported, never placed. In-place by default; ``-o``
     writes elsewhere; ``--dry-run`` reports without writing.
     """
-    from kicad_tools.pcb.reinforce import ReinforceError, clear_anchors, reinforce_net
+    from kicad_tools.pcb.reinforce import (
+        ReinforceError,
+        clear_anchors,
+        reinforce_net,
+        resolve_min_wire_length_mm,
+    )
     from kicad_tools.schema.pcb import PCB
 
     net_name = getattr(args, "net", None)
@@ -1205,6 +1210,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     layer = getattr(args, "layer", None)
     all_runs = getattr(args, "all_runs", False)
     min_run_length = getattr(args, "min_run_length", None)
+    min_wire_length = getattr(args, "min_wire_length", None)
+    for flag, value in (
+        ("--min-run-length", min_run_length),
+        ("--min-wire-length", min_wire_length),
+    ):
+        if value is not None and value < 0:
+            print(f"Error: {flag} must not be negative", file=sys.stderr)
+            return 1
     dry_run = getattr(args, "dry_run", False)
     output_format = getattr(args, "format", "text")
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
@@ -1320,6 +1333,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             dry_run=dry_run,
             all_runs=all_runs,
             min_run_length_mm=min_run_length,
+            min_wire_length_mm=min_wire_length,
             current_paths=current_paths,
             net_class_clearances=net_class_clearances,
             pairwise_clearance=pairwise,
@@ -1370,6 +1384,13 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         # unchanged so current agent consumers keep working.
         "all_runs": all_runs,
         "min_run_length_mm": min_run_length,
+        # Issue #8915: what --min-wire-length was given (None = not given) and
+        # the minimum actually enforced for this mode after resolving the
+        # alias and the ends-mode 15.0 default.
+        "min_wire_length_mm": min_wire_length,
+        "min_wire_length_effective_mm": resolve_min_wire_length_mm(
+            min_wire_length, min_run_length, anchor_mode
+        ),
         "runs_total": len(outcome.runs),
         "runs_fully_reinforced": outcome.runs_fully_reinforced,
         "runs_partial": outcome.runs_partial,
@@ -1511,6 +1532,13 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         else:
             print("  Anchor mode:    spaced")
             print(f"  Spacing:        {outcome.spacing_mm:.1f} mm")
+        # Issue #8915: show the minimum actually enforced, so the ends-mode
+        # 15.0 default is visible in the report and not just in --help.
+        effective_min = result["min_wire_length_effective_mm"]
+        if effective_min:
+            print(f"  Min wire length: {effective_min:g} mm (shorter legs get no wire)")
+        else:
+            print("  Min wire length: none (every leg is a wire candidate)")
         if outcome.anchor_mode == "ends" and outcome.placed_count == 0:
             # Every attempted leg was refused or too short: nothing is anchored.
             print("  Anchored run:   none (no leg received an anchor; see legs below)")

@@ -17,10 +17,12 @@ import pytest
 
 from kicad_tools.manufacturers.base import DesignRules
 from kicad_tools.pcb.reinforce import (
+    DEFAULT_MIN_WIRE_LENGTH_MM,
     ReinforceError,
     _anchor_positions,
     _chain_polylines,
     reinforce_net,
+    resolve_min_wire_length_mm,
 )
 from kicad_tools.physics.wire_gauge import (
     anchor_drill_for_awg,
@@ -1907,7 +1909,10 @@ class TestEndAnchorBranch:
 class TestEndAnchorTooShortAndRefusal:
     def test_too_short_leg_gets_no_anchors(self):
         pcb = _padded_straight_pcb(length=6.0)
-        result = reinforce_net(pcb, "FUSED_LINE", dry_run=True)
+        # min_wire_length_mm=0: this asserts the too_short *geometry* gate
+        # (no room for two anchors at the end offset), which the #8915
+        # default minimum would pre-empt with ``unanchored``.
+        result = reinforce_net(pcb, "FUSED_LINE", dry_run=True, min_wire_length_mm=0.0)
         (leg,) = result.legs
         assert leg.status == "too_short"
         assert leg.anchors == [] and result.placed_count == 0
@@ -2222,7 +2227,15 @@ class TestEndAnchorInvariants:
         dy = 0.3 + _ANCHOR_PAD / 2 + 0.1
         # Blocks every far-anchor candidate up to the start anchor's floor.
         pcb.add_trace((23.5, 50 + dy), (40, 50 + dy), width=0.2, layer="F.Cu", net="OTHER")
-        result = reinforce_net(pcb, "FUSED_LINE", net_class_clearances={"OTHER": 0.4}, dry_run=True)
+        # Leg is deliberately just long enough for two anchors, below the
+        # #8915 default minimum: pin it off to reach the nudge bound.
+        result = reinforce_net(
+            pcb,
+            "FUSED_LINE",
+            net_class_clearances={"OTHER": 0.4},
+            dry_run=True,
+            min_wire_length_mm=0.0,
+        )
         (leg,) = result.legs
         assert leg.status == "partial"
         assert len(leg.anchors) == 1
@@ -2493,7 +2506,7 @@ class TestEndAnchorPairNeverOne:
     def test_folded_leg_places_none_not_one(self):
         pcb = _folded_leg_pcb(3.0, 45.0)
         before = len(pcb.vias)
-        result = reinforce_net(pcb, "N")
+        result = reinforce_net(pcb, "N", min_wire_length_mm=0.0)
         (leg,) = result.legs
         assert leg.status == "too_short"
         assert leg.anchors == [] and result.placed_count == 0
@@ -2520,7 +2533,7 @@ class TestEndAnchorPairNeverOne:
         for a, b in zip(pts[:-1], pts[1:], strict=True):
             pcb.add_trace(a, b, width=0.5, layer="F.Cu", net="N")
         before = len(pcb.vias)
-        result = reinforce_net(pcb, "N")
+        result = reinforce_net(pcb, "N", min_wire_length_mm=0.0)
         (leg,) = result.legs
         assert leg.status == "too_short"
         assert leg.anchors == [] and result.refused_count == 0
@@ -2533,7 +2546,9 @@ class TestEndAnchorPairNeverOne:
     def test_folded_leg_sweep_zero_or_two(self, jog, rotation, shape):
         pcb = _folded_leg_pcb(jog, rotation, shape)
         before = len(pcb.vias)
-        result = reinforce_net(pcb, "N")
+        # The whole sweep is sub-15 mm folded legs: the #8915 minimum is
+        # pinned off so the straight-line pairing gate is what decides.
+        result = reinforce_net(pcb, "N", min_wire_length_mm=0.0)
         (leg,) = result.legs
         assert len(leg.anchors) in (0, 2)
         assert leg.status in ("full", "too_short")
@@ -2797,7 +2812,13 @@ class TestEndAnchorEmptyAndHoleSpacing:
         pcb.add_trace((20.0, 50.0), (30.0, 50.0), width=0.5, layer="F.Cu", net="N")
         pcb.add_trace((30.0 + gap, 50.0), (40.0 + gap, 50.0), width=0.5, layer="F.Cu", net="N")
         result = reinforce_net(
-            pcb, "N", design_rules=rules, end_offset_mm=0.0, all_runs=True, dry_run=True
+            pcb,
+            "N",
+            design_rules=rules,
+            end_offset_mm=0.0,
+            all_runs=True,
+            dry_run=True,
+            min_wire_length_mm=0.0,
         )
         assert result.placed_count >= 2
         pts = [(a.x, a.y) for a in result.placed]
@@ -3390,3 +3411,239 @@ class TestMaxEndShiftSlide:
     def test_negative_bound_rejected(self):
         with pytest.raises(ReinforceError, match="max_end_shift_mm"):
             reinforce_net(_straight_run_pcb(), "FUSED_LINE", max_end_shift_mm=-1.0)
+
+
+# --------------------------------------------------------------------------
+# Issue #8915: default minimum buttress-wire length (--min-wire-length)
+# --------------------------------------------------------------------------
+
+
+class TestMinWireLengthResolution:
+    """``resolve_min_wire_length_mm``: the alias rule and the per-mode default."""
+
+    def test_ends_default_is_15mm(self):
+        assert DEFAULT_MIN_WIRE_LENGTH_MM == 15.0
+        assert resolve_min_wire_length_mm(None, None, "ends") == 15.0
+
+    def test_spaced_has_no_default(self):
+        assert resolve_min_wire_length_mm(None, None, "spaced") is None
+
+    def test_explicit_zero_beats_the_default(self):
+        # 0.0 is falsy but NOT absent -- the distinction the argparse default
+        # of None exists to preserve.
+        assert resolve_min_wire_length_mm(0.0, None, "ends") == 0.0
+        assert resolve_min_wire_length_mm(None, 0.0, "ends") == 0.0
+
+    @pytest.mark.parametrize("mode", ["ends", "spaced"])
+    def test_either_flag_alone_sets_the_value(self, mode):
+        assert resolve_min_wire_length_mm(7.0, None, mode) == 7.0
+        assert resolve_min_wire_length_mm(None, 7.0, mode) == 7.0
+
+    @pytest.mark.parametrize("mode", ["ends", "spaced"])
+    @pytest.mark.parametrize(("wire", "run"), [(5.0, 25.0), (25.0, 5.0), (0.0, 25.0), (25.0, 0.0)])
+    def test_larger_wins_when_both_given(self, mode, wire, run):
+        assert resolve_min_wire_length_mm(wire, run, mode) == max(wire, run)
+
+
+class TestMinWireLengthEndsMode:
+    """The owner's ruling on #8741: no wire on a leg under 15 mm by default."""
+
+    @staticmethod
+    def _leg(length: float, **kw):
+        pcb = _padded_straight_pcb(length=length)
+        result = reinforce_net(pcb, "FUSED_LINE", dry_run=True, **kw)
+        (leg,) = result.legs
+        return leg, result
+
+    @pytest.mark.parametrize("length", [8.0, 10.0, 12.0, 14.99])
+    def test_leg_below_default_minimum_gets_nothing(self, length):
+        leg, result = self._leg(length)
+        assert leg.status == "unanchored"
+        assert leg.anchors == []
+        assert result.placed_count == 0
+        # Not a rule refusal: nothing was attempted, so nothing was refused.
+        assert result.refused_count == 0
+        # No mask opening either (#8743 only opens a fully anchored leg).
+        assert result.openings == []
+        assert leg.mask_status == ""
+        assert leg.below_min_wire_length is True
+
+    @pytest.mark.parametrize("length", [15.0, 20.0, 25.0])
+    def test_leg_at_or_above_default_minimum_gets_two_anchors(self, length):
+        leg, result = self._leg(length)
+        assert leg.status == "full"
+        assert len(leg.anchors) == 2
+        assert result.placed_count == 2
+        assert leg.below_min_wire_length is False
+
+    def test_reason_names_the_15mm_minimum_and_the_flag(self):
+        leg, _ = self._leg(12.0)
+        assert "15 mm" in leg.reason
+        assert "--min-wire-length" in leg.reason
+        # ...and says WHY, per the first acceptance criterion.
+        assert "through-hole at each end" in leg.reason
+
+    def test_zero_restores_pre_8915_behaviour(self):
+        leg, result = self._leg(12.0, min_wire_length_mm=0.0)
+        assert leg.status == "full"
+        assert len(leg.anchors) == 2
+        assert result.placed_count == 2
+        assert leg.below_min_wire_length is False
+
+    def test_explicit_25_skips_a_20mm_leg(self):
+        leg, result = self._leg(20.0, min_wire_length_mm=25.0)
+        assert leg.status == "unanchored"
+        assert result.placed_count == 0
+        assert "25 mm" in leg.reason
+        assert leg.below_min_wire_length is True
+
+    def test_min_run_length_is_an_accepted_alias(self):
+        """An existing ``--min-run-length`` invocation keeps working, and can
+        still ask for LESS than the new default."""
+        leg, _ = self._leg(12.0, min_run_length_mm=5.0)
+        assert leg.status == "full"
+        leg, _ = self._leg(20.0, min_run_length_mm=25.0)
+        assert leg.status == "unanchored"
+
+    @pytest.mark.parametrize(("wire", "run"), [(5.0, 25.0), (25.0, 5.0)])
+    def test_larger_of_the_two_flags_wins(self, wire, run):
+        """Neither flag may quietly lower a minimum the other asked for."""
+        leg, _ = self._leg(20.0, min_wire_length_mm=wire, min_run_length_mm=run)
+        assert leg.status == "unanchored"
+        assert "25 mm" in leg.reason
+
+    def test_other_unanchored_legs_are_not_marked_below_minimum(self):
+        """Only the length filter sets the flag the sidecar keys off -- a leg
+        merely not selected without --all-runs still wants a wire."""
+        pcb = PCB.create(width=200, height=100, center=False)
+        pcb.add_trace((20.0, 50.0), (60.0, 50.0), width=1.0, layer="F.Cu", net="N")
+        pcb.add_trace((20.0, 70.0), (50.0, 70.0), width=1.0, layer="F.Cu", net="N")
+        result = reinforce_net(pcb, "N", dry_run=True)
+        short = [leg for leg in result.legs if leg.status != "full"]
+        assert short, "expected at least one unselected leg"
+        for leg in short:
+            assert "only the longest leg" in leg.reason
+            assert leg.below_min_wire_length is False
+
+
+class TestMinWireLengthSpacedModeUnchanged:
+    """``spaced`` takes no default minimum, so its output does not move."""
+
+    def test_short_run_still_anchored_without_a_flag(self):
+        pcb = _padded_straight_pcb(length=12.0)
+        result = reinforce_net(pcb, "FUSED_LINE", anchor_mode="spaced", dry_run=True)
+        assert result.placed_count > 0
+        assert result.runs[0].anchors_placed > 0
+
+    def test_explicit_value_still_applies_in_spaced_mode(self):
+        pcb = _padded_straight_pcb(length=12.0)
+        result = reinforce_net(
+            pcb, "FUSED_LINE", anchor_mode="spaced", dry_run=True, min_wire_length_mm=15.0
+        )
+        assert result.placed_count == 0
+
+    def test_spaced_matches_itself_under_the_old_keyword(self):
+        """``min_wire_length_mm=X`` and ``min_run_length_mm=X`` are the same
+        filter in spaced mode."""
+        by_wire = reinforce_net(
+            _padded_straight_pcb(length=12.0),
+            "FUSED_LINE",
+            anchor_mode="spaced",
+            dry_run=True,
+            min_wire_length_mm=15.0,
+        )
+        by_run = reinforce_net(
+            _padded_straight_pcb(length=12.0),
+            "FUSED_LINE",
+            anchor_mode="spaced",
+            dry_run=True,
+            min_run_length_mm=15.0,
+        )
+        assert by_wire.placed_count == by_run.placed_count
+        assert [(s.run_index, s.anchors_placed) for s in by_wire.runs] == [
+            (s.run_index, s.anchors_placed) for s in by_run.runs
+        ]
+
+
+class TestMinWireLengthCLI:
+    """``--min-wire-length`` end to end through ``kct pcb reinforce``."""
+
+    @staticmethod
+    def _json(tmp_path, length, **overrides):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _padded_straight_pcb(length=length).save(pcb_path)
+        args = _reinforce_args(pcb_path, format="json", dry_run=True, **overrides)
+        rc = run_pcb_command(args)
+        return rc, pcb_path
+
+    def test_json_reports_the_reason_and_the_effective_minimum(self, tmp_path, capsys):
+        rc, _ = self._json(tmp_path, 12.0)
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["min_wire_length_mm"] is None
+        assert payload["min_wire_length_effective_mm"] == 15.0
+        (leg,) = payload["legs"]
+        assert leg["status"] == "unanchored"
+        assert leg["anchors"] == []
+        assert "15 mm" in leg["reason"]
+        assert payload["anchors_placed"] == 0
+        assert payload["openings"] == []
+
+    def test_text_report_names_the_minimum_and_the_reason(self, tmp_path, capsys):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _padded_straight_pcb(length=12.0).save(pcb_path)
+        rc = run_pcb_command(_reinforce_args(pcb_path, dry_run=True))
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Min wire length: 15 mm" in out
+        assert "15 mm" in out and "--min-wire-length" in out
+
+    def test_cli_zero_anchors_the_short_leg(self, tmp_path, capsys):
+        rc, _ = self._json(tmp_path, 12.0, min_wire_length=0.0)
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["min_wire_length_effective_mm"] == 0.0
+        assert payload["anchors_placed"] == 2
+        assert payload["legs"][0]["status"] == "full"
+
+    def test_cli_25_skips_a_20mm_leg(self, tmp_path, capsys):
+        rc, _ = self._json(tmp_path, 20.0, min_wire_length=25.0)
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["min_wire_length_effective_mm"] == 25.0
+        assert payload["anchors_placed"] == 0
+
+    def test_cli_alias_and_larger_wins(self, tmp_path, capsys):
+        rc, _ = self._json(tmp_path, 20.0, min_wire_length=5.0, min_run_length=25.0)
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["min_run_length_mm"] == 25.0
+        assert payload["min_wire_length_mm"] == 5.0
+        assert payload["min_wire_length_effective_mm"] == 25.0
+        assert payload["anchors_placed"] == 0
+
+    def test_cli_spaced_mode_keeps_no_minimum(self, tmp_path, capsys):
+        rc, _ = self._json(tmp_path, 12.0, anchor_mode="spaced")
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["min_wire_length_effective_mm"] is None
+        assert payload["anchors_placed"] > 0
+
+    @pytest.mark.parametrize("flag", ["min_wire_length", "min_run_length"])
+    def test_cli_rejects_a_negative_minimum(self, tmp_path, capsys, flag):
+        rc, _ = self._json(tmp_path, 20.0, **{flag: -1.0})
+        assert rc == 1
+        assert "must not be negative" in capsys.readouterr().err
+
+    def test_cli_writes_no_anchors_for_a_short_leg_in_place(self, tmp_path):
+        from kicad_tools.cli.commands.pcb import run_pcb_command
+
+        pcb_path = tmp_path / "board.kicad_pcb"
+        _padded_straight_pcb(length=12.0).save(pcb_path)
+        before = len(PCB.load(pcb_path).vias)
+        assert run_pcb_command(_reinforce_args(pcb_path)) == 0
+        assert len(PCB.load(pcb_path).vias) == before
