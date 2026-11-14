@@ -536,3 +536,189 @@ def test_distance_prefilter_keeps_every_in_reach_pair_and_the_pair_count(near_ga
     assert result.evaluated_pairs == len(geometry.objects) - 1
     assert [m.conductor_uuid for m in result.measurements] == ([near] if measured else [])
     assert all(m.opening_uuids == (owner,) for m in result.measurements)
+
+
+# ---------------------------------------------------------------------------
+# Issue #8924: coverage.mask_to_copper must reflect the assessment's own
+# ``coverage``, never report ``checked`` for an assessment that could not
+# evaluate the board.
+# ---------------------------------------------------------------------------
+
+
+def _patch_assessment(monkeypatch, **kwargs):
+    """Make the checker's native call return a controlled assessment.
+
+    The row under test must not depend on whether *this host* has a qualified
+    KiCad plot profile: CI's pinned image reports ``10.0.6`` (qualified) while
+    a distro build reports ``10.0.6-10.0.6~ubuntu24.04.1`` (not qualified), so
+    a test that drove the real native path would assert opposite states on the
+    two. ``check_mask_to_copper`` is imported inside
+    :meth:`DRCChecker.check_mask_to_copper`, so patching the module attribute
+    takes effect at call time.
+    """
+
+    def fake(path, policy=None, intents=(), **native_options):
+        return MaskCopperAssessment(policy=policy, **kwargs)
+
+    monkeypatch.setattr("kicad_tools.validate.mask_copper.check_mask_to_copper", fake)
+
+
+def _run_mfr_check(tmp_path, capsys, *extra):
+    import json
+
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    main([str(board), "--drc-only", "--format", "json", "--mfr", "jlcpcb", *extra])
+    out = capsys.readouterr().out
+    return json.loads(out[out.index("{") :])
+
+
+@pytest.mark.parametrize(
+    ("coverage", "state"),
+    [("complete", "checked"), ("incomplete", "unknown"), ("not_run", "unknown")],
+)
+def test_coverage_row_follows_assessment_coverage(tmp_path, capsys, monkeypatch, coverage, state):
+    """AC1/AC2 + the ``not_run`` mapping: the row tracks ``assessment.coverage``."""
+    _patch_assessment(monkeypatch, coverage=coverage, reasons=["native unavailable"])
+    data = _run_mfr_check(tmp_path, capsys)
+
+    assert data["mask_copper_assessments"][0]["coverage"] == coverage
+    row = data["coverage"]["mask_to_copper"]
+    assert row["state"] == state
+    assert row["blocking"] is True
+    # Blocking propagation: an unevaluated blocking category must reach the
+    # summary gates read by ``kct readiness`` / ``/kct:tapeout``.
+    blocking_unknown = data["summary"]["coverage_blocking_unknown"]
+    assert ("mask_to_copper" in blocking_unknown) == (state == "unknown")
+
+
+def test_incomplete_row_carries_the_assessment_reasons(tmp_path, capsys, monkeypatch):
+    """Reason plumbing: the row explains itself from the assessment's reasons."""
+    _patch_assessment(
+        monkeypatch,
+        coverage="incomplete",
+        reasons=["F.Cu: Invalid region contour", "B.Cu: Invalid region contour"],
+    )
+    row = _run_mfr_check(tmp_path, capsys)["coverage"]["mask_to_copper"]
+
+    assert row["reason"] and "Invalid region contour" in row["reason"]
+    assert row["status"].startswith("unknown:")
+    assert "incomplete" in row["reason"]
+
+
+def test_checked_row_has_no_reason(tmp_path, capsys, monkeypatch):
+    _patch_assessment(monkeypatch, coverage="complete")
+    row = _run_mfr_check(tmp_path, capsys)["coverage"]["mask_to_copper"]
+
+    assert row == {"status": "checked", "state": "checked", "reason": None, "blocking": True}
+
+
+def test_coverage_row_keys_on_coverage_never_on_passed(tmp_path, capsys, monkeypatch):
+    """The regression test that separates a correct fix from one keyed on ``passed``.
+
+    ``assessment.passed`` is strictly stronger than ``coverage == "complete"``:
+    it also requires empty reasons and no violation/uncertain measurement.  A
+    board whose mask check ran fine and *found real violations* is a
+    ``checked`` row carrying error findings -- reporting ``unknown`` there
+    would invert the row's meaning.
+    """
+    from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+    violation = MaskCopperMeasurement(
+        opening_uuids=("00000000-0000-0000-0000-000000000001",),
+        conductor_uuid="00000000-0000-0000-0000-000000000002",
+        mask_side="F.Mask",
+        copper_layer="F.Cu",
+        location_mm=(1.0, 2.0),
+        clearance_mm=0.01,
+        exposed_area_mm2=0.5,
+        relation="overlap",
+        disposition="violation",
+        uncertainty_mm=0.0,
+        opening_kind="pad:rect",
+        mask_defined=False,
+        margin_provenance="native",
+    )
+    _patch_assessment(monkeypatch, coverage="complete", measurements=[violation])
+    data = _run_mfr_check(tmp_path, capsys, "--allow-incomplete")
+
+    assert data["mask_copper_assessments"][0]["passed"] is False
+    assert data["coverage"]["mask_to_copper"]["state"] == "checked"
+    assert "mask_to_copper" not in data["summary"]["coverage_blocking_unknown"]
+    errors = [
+        v
+        for v in data["violations"]
+        if v["rule_id"] == "mask_to_copper" and v["severity"] == "error"
+    ]
+    assert errors, "the violation must still surface as an error finding"
+
+
+def test_only_mask_to_copper_without_policy_is_unknown_not_checked(tmp_path, capsys):
+    """End-to-end ``not_run``: requested with no policy, so it never ran.
+
+    No monkeypatching -- ``--only mask_to_copper`` with no ``--mfr`` leaves the
+    request without a policy, and ``check_mask_to_copper`` refuses rather than
+    evaluating.  A *requested* check that never ran is not a pass.
+    """
+    import json
+
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    main([str(board), "--drc-only", "--format", "json", "--only", "mask_to_copper"])
+    out = capsys.readouterr().out
+    data = json.loads(out[out.index("{") :])
+
+    assert data["mask_copper_assessments"][0]["coverage"] == "not_run"
+    assert data["coverage"]["mask_to_copper"]["state"] == "unknown"
+    assert "policy" in data["coverage"]["mask_to_copper"]["reason"]
+
+
+def test_opt_in_skip_rows_are_unchanged(tmp_path, capsys):
+    """The pre-run ``skipped`` branches must not be touched by this change."""
+    import json
+
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+
+    def run(*extra):
+        main([str(board), "--drc-only", "--format", "json", *extra])
+        out = capsys.readouterr().out
+        return json.loads(out[out.index("{") :])["coverage"]["mask_to_copper"]
+
+    # Both land on the pre-run opt-in branch: ``--skip`` suppresses #8842's
+    # default request, so the category is never requested in the first place
+    # and the loop's opt-in ``continue`` fires before the ``--skip`` branch.
+    assert run()["status"] == "skipped:opt_in:--mask-copper-config"
+    assert (
+        run("--mfr", "jlcpcb", "--skip", "mask_to_copper")["status"]
+        == "skipped:opt_in:--mask-copper-config"
+    )
+
+
+def test_mask_copper_unknown_deduplicates_and_truncates_reasons():
+    """The live incomplete case has 19 reasons, 13 identical; reports land in files."""
+    from kicad_tools.validate import coverage as cov
+
+    repeated = ["F.Mask: unattributed native mask region"] * 13
+    result = cov.mask_copper_unknown("incomplete", [*repeated, "a", "b", "c", "d"])
+
+    assert result.state == cov.UNKNOWN and result.blocking
+    assert result.reason.count("unattributed native mask region") == 1
+    assert "(+2 more)" in result.reason
+    assert len(result.reason) < 200
+
+
+def test_mask_copper_unknown_tolerates_no_reasons():
+    from kicad_tools.validate import coverage as cov
+
+    result = cov.mask_copper_unknown("not_run", [])
+    assert result.state == cov.UNKNOWN and "not_run" in result.reason
