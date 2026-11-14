@@ -35,7 +35,7 @@ from typing import Literal
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Version of the table below; bump on any row change.
-TABLE_VERSION = 3
+TABLE_VERSION = 4
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -190,7 +190,11 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("silkscreen",),
         "partial",
         False,
-        "only a text-thickness floor, not line width.",
+        "`silkscreen_line_width` (every silk graphic primitive) and "
+        "`silkscreen_text_thickness` (text) enforce JLCPCB's published >= 0.15 mm. "
+        "Not covered: JLCDFM warns above that floor (#8844: its 63 warnings came "
+        "from gerbers with no silk stroke below 0.150 mm), and its warning "
+        "threshold has not been recorded (#8943).",
     ),
     ParityRow("fiducial", ("fiducials",), "covered", False, "checked; no finding on the board."),
 )

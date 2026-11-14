@@ -119,10 +119,16 @@ def test_silk_clear_of_holes(tmp_path):
     assert not check_silk_hole_overlap(_hole_board(tmp_path, 25.0), _rules()).violations
 
 
-def test_registered_in_check_all():
+def test_registered_in_check_all(tmp_path):
+    """``check_all_silkscreen`` runs the rule, and every table names it."""
     from kicad_tools.cli.readiness_cmd import ASSEMBLY_AFFECTING_RULES
-    from kicad_tools.validate.checker import DRCChecker  # noqa: F401
+    from kicad_tools.validate.checker import DRCChecker
+    from kicad_tools.validate.rules.silkscreen import check_all_silkscreen
 
+    results = check_all_silkscreen(_hole_board(tmp_path, 20.0), _rules())
+    assert "silk_hole_overlap" in {v.rule_id for v in results.violations}
+    # Explicit entry: unknown ids fall into the fab-blocking bucket by default.
+    assert "silk_hole_overlap" in DRCChecker.RULE_CATEGORY
     assert "silk_hole_overlap" in ASSEMBLY_AFFECTING_RULES
 
 
