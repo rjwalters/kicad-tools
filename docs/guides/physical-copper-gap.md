@@ -20,7 +20,12 @@ Same-net near-parallel copper (e.g. 0.08 mm) is always listed; it uses the same
 tiers. The mask-bridge check needs a known copper weight (stackup or `--copper`);
 with the weight unknown it emits a `physical_copper_gap_incomplete` *info* finding
 (listed, not blocking) rather than assuming 1 oz, and weights other than 2 oz are not judged (versioned per-weight
-table: epic #8838 item 2). `tht_smd_spacing` measures **copper edge to copper
+table: epic #8838 item 2). The mask-bridge check runs on the outer copper
+layers (`F.Cu` / `B.Cu`) only (Issue #8913): solder mask exists only as
+`F.Mask` / `B.Mask`, so there is no inner-layer mask to bridge, and a
+through-hole pad pair yields at most one finding per outer side rather than one
+per copper layer. No inner-layer mask-bridge findings on a 4-layer board is the
+intended scope, not a missed case. `tht_smd_spacing` measures **copper edge to copper
 edge**; the epic does not say whether JLCDFM measures hole centre, hole edge or
 copper edge, so this is a documented choice.
 
