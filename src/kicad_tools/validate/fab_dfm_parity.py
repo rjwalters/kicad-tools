@@ -12,9 +12,11 @@ Rules for editing the table:
 
 * A sibling rule PR flips its own row (``not_covered`` -> ``partial`` /
   ``covered``) and fills ``kct_rules``.
-* Every rule named in ``kct_rules`` of a ``covered`` / ``partial`` row must be a
-  real ``kct check`` category (``cli/check_categories.py``); a test enforces it
-  so the table cannot drift from the code.
+* Every rule named in ``kct_rules`` of a ``covered`` / ``partial`` row must be
+  something ``kct check`` can actually emit -- a real category
+  (``cli/check_categories.py``) or a finer rule id registered in
+  ``DRCChecker.RULE_CATEGORY`` (``silk_hole_overlap`` under ``silkscreen``); a
+  test enforces it so the table cannot drift from the code.
 * The reverse drift -- a rule that shipped while its row still says
   ``not_covered`` -- is caught by ``FAB_CATEGORY_RULES`` in
   ``tests/test_fab_dfm_parity.py`` (issue #8902).  That mapping names the rule
@@ -33,7 +35,7 @@ from typing import Literal
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Version of the table below; bump on any row change.
-TABLE_VERSION = 2
+TABLE_VERSION = 3
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -115,11 +117,15 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
     ),
     ParityRow(
         "silkscreen_to_hole",
-        (),
-        "not_covered",
+        ("silk_hole_overlap",),
+        "partial",
         True,
-        "no rule (silk over tented via holes); `silk_hole_overlap` is in flight on "
-        "#8844. Observed 75 danger.",
+        "`silk_hole_overlap` (#8844) flags silk that *overlaps* a via/PTH/NPTH drill "
+        "circle, tented vias included -- a rule id under the `silkscreen` category. "
+        "Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance "
+        "but not touching is still unchecked, and text is tested as its bounding box "
+        "rather than glyph outlines. Observed 75 danger, not reproduced against the "
+        "live tool.",
     ),
     ParityRow(
         "annular_ring",

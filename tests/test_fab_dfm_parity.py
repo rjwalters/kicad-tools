@@ -79,11 +79,18 @@ def _drifted_rows(
 
 
 def test_rules_are_real_check_categories():
+    """A covered/partial row must name something ``kct check`` can emit.
+
+    That is a ``CHECK_CATEGORIES`` category *or* a finer rule id registered in
+    ``DRCChecker.RULE_CATEGORY`` -- ``silkscreen_to_hole`` is covered by
+    ``silk_hole_overlap``, a rule id under the ``silkscreen`` category (#8844).
+    """
+    implemented = _implemented_rule_ids()
     for r in fdp.PARITY_TABLE:
         if r.status in ("covered", "partial"):
             assert r.kct_rules, r.category
             for rule in r.kct_rules:
-                assert rule in CHECK_CATEGORIES, (r.category, rule)
+                assert rule in implemented, (r.category, rule)
 
 
 def test_table_matches_recorded_categories():
