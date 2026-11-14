@@ -1512,7 +1512,11 @@ def test_audit_names_loop_witness(tmp_path):
     _spec, resolution = _audit(PCB.load(p), tmp_path)
     assert resolution.status == "ambiguous"
     assert resolution.witness["kind"] in ("segment", "via")
-    assert "witness:" in resolution.reason
+    # ``reason`` is coordinate-free; the witness renders from the dict (#8928).
+    from kicad_tools.router.current_paths import describe_witness
+
+    assert "witness:" not in resolution.reason
+    assert describe_witness(resolution.witness).startswith(" [witness: ")
 
 
 # --- cleanup_copper (#8399) -------------------------------------------------

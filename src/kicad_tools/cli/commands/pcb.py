@@ -1431,6 +1431,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     # Refusal anchors are board-relative internally; report sheet-absolute
     # coordinates like ``kct check`` / kicad-cli DRC (Issue #8493).
     origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    # ``UnresolvedPath.reason`` is coordinate-free; its witness is rendered
+    # here in the same sheet frame as every other coordinate below (#8928).
+    from kicad_tools.router.current_paths import describe_witness
+
+    unresolved_reasons = [
+        u.reason + describe_witness(u.witness, (origin_x, origin_y))
+        for u in outcome.unresolved_paths
+    ]
 
     result: dict[str, Any] = {
         "input": str(pcb_path),
@@ -1526,8 +1534,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             for leg in outcome.legs
         ],
         "unresolved_paths": [
-            {"path": u.path, "status": u.status, "reason": u.reason}
-            for u in outcome.unresolved_paths
+            {"path": u.path, "status": u.status, "reason": why}
+            for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True)
         ],
         # Issue #8743: solder-mask openings (additive).
         "mask_opening": outcome.mask_opening,
@@ -1610,10 +1618,10 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             file=sys.stderr,
         )
 
-    for u in outcome.unresolved_paths:
+    for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
         print(
             f"Warning: declared current path {u.path!r} on net {outcome.net_name!r} is "
-            f"{u.status}: {u.reason} -- it gets no anchors",
+            f"{u.status}: {why} -- it gets no anchors",
             file=sys.stderr,
         )
 
@@ -1660,8 +1668,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         if outcome.unresolved_paths:
             print()
             print("  Unresolved current paths (no anchors):")
-            for u in outcome.unresolved_paths:
-                print(f"    {u.path}: {u.status} -- {u.reason}")
+            for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
+                print(f"    {u.path}: {u.status} -- {why}")
         if outcome.anchor_mode == "ends":
             _print_reinforce_legs(outcome, origin_x, origin_y)
         else:
@@ -1755,7 +1763,12 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
     copper on a declared net that no resolved path covers. Read-only --
     never mutates or saves the board.
     """
-    from kicad_tools.router.current_paths import audit_current_paths, load_current_path_specs
+    from kicad_tools.router.current_paths import (
+        PathResolution,
+        audit_current_paths,
+        describe_witness,
+        load_current_path_specs,
+    )
     from kicad_tools.schema.pcb import PCB
 
     current_paths_arg = getattr(args, "current_paths", None)
@@ -1788,7 +1801,16 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
         for key in ("start", "end", "position"):
             if key in out:
                 out[key] = _sheet(out[key])
+        if out.get("blocking_branches"):
+            out["blocking_branches"] = [
+                {**b, "start": _sheet(b["start"]), "end": _sheet(b["end"])}
+                for b in out["blocking_branches"]
+            ]
         return out
+
+    def _reason(resolution: PathResolution) -> str:
+        """``reason`` plus its witness, quoted at sheet positions (#8928)."""
+        return resolution.reason + describe_witness(resolution.witness, (origin_x, origin_y))
 
     def _min_width_fields(resolution) -> dict[str, Any]:
         """Narrowest copper of one resolved path, in sheet coordinates (#8917).
@@ -1841,7 +1863,7 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 "fusing_checked": r.spec.pulsed_a is None or r.spec.pulse_duration_s is not None,
                 "reinforcement_eligible": r.spec.reinforcement_eligible,
                 "status": r.status,
-                "reason": r.reason,
+                "reason": _reason(r),
                 "witness": _sheet_witness(r.witness),
                 "segment_count": len(r.segments),
                 "length_mm": round(r.length_mm, 4),
@@ -1904,7 +1926,7 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 f"on {r.spec.net_name!r} [{r.status}]"
             )
             if r.reason:
-                print(f"      {r.reason}")
+                print(f"      {_reason(r)}")
             if r.ok:
                 thermal = r.spec.thermal_design_current()
                 print(

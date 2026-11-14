@@ -472,10 +472,51 @@ class TestNoWireAndSkipLocation:
         assert v.location != (0.0, 0.0)
         assert all(round(c, 3) == c for c in v.location)
 
-    def test_skip_message_rounds_witness_coordinates(self):
-        from kicad_tools.validate.rules.reinforcement_incomplete import _round_floats
 
-        assert _round_floats("at (10.799999999999997, 10.8)") == "at (10.800, 10.8)"
+def _ambiguous_skipped_board(*, center: bool = False) -> PCB:
+    """Ambiguous copper whose wire cannot be located: a ``[skipped]`` with a witness.
+
+    Removing the mask strips leaves only anchor evidence, so ``_locate_wire``
+    finds no wire copper but the net is not wire-less (Issue #8928).
+    """
+    pcb = _ambiguous_wire_board(center=center)
+    pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
+    return pcb
+
+
+class TestSkippedMessageWitnessFrame:
+    """Issue #8928: the ``[skipped]`` witness is quoted at its sheet position."""
+
+    @staticmethod
+    def _skipped_message(pcb: PCB) -> str:
+        checker = DRCChecker(pcb, layers=4, current_path_specs=[_spec()])
+        (v,) = checker.check_reinforcement_incomplete().violations
+        assert v.items[1].split("@")[0] == "skipped"
+        return v.message
+
+    def test_fixture_is_ambiguous_and_skipped(self):
+        pcb = _ambiguous_skipped_board(center=True)
+        assert _resolution_status(pcb) == "ambiguous"
+        assert "[witness: " in self._skipped_message(pcb)
+
+    def test_witness_is_quoted_at_the_sheet_position(self):
+        pcb = _ambiguous_skipped_board(center=True)
+        assert tuple(pcb.board_origin) == pytest.approx((48.5, 55.0))
+        message = self._skipped_message(pcb)
+        # Board-relative (70, 58) -> (70, 50) is sheet (118.5, 113) -> (118.5, 105).
+        assert "[witness: segment (118.500, 113.000)->(118.500, 105.000) on B.Cu]" in message
+        assert "(70.000, 58.000)" not in message
+        assert "[blocking branches: (68.500, 105.000)->(168.500, 105.000) on B.Cu" in message
+
+    def test_zero_origin_message_quotes_board_coordinates(self):
+        message = self._skipped_message(_ambiguous_skipped_board(center=False))
+        assert "[witness: segment (70.000, 58.000)->(70.000, 50.000) on B.Cu]" in message
+
+    def test_prose_is_unchanged_across_origins(self):
+        """Only the witness coordinates move; the reason prose is frame-free."""
+        flat = self._skipped_message(_ambiguous_skipped_board(center=False))
+        shifted = self._skipped_message(_ambiguous_skipped_board(center=True))
+        assert flat.split(" [witness: ")[0] == shifted.split(" [witness: ")[0]
 
 
 class TestNonZeroBoardOriginLocations:

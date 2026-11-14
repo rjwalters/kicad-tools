@@ -188,10 +188,11 @@ class PathAmpacityRule(DRCRule):
         )
 
         audit = audit_current_paths(pcb, self.specs)
+        origin: tuple[float, float] = getattr(pcb, "board_origin", None) or (0.0, 0.0)
 
         for resolution in audit.resolutions:
             if resolution.status in (STATUS_UNRESOLVED, STATUS_AMBIGUOUS):
-                results.add(self._unresolved_violation(resolution))
+                results.add(self._unresolved_violation(resolution, origin))
                 continue
 
             spec = resolution.spec
@@ -349,10 +350,20 @@ class PathAmpacityRule(DRCRule):
             items=(spec.name, spec.net_name),
         )
 
-    def _unresolved_violation(self, resolution: PathResolution) -> DRCViolation:
+    def _unresolved_violation(
+        self, resolution: PathResolution, origin: tuple[float, float] = (0.0, 0.0)
+    ) -> DRCViolation:
+        """Report a path that could not be checked.
+
+        ``location`` is ``None``, so the message is this finding's only
+        coordinate surface: the witness is quoted at its sheet position
+        (``origin`` is ``PCB.board_origin``), never board-relative (#8928).
+        """
+        from kicad_tools.router.current_paths import describe_witness
+
         spec = resolution.spec
         status = resolution.status
-        reason = resolution.reason
+        reason = resolution.reason + describe_witness(resolution.witness, origin)
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error",
