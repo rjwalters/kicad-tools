@@ -16,6 +16,19 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-14
 
+- **PR #8854**: feat: two-tier silk-to-pad bands and silk_hole_overlap rule
+- **PR #8927**: fix: repair acute two-segment trace fold-backs in router cleanup
+- **Issue #8919** (closed): Router emits two-segment acute fold-backs that sharp_trace_corner now gates
+- **PR #8926**: fix(check): judge anchor-sized vias in tht_smd_spacing; report mask_to_copper incomplete coverage
+- **Issue #8914** (closed): mask_to_copper and tht_smd_spacing report fewer findings than JLCDFM on the same board
+- **PR #8929**: fix: report coverage.mask_to_copper unknown for an incomplete assessment
+- **Issue #8924** (closed): coverage.mask_to_copper reports "checked" for an assessment whose coverage is incomplete
+- **PR #8923**: feat: default 15 mm minimum buttress-wire length in pcb reinforce ends mode
+- **Issue #8915** (closed): pcb reinforce: default minimum buttress-wire length of 15 mm (--min-wire-length)
+- **PR #8920**: fix: emit reinforcement [no_wire]/[skipped] locations board-relative
+- **Issue #8912** (closed): reinforcement_incomplete [no_wire] location has the board origin added twice
+- **PR #8922**: feat: report each resolved current path's minimum copper width
+- **Issue #8917** (closed): current-paths-audit: report each resolved path's minimum copper width
 - **PR #8921**: fix: restrict pad mask-bridge check to outer copper layers
 - **Issue #8913** (closed): physical_copper_gap reports pad mask bridges on inner layers, with the outer-layer mask expansion
 
