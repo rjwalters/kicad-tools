@@ -1,0 +1,32 @@
+{
+  "source": "https://github.com/rjwalters/kicad-tools/issues/8938",
+  "retrieved": "2026-11-14",
+  "board": "4-layer 1 oz board, same gerbers to kct and JLCDFM via jlcdfm.com (2026-11-14)",
+  "stackup": "4layer_1oz",
+  "counts": {
+    "pad_spacing": {
+      "danger": 6,
+      "warning": 1
+    },
+    "solder_mask_opening_exposing_trace": {
+      "danger": 2,
+      "warning": 48
+    },
+    "silkscreen_to_hole": {
+      "danger": 50,
+      "warning": 0
+    },
+    "tht_to_smd": {
+      "danger": 0,
+      "warning": 25
+    },
+    "silkscreen_to_pad": {
+      "danger": 0,
+      "warning": 50
+    },
+    "trace_spacing": {
+      "danger": 0,
+      "warning": 0
+    }
+  }
+}
