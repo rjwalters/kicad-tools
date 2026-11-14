@@ -32,7 +32,9 @@ import pytest
 
 from kicad_tools.cli.check_cmd import _emit_drc_sidecars, main
 from kicad_tools.manufacturers import get_profile
-from kicad_tools.manufacturers.dru_generator import generate_dru, merge_dru_floors
+from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+from kicad_tools.manufacturers.project_generator import generate_project_dru
+from kicad_tools.manufacturers.zone_clearance_dru import zone_clearance_targets
 from kicad_tools.router.rules import NetClassRouting
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.validate import DRCChecker
@@ -109,8 +111,18 @@ def test_emit_dru_matches_checker_resolved_rules(
         copper_oz_outer=copper,
     )
     # The rules land inside the managed fab-floors block (#4600); a fresh
-    # file is byte-identical to the merged generate_dru output.
-    expected = merge_dru_floors(None, generate_dru(checker.design_rules, manufacturer_name=mfr))
+    # file is byte-identical to the merged generate_project_dru output,
+    # zone arm included (Issue #8937: the board's zone ``connect_pads``
+    # clearances are restored above the fab floor).
+    expected = merge_dru_floors(
+        None,
+        generate_project_dru(
+            checker.design_rules,
+            {},
+            manufacturer_id=mfr,
+            zone_clearances=zone_clearance_targets(board_copy),
+        ),
+    )
     assert dru_path.read_text(encoding="utf-8") == expected
 
     # And the emitted floors track the profile minimums for that tier.
@@ -177,17 +189,21 @@ def test_emit_dedups_shared_ampacity_class_to_one_rule_pair(board_copy: Path) ->
     assert dru.count("Ampacity Min Width (POWER 15A, external)") == 1
     assert dru.count("Ampacity Min Width (POWER 15A, internal)") == 1
     # Byte-identical to a SINGLE deduplicated class -- the DRU carries no
-    # per-net redundancy.
+    # per-net redundancy.  The board's zone ``connect_pads`` clearances are
+    # part of the emitted block (Issue #8937), so the expectation is built
+    # with the same zone arm the writer uses.
     expected = merge_dru_floors(
         None,
-        generate_dru(
+        generate_project_dru(
             checker.design_rules,
-            manufacturer_name="jlcpcb",
+            {},
+            manufacturer_id="jlcpcb",
             net_classes=[
                 NetClassRouting(
                     name="POWER", target_ampacity=15.0, net_scope=("VBUS", "+5V", "GND")
                 )
             ],
+            zone_clearances=zone_clearance_targets(board_copy),
         ),
     )
     assert dru == expected

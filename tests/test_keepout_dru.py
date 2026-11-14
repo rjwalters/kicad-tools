@@ -318,7 +318,14 @@ def test_write_drc_constraints_preserves_user_rules(tmp_path):
     board = _board(tmp_path / "cross.kicad_pcb")
     board.with_suffix(".kicad_dru").write_text(USER, encoding="utf-8")
     first = _emit(board)
-    assert first.startswith(USER.rstrip("\n"))
+    # Issue #8937: the floors block is inserted ABOVE the user's rules, so
+    # KiCad's last-match precedence keeps the user's clearance (0.3 mm here)
+    # governing instead of being overridden by the appended fab floor --
+    # preserving the rule means preserving its effect, not just its bytes.
+    # (The keepout block may follow the user rules; it is scoped to its rule
+    # areas and carries no clearance constraint.)
+    assert USER.strip() in first
+    assert first.index("# BEGIN kct fab floors") < first.index('(rule "mine"')
     assert _emit(board) == first
 
 

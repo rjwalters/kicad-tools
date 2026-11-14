@@ -78,6 +78,26 @@
 (rule "Reviewed clearance - Power"
   (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
   (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - GND (B.Cu)"
+  (layer "B.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - GND (F.Cu)"
+  (layer "F.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - GND (In1.Cu)"
+  (layer "In1.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - +5V (In2.Cu)"
+  (layer "In2.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == '+5V') || (B.Type == 'Zone' && B.NetName == '+5V')")
+  (constraint clearance (min 0.2mm)))
 # END kct fab floors
 
 # BEGIN kct attach-zone router-class exemptions (Issue #8048) -- managed, do not edit

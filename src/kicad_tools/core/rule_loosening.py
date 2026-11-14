@@ -15,10 +15,24 @@ more permissive.  Writers call it before saving and refuse an unallowed
 loosening; the guard test ``tests/test_rule_loosening_7385.py`` calls it on
 every committed board.
 
-The comparison currently understands the KiCad ``.kicad_pro`` shape.  The
-signature deliberately takes plain mappings, so a later ``net_class_map.json``
-variant (dropped ``swap_group``, lowered ``clearance``) can slot in behind the
-same entry point without changing callers.
+The comparison understands two shapes behind the one entry point: the KiCad
+``.kicad_pro`` mapping, and -- since Issue #8937 -- the ``.kicad_dru`` rule
+file, passed as a mapping with a ``"dru_rules"`` key holding the file's
+``clearance``-constraint rules in file order (see
+:func:`kicad_tools.manufacturers.dru_generator.dru_clearance_rules`).  For the
+DRU shape a loosening is not only a hand-written rule that dropped or lowered:
+a rewrite whose *resolved* clearance for a (track, track), (pad, zone) or
+(via, zone) pair is smaller than the pre-rewrite resolution -- or smaller than
+the clearance the design itself authorises (net class, zone
+``connect_pads``) -- fails closed.  That is the gate the #8937 fab-floor
+defect needed: the unconditional ``Clearance`` floor rule *replaces* larger
+authored clearances in KiCad, so an emitted block that undercuts them must be
+refused, not shipped.
+
+The signature deliberately takes plain mappings, so a later
+``net_class_map.json`` variant (dropped ``swap_group``, lowered
+``clearance``) can slot in behind the same entry point without changing
+callers.
 
 This module is pure (no kct imports): the *policy* that decides which
 loosenings are allowed for a given project lives with the merge itself, in
@@ -29,6 +43,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeGuard
@@ -41,11 +56,17 @@ __all__ = [
     "LOOSENING_SEVERITY_DOWNGRADED",
     "NETCLASS_MINIMUM_KEYS",
     "NETCLASS_TARGET_KEYS",
+    "DRU_SHAPE_KEY",
     "Loosening",
     "RuleLooseningError",
     "assert_no_loosenings",
     "rule_loosenings",
 ]
+
+#: Mapping key that selects the ``.kicad_dru`` comparison shape (Issue #8937).
+#: The value is the ordered list of rule records parsed from the file by
+#: :func:`kicad_tools.manufacturers.dru_generator.dru_clearance_rules`.
+DRU_SHAPE_KEY = "dru_rules"
 
 #: A numeric minimum decreased.
 LOOSENING_LOWERED = "lowered"
@@ -332,6 +353,402 @@ def _project_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> 
     return out
 
 
+def _loosening_shape(before: Mapping[str, Any], after: Mapping[str, Any]) -> str:
+    if DRU_SHAPE_KEY in before or DRU_SHAPE_KEY in after:
+        return "dru"
+    return "project"
+
+
+# ---------------------------------------------------------------------------
+# The .kicad_dru shape (Issue #8937)
+# ---------------------------------------------------------------------------
+
+
+class _UnknownCondition(Exception):
+    """A condition atom the resolver does not model; the rule matches all."""
+
+
+_DRU_TOKEN_RE = re.compile(
+    r"""\s*(?:(?P<lparen>\()|(?P<rparen>\))|(?P<and>&&)|(?P<or>\|\|)|(?P<not>!)|(?P<eq>==)|(?P<neq>!=)|'(?P<squote>(?:[^'\\]|\\.)*)'|"(?P<dquote>(?:[^"\\]|\\.)*)"|(?P<ident>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?))"""
+)
+
+
+def _tokenize_dru_condition(text: str) -> list[tuple[str, str]]:
+    tokens: list[tuple[str, str]] = []
+    pos = 0
+    while pos < len(text):
+        match = _DRU_TOKEN_RE.match(text, pos)
+        if match is None:
+            if text[pos:].strip() == "":
+                break
+            raise _UnknownCondition(text)
+        pos = match.end()
+        kind = match.lastgroup
+        assert kind is not None
+        if kind in ("squote", "dquote"):
+            tokens.append(
+                (
+                    "str",
+                    match.group(kind).replace("\\'", "'").replace('\\"', '"').replace("\\\\", "\\"),
+                )
+            )
+        elif kind == "lparen":
+            tokens.append(("(", "("))
+        elif kind == "rparen":
+            tokens.append((")", ")"))
+        elif kind == "and":
+            tokens.append(("and", "&&"))
+        elif kind == "or":
+            tokens.append(("or", "||"))
+        elif kind == "not":
+            tokens.append(("not", "!"))
+        elif kind == "eq":
+            tokens.append(("cmp", "=="))
+        elif kind == "neq":
+            tokens.append(("cmp", "!="))
+        else:
+            tokens.append(("ident", match.group(kind)))
+    return tokens
+
+
+class _DruConditionParser:
+    """Recursive-descent parser for the KiCad condition grammar kct emits.
+
+    Produces a closure ``matcher(a, b) -> bool`` over two item contexts
+    (``A``/``B``), each a mapping of DRU property name -> value.  Anything
+    outside the modelled grammar raises :class:`_UnknownCondition`, which the
+    caller turns into "matches every pair" -- the fail-closed direction for a
+    lowering check.
+    """
+
+    def __init__(self, text: str) -> None:
+        self._tokens = _tokenize_dru_condition(text)
+        self._pos = 0
+        self._ast = self._parse_or()
+        if self._pos != len(self._tokens):
+            raise _UnknownCondition(text)
+
+    def _peek(self) -> tuple[str, str] | None:
+        return self._tokens[self._pos] if self._pos < len(self._tokens) else None
+
+    def _next(self) -> tuple[str, str]:
+        token = self._peek()
+        if token is None:
+            raise _UnknownCondition("unexpected end")
+        self._pos += 1
+        return token
+
+    def _parse_or(self) -> Any:
+        terms = [self._parse_and()]
+        while (tok := self._peek()) and tok[0] == "or":
+            self._next()
+            terms.append(self._parse_and())
+        return terms[0] if len(terms) == 1 else ("or", terms)
+
+    def _parse_and(self) -> Any:
+        terms = [self._parse_unary()]
+        while (tok := self._peek()) and tok[0] == "and":
+            self._next()
+            terms.append(self._parse_unary())
+        return terms[0] if len(terms) == 1 else ("and", terms)
+
+    def _parse_unary(self) -> Any:
+        tok = self._peek()
+        if tok and tok[0] == "not":
+            self._next()
+            return ("not", self._parse_unary())
+        return self._parse_primary()
+
+    def _parse_primary(self) -> Any:
+        tok = self._next()
+        if tok[0] == "(":
+            inner = self._parse_or()
+            if self._next()[0] != ")":
+                raise _UnknownCondition("unbalanced")
+            return inner
+        if tok[0] != "ident":
+            raise _UnknownCondition(tok[1])
+        name = tok[1]
+        peeked = self._peek()
+        if peeked and peeked[0] == "(":
+            # A function call (isCoupledDiffPair, intersectsCourtyard, ...)
+            raise _UnknownCondition(name)
+        nxt = self._peek()
+        if nxt and nxt[0] == "cmp":
+            op = self._next()[1]
+            value = self._next()
+            if value[0] != "str":
+                raise _UnknownCondition(name)
+            return ("cmp", name, op, value[1])
+        raise _UnknownCondition(name)
+
+    def matches(self, a: Mapping[str, str], b: Mapping[str, str]) -> bool:
+        return self._eval(self._ast, a, b)
+
+    def _eval(self, node, a: Mapping[str, str], b: Mapping[str, str]) -> bool:
+        kind = node[0]
+        if kind == "or":
+            return any(self._eval(term, a, b) for term in node[1])
+        if kind == "and":
+            return all(self._eval(term, a, b) for term in node[1])
+        if kind == "not":
+            return not self._eval(node[1], a, b)
+        _, name, op, value = node
+        side, _, field = name.partition(".")
+        if field.lower() == "type":
+            # Measured on kicad-cli 10.0.6: ``A.Type`` comparisons are
+            # case-insensitive ('Zone' / 'zone' / 'ZONE' all match).
+            item = a if side == "A" else b
+            left, right = item.get("type", "").lower(), value.lower()
+        else:
+            item = a if side == "A" else b
+            if field not in item:
+                raise _UnknownCondition(name)
+            left = item[field]
+            right = value
+        return bool(left == right) if op == "==" else bool(left != right)
+
+
+def _rule_matches_layer(rule: Mapping[str, Any], layer: str | None) -> bool:
+    """Whether a rule's ``(layer ...)`` scope admits a pair on ``layer``.
+
+    ``layer=None`` models "no particular layer": only unscoped rules match.
+    """
+    scope = rule.get("layer")
+    if scope is None:
+        return True
+    if layer is None:
+        return False
+    if scope == "outer":
+        return bool(not layer.startswith("In.") and layer.endswith(".Cu"))
+    if scope == "inner":
+        return bool(layer.startswith("In.") and layer.endswith(".Cu"))
+    return bool(scope == layer)
+
+
+def _rule_matches_pair(rule: Mapping[str, Any], a: Mapping[str, str], b: Mapping[str, str]) -> bool:
+    """Whether a rule's condition admits the ordered pair ``(a, b)``.
+
+    KiCad evaluates a rule with the items in both orders, so both are tried.
+    A condition outside the modelled grammar (``hasNetclass()``,
+    ``intersectsCourtyard()``, regex literals, ...) makes the rule's scope
+    unknowable here; it is excluded from resolution rather than treated as
+    matching everything -- over-approximating it would flag every
+    keepout/creepage/attach-zone rewrite as a loosening, while the
+    name-keyed comparison still catches a lowered or removed rule of that
+    shape (Issue #8937's fail-closed scope is the modelled, emitted grammar
+    plus authored baselines).
+    """
+    condition = rule.get("condition")
+    if condition is None:
+        return True
+    try:
+        parser = _DruConditionParser(condition)
+        return parser.matches(a, b) or parser.matches(b, a)
+    except _UnknownCondition:
+        return False
+
+
+def _resolved_clearance(rules: list[Mapping[str, Any]], layer: str | None, a, b) -> float | None:
+    """Last-match-wins clearance for one ordered pair, or ``None``."""
+    resolved: float | None = None
+    for rule in rules:
+        if _rule_matches_layer(rule, layer) and _rule_matches_pair(rule, a, b):
+            value = rule.get("clearance_mm")
+            if value is not None:
+                resolved = value
+    return resolved
+
+
+def _item_context(kind: str, *, netclass: str, layer: str | None, net: str) -> dict[str, str]:
+    context = {
+        "type": kind,
+        "NetClass": netclass,
+        "NetName": net,
+        "Layer": layer or "",
+        "Reference": f"REF_{kind}_{netclass}",
+        "Net": net,
+    }
+    if kind == "Pad":
+        # Both pad flavours are probed by callers; the context carries the
+        # SMD spelling and callers also evaluate a through-hole variant.
+        context["Pad_Type"] = "SMD"
+    if kind == "Via":
+        context["Via_Type"] = "Standard"
+    return context
+
+
+def _pad_variants(netclass: str, layer: str | None, net: str) -> list[dict[str, str]]:
+    contexts = []
+    for pad_type in ("SMD", "Through-hole"):
+        context = _item_context("Pad", netclass=netclass, layer=layer, net=net)
+        context["Pad_Type"] = pad_type
+        contexts.append(context)
+    return contexts
+
+
+def _zone_item(net: str, netclass: str, layer: str) -> dict[str, str]:
+    return _item_context("Zone", netclass=netclass, layer=layer, net=net)
+
+
+def _worst_resolved_for_pair(
+    rules: list[Mapping[str, Any]],
+    sides_a: list[dict],
+    sides_b: list[dict],
+    layers: list[str | None],
+) -> float | None:
+    """The smallest last-match resolution over every probed combination."""
+    worst: float | None = None
+    for layer in layers:
+        for a in sides_a:
+            for b in sides_b:
+                value = _resolved_clearance(rules, layer, a, b)
+                if value is not None and (worst is None or value < worst):
+                    worst = value
+    return worst
+
+
+def _authored_netclasses(authored: Mapping[str, Any]) -> dict[str, float]:
+    raw = authored.get("netclasses")
+    if not isinstance(raw, Mapping):
+        return {}
+    return {
+        str(name): value
+        for name, value in raw.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+
+
+def _authored_zones(authored: Mapping[str, Any]) -> list[tuple[str, str, float]]:
+    raw = authored.get("zones")
+    result: list[tuple[str, str, float]] = []
+    if isinstance(raw, Iterable) and not isinstance(raw, (str, bytes)):
+        for entry in raw:
+            if (
+                not isinstance(entry, (list, tuple))
+                or len(entry) != 3
+                or not all(isinstance(part, str) for part in entry[:2])
+                or not isinstance(entry[2], (int, float))
+                or isinstance(entry[2], bool)
+            ):
+                continue
+            result.append((entry[0], entry[1], float(entry[2])))
+    return result
+
+
+def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[Loosening]:
+    """Compare two parsed ``.kicad_dru`` states (Issue #8937).
+
+    ``before``/``after`` carry ``dru_rules`` (ordered rule records from
+    :func:`kicad_tools.manufacturers.dru_generator.dru_clearance_rules`) and
+    may carry ``managed_names`` (rule names the writer just regenerated -- its
+    own output, free to move with the profile) and, on ``after``, an
+    ``authored`` mapping with the design's own clearance floor sources:
+    ``netclasses`` (name -> clearance mm) and ``zones`` ((layer, net, mm)
+    triples from the ``.kicad_pcb`` zones' ``connect_pads`` clearance).
+
+    Reported as loosenings:
+
+    * a rule outside the regenerated set whose clearance minimum decreased or
+      that vanished (hand-written rules, other tools' managed blocks);
+    * a (track, track), (pad, zone) or (via, zone) pair whose resolved
+      clearance (last matching rule wins, KiCad's documented precedence over
+      the modelled condition grammar; unresolvable conditions are excluded)
+      dropped below the pre-rewrite resolution, or below the clearance the
+      design authorises natively: the weakest authored net class for track
+      pairs, and the zone's own ``connect_pads`` clearance (against the
+      weakest class) for zone pairs.
+    """
+    out: list[Loosening] = []
+    before_rules = list(before.get(DRU_SHAPE_KEY) or [])
+    after_rules = list(after.get(DRU_SHAPE_KEY) or [])
+    managed = {str(name) for name in after.get("managed_names") or ()}
+    managed |= {str(name) for name in before.get("managed_names") or ()}
+
+    # 1. Authored rules by name: lowered or removed.
+    after_by_name = {str(r.get("name")): r for r in after_rules}
+    for rule in before_rules:
+        name = str(rule.get("name"))
+        if name in managed:
+            continue
+        value = rule.get("clearance_mm")
+        if value is None:
+            continue
+        successor = after_by_name.get(name)
+        if successor is None:
+            out.append(Loosening(f"dru.{name}", LOOSENING_REMOVED, value, None))
+        else:
+            new = successor.get("clearance_mm")
+            if new is not None and new < value - _TOLERANCE:
+                out.append(Loosening(f"dru.{name}.clearance", LOOSENING_LOWERED, value, new))
+
+    # 2. Resolved clearances per pair class, against the pre-rewrite state
+    #    and the design's authored values.
+    authored = _as_mapping(after.get("authored"))
+    classes = _authored_netclasses(authored)
+    zones = _authored_zones(authored)
+    if not after_rules and not before_rules and not zones:
+        return out
+
+    weakest_class = min(classes.values()) if classes else None
+    class_names = sorted(classes)
+    scopes: set[str] = set()
+    for rule in after_rules + before_rules:
+        scope = rule.get("layer")
+        if isinstance(scope, str):
+            scopes.add(scope)
+    for layer, _net, _value in zones:
+        scopes.add(layer)
+    probe_layers: list[str | None] = [None, *sorted(scopes)]
+
+    def track_contexts() -> list[dict[str, str]]:
+        return [
+            _item_context("track", netclass=name, layer=None, net=f"__net_{name}")
+            for name in class_names
+        ]
+
+    def check_pair(
+        label: str,
+        sides_a,
+        sides_b,
+        baseline: float | None,
+        pair_layers: list[str | None] | None = None,
+    ) -> None:
+        probe = pair_layers if pair_layers is not None else probe_layers
+        before_value = _worst_resolved_for_pair(before_rules, sides_a, sides_b, probe)
+        after_value = _worst_resolved_for_pair(after_rules, sides_a, sides_b, probe)
+        floor = baseline if baseline is not None else 0.0
+        reference = before_value if before_value is not None else None
+        limit = max(reference, floor) if reference is not None else floor
+        if after_value is not None and after_value < limit - _TOLERANCE:
+            out.append(Loosening(f"dru.resolved.{label}", LOOSENING_LOWERED, limit, after_value))
+
+    if class_names:
+        tracks = track_contexts()
+        check_pair("track_track", tracks, tracks, weakest_class)
+    for layer, net, zone_value in zones:
+        # A zone's net class comes from the project; when unknown, the
+        # weakest authored class is the native floor for its pairs.
+        zone_netclass = f"__zone_{net}"
+        zone_ctx = _zone_item(net, zone_netclass, layer)
+        foreign = [
+            ctx
+            for name in class_names
+            for ctx in (
+                _item_context("track", netclass=name, layer=layer, net=f"__net_{name}"),
+                *_pad_variants(name, layer, f"__net_{name}"),
+                _item_context("Via", netclass=name, layer=None, net=f"__net_{name}"),
+            )
+        ]
+        baseline = max([zone_value] + ([weakest_class] if weakest_class is not None else []))
+        # A zone pair always lives on the zone's own copper layer, so the
+        # layer probe is that layer alone -- never the unscoped view, where
+        # the zone's own layer-scoped rule would not match.
+        check_pair(f"pad_zone.{layer}.{net}", [zone_ctx], foreign, baseline, [layer])
+        check_pair(f"via_zone.{layer}.{net}", [zone_ctx], foreign, baseline, [layer])
+    return out
+
+
 def _allowed(path: str, allow: Iterable[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in allow)
 
@@ -358,12 +775,24 @@ def rule_loosenings(
     * a ``netclass_patterns`` entry that was removed, and a
       ``netclass_assignments`` entry that was removed or reassigned.
 
+    Reports, for a ``.kicad_dru`` state (a mapping with a
+    :data:`DRU_SHAPE_KEY` entry; Issue #8937):
+
+    * a rule outside the writer's regenerated set whose ``clearance``
+      minimum decreased or that vanished;
+    * a (track, track), (pad, zone) or (via, zone) pair whose resolved
+      clearance dropped below the pre-rewrite resolution or below the
+      design's authored value (weakest net class; zone ``connect_pads``
+      clearance) -- the fail-closed gate for an emitted fab floor that
+      would *replace* a larger authored clearance.
+
     Values ``before`` does not declare are never reported: adding a rule is
     not a loosening.
 
     Args:
-        before: The rule file as authored (parsed JSON).
-        after: The rule file a writer is about to save.
+        before: The rule file as authored (parsed JSON), or a parsed
+            ``.kicad_dru`` state (see :data:`DRU_SHAPE_KEY`).
+        after: The rule file a writer is about to save, same shape.
         allow: :mod:`fnmatch` patterns over :attr:`Loosening.path` for
             documented, permitted loosenings -- e.g. the #6191 non-blocking
             severities, or ``"*"`` under ``KCT_PRESERVE_BOARD_RULES=0``.  Build
@@ -375,7 +804,12 @@ def rule_loosenings(
         tightened or kept every authored rule.
     """
     allow = tuple(allow)
-    return [item for item in _project_loosenings(before, after) if not _allowed(item.path, allow)]
+    shape = _loosening_shape(before, after)
+    if shape == "dru":
+        items = _dru_loosenings(before, after)
+    else:
+        items = _project_loosenings(before, after)
+    return [item for item in items if not _allowed(item.path, allow)]
 
 
 def assert_no_loosenings(

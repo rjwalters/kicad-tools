@@ -11,7 +11,7 @@
   (constraint silk_clearance (min 0.15mm)))
 (rule "SMD Pad Clearance - jlcpcb"
   (condition "A.Type == 'Pad' && B.Type == 'Pad' && A.Pad_Type == 'SMD' && B.Pad_Type == 'SMD' && A.Net != B.Net && A.Reference != B.Reference")
-  (constraint clearance (min 0.15mm)))
+  (constraint clearance (min 0.2mm)))
 (rule "PTH Hole to Track - jlcpcb"
   (condition "(A.Pad_Type == 'Through-hole' && B.Type == 'Track') || (B.Pad_Type == 'Through-hole' && A.Type == 'Track')")
   (constraint hole_clearance (min 0.28mm)))
@@ -47,6 +47,16 @@
 
 (rule "Reviewed clearance - Power"
   (condition "(A.NetClass == 'Power' || B.NetClass == 'Power') && !(A.Type == 'Pad' && B.Type == 'Pad' && A.Reference == B.Reference) && !A.isCoupledDiffPair()")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - GND (In1.Cu)"
+  (layer "In1.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.2mm)))
+
+(rule "Zone clearance - +3V3 (In2.Cu)"
+  (layer "In2.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == '+3V3') || (B.Type == 'Zone' && B.NetName == '+3V3')")
   (constraint clearance (min 0.2mm)))
 # END kct fab floors
 
