@@ -201,7 +201,9 @@ class PathAmpacityRule(DRCRule):
             if spec.pulsed_a is not None and spec.pulse_duration_s is None:
                 results.add(self._unchecked_fusing_violation(spec))
 
-            for change in resolution.layer_changes:
+            # A stitching via inside doubled copper carries no series current
+            # (issue #8916); every other layer change is judged as before.
+            for change in resolution.series_layer_changes:
                 capacity_a = change.current_capacity_a()
                 if capacity_a < thermal.current_a:
                     results.add(self._layer_change_violation(spec, thermal, change, capacity_a))

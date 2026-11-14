@@ -977,7 +977,11 @@ def _print_reinforce_legs(outcome, origin_x: float, origin_y: float) -> None:
         anchors = ", ".join(f"({a.x + origin_x:.2f}, {a.y + origin_y:.2f})" for a in leg.anchors)
         print(
             f"    leg {i} [{leg.kind}] {leg.layer} {leg.length_mm:.1f} mm -- "
-            f"{len(leg.anchors)}/2 anchored [{leg.status}]"
+            + (
+                f"{leg.strategy} [{leg.status}]"
+                if leg.strategy != "wire"
+                else f"{len(leg.anchors)}/2 anchored [{leg.status}]"
+            )
             + (
                 f", wire spans {leg.wire_span_mm:.1f} of {leg.length_mm:.1f} mm"
                 if leg.wire_span_mm
@@ -1018,6 +1022,10 @@ def _print_clear_lines(clear_outcome, origin_x: float, origin_y: float, dry_run:
         print(
             f"    kept anchor at ({r.x + origin_x:.2f}, {r.y + origin_y:.2f}): refused -- {r.reason}"
         )
+    for c in clear_outcome.copies_removed:
+        print(f"  Parallel copy on {c.layer} {verb}: {c.segments} segment(s), {c.vias} via(s)")
+    for c in clear_outcome.copies_refused:
+        print(f"  Parallel copy on {c.layer} kept: refused -- {c.reason}")
     if clear_outcome.openings_removed:
         print(f"  Mask openings cleared: {len(clear_outcome.openings_removed)} ({verb})")
         for o in clear_outcome.openings_removed:
@@ -1046,9 +1054,67 @@ def _drop_cleared_wires(output_path: Path, clear_outcome, origin_x: float, origi
     from kicad_tools.pcb.reinforcement_sidecar import drop_wires, sidecar_path
 
     removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
-    if not removed:
+    copies = [c.key for c in getattr(clear_outcome, "copies_removed", [])]
+    if not removed and not copies:
         return 0
-    return drop_wires(sidecar_path(output_path), clear_outcome.net_name, removed)
+    return drop_wires(sidecar_path(output_path), clear_outcome.net_name, removed, copies)
+
+
+def _cleared_anything(clear_outcome) -> bool:
+    """True when a clear pass removed an anchor or a parallel copy (#8916)."""
+    return bool(clear_outcome.removed_count or getattr(clear_outcome, "copies_removed", None))
+
+
+def _cleared_copy_entries(clear_outcome) -> list:
+    return [
+        {"layer": c.layer, "segments": c.segments, "vias": c.vias}
+        for c in getattr(clear_outcome, "copies_removed", [])
+    ]
+
+
+def _copy_entry(copy, origin_x: float, origin_y: float) -> dict | None:
+    """JSON form of a parallel copy (#8916), sheet-absolute; None when absent."""
+    if copy is None:
+        return None
+    return {
+        "layer": copy.layer,
+        "segments": [
+            {
+                "start": [round(a[0] + origin_x, 4), round(a[1] + origin_y, 4)],
+                "end": [round(b[0] + origin_x, 4), round(b[1] + origin_y, 4)],
+                "width_mm": round(w, 4),
+            }
+            for a, b, w in copy.segments
+        ],
+        "stitch_vias": [
+            [round(x + origin_x, 4), round(y + origin_y, 4)] for x, y in copy.stitch_vias
+        ],
+        "via_size_mm": round(copy.via_size_mm, 4),
+        "via_drill_mm": round(copy.via_drill_mm, 4),
+        "existing_segments": copy.existing_segments,
+        "existing_vias": copy.existing_vias,
+    }
+
+
+def _print_reinforce_copies(outcome, origin_x: float, origin_y: float) -> None:
+    """Text report of the parallel copies of a ``--strategy`` pass (#8916)."""
+    print(f"  Parallel copies: {len(outcome.copies)} placed, {len(outcome.refused_copies)} refused")
+    for c in outcome.copies:
+        vias = ", ".join(f"({x + origin_x:.2f}, {y + origin_y:.2f})" for x, y in c.stitch_vias)
+        print(
+            f"    {c.layer}: {len(c.segments)} segment(s), {len(c.stitch_vias)} stitching via(s)"
+            + (f" at {vias}" if vias else "")
+            + (
+                f" [{c.existing_segments} segment(s) already present]"
+                if c.existing_segments
+                else ""
+            )
+        )
+    for r in outcome.refused_copies:
+        print(
+            f"    refused on {r.copy_layer or r.leg_layer} at ({r.x + origin_x:.2f}, "
+            f"{r.y + origin_y:.2f}): {r.reason}"
+        )
 
 
 def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
@@ -1073,7 +1139,7 @@ def _finish_reinforce_clear(
                 {
                     "input": str(pcb_path),
                     "output": str(output_path)
-                    if not dry_run and clear_outcome.removed_count
+                    if not dry_run and _cleared_anything(clear_outcome)
                     else None,
                     "dry_run": dry_run,
                     "clear": True,
@@ -1090,6 +1156,7 @@ def _finish_reinforce_clear(
                     "mask_openings_cleared": _opening_entries(
                         clear_outcome.openings_removed, origin_x, origin_y
                     ),
+                    "copies_cleared": _cleared_copy_entries(clear_outcome),
                 },
                 indent=2,
             )
@@ -1103,15 +1170,20 @@ def _finish_reinforce_clear(
             f"  Anchor size:    drill {clear_outcome.anchor_drill_mm:.3f} mm, "
             f"pad {clear_outcome.anchor_pad_mm:.3f} mm"
         )
-        if not clear_outcome.removed and not clear_outcome.refused:
+        if (
+            not clear_outcome.removed
+            and not clear_outcome.refused
+            and not clear_outcome.copies_removed
+            and not clear_outcome.copies_refused
+        ):
             print("  Nothing to clear: no anchor-sized same-net vias found.")
         else:
             _print_clear_lines(clear_outcome, origin_x, origin_y, dry_run)
-        if not dry_run and clear_outcome.removed_count:
+        if not dry_run and _cleared_anything(clear_outcome):
             print()
             print("  NOTE: refill zone pours afterward (e.g. `kicad-cli pcb drc --refill-zones`).")
 
-    if not dry_run and clear_outcome.removed_count:
+    if not dry_run and _cleared_anything(clear_outcome):
         try:
             pcb.save(output_path)
             _carry_sidecars(pcb_path, output_path)
@@ -1204,6 +1276,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         )
     mask_opening = getattr(args, "mask_opening", None)
     mask_width = getattr(args, "mask_width", None)
+    strategy = getattr(args, "strategy", None) or "wire"
     if mask_width is not None and mask_width <= 0:
         print("Error: --mask-width must be positive", file=sys.stderr)
         return 1
@@ -1343,6 +1416,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             max_end_shift_mm=max_end_shift,
             mask_opening=mask_opening,
             mask_width_mm=mask_width,
+            strategy=strategy,
         )
     except ReinforceError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1434,6 +1508,11 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "paths": leg.paths,
                 "mask_status": leg.mask_status,
                 "mask_reason": leg.mask_reason,
+                # Issue #8916: per-leg strategy and parallel copy (additive).
+                "strategy": leg.strategy,
+                "copy_status": leg.copy_status,
+                "copy_reason": leg.copy_reason,
+                "copy": _copy_entry(leg.copy, origin_x, origin_y),
                 "polyline": [
                     [round(x + origin_x, 4), round(y + origin_y, 4)] for x, y in leg.polyline
                 ],
@@ -1469,6 +1548,24 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             }
             for r in outcome.refused_openings
         ],
+        # Issue #8916: reinforcement strategy and parallel copies (additive).
+        "strategy": outcome.strategy,
+        "copies_placed": outcome.copies_placed_count,
+        "copies": [_copy_entry(c, origin_x, origin_y) for c in outcome.copies],
+        "refused_copies": [
+            {
+                "leg_layer": r.leg_layer,
+                "copy_layer": r.copy_layer,
+                "x": round(r.x + origin_x, 4),
+                "y": round(r.y + origin_y, 4),
+                "rule": r.rule,
+                "required_mm": round(r.required_mm, 4),
+                "actual_mm": round(r.actual_mm, 4),
+                "obstacle_net": r.obstacle_net,
+                "reason": r.reason,
+            }
+            for r in outcome.refused_copies
+        ],
     }
     if clear_outcome is not None:
         result["replace"] = True
@@ -1481,6 +1578,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         result["mask_openings_cleared"] = _opening_entries(
             clear_outcome.openings_removed, origin_x, origin_y
         )
+        result["copies_cleared"] = _cleared_copy_entries(clear_outcome)
         if not dry_run:
             try:
                 _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
@@ -1529,6 +1627,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         print(f"  Anchor pad:     {outcome.anchor_pad_mm:.3f} mm")
         if outcome.anchor_mode == "ends":
             print(f"  Anchor mode:    ends (end offset {outcome.end_offset_mm:g} mm)")
+            print(f"  Strategy:       {outcome.strategy}")
         else:
             print("  Anchor mode:    spaced")
             print(f"  Spacing:        {outcome.spacing_mm:.1f} mm")
@@ -1539,7 +1638,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             print(f"  Min wire length: {effective_min:g} mm (shorter legs get no wire)")
         else:
             print("  Min wire length: none (every leg is a wire candidate)")
-        if outcome.anchor_mode == "ends" and outcome.placed_count == 0:
+        if outcome.anchor_mode == "ends" and outcome.placed_count == 0 and not outcome.copies:
             # Every attempted leg was refused or too short: nothing is anchored.
             print("  Anchored run:   none (no leg received an anchor; see legs below)")
         else:
@@ -1567,6 +1666,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         print()
         print(f"  Anchors placed:  {outcome.placed_count}")
         print(f"  Anchors refused: {outcome.refused_count}")
+        if outcome.strategy != "wire":
+            _print_reinforce_copies(outcome, origin_x, origin_y)
         for r in outcome.refused:
             detail = (
                 f" [{r.rule}: need {r.required_mm:.3f} mm, have {r.actual_mm:.3f} mm"
@@ -1581,14 +1682,18 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         if result["wire_sidecar"]:
             print(f"  Wire list:      {result['wire_sidecar']} ({len(wire_records)} wire(s))")
         if not dry_run and (
-            outcome.placed_count or (clear_outcome is not None and clear_outcome.removed_count)
+            outcome.placed_count
+            or outcome.copies
+            or (clear_outcome is not None and _cleared_anything(clear_outcome))
         ):
             print()
             print(
                 "  NOTE: anchors are same-net vias -- refill zone pours "
                 "afterward (e.g. `kicad-cli pcb drc --refill-zones`)."
             )
-            if outcome.mask_opening:
+            if outcome.copies and not outcome.placed_count:
+                pass  # parallel copies only (#8916): no anchors, no mask openings
+            elif outcome.mask_opening:
                 new = sum(1 for o in outcome.openings if not o.existing)
                 print(
                     f"  Mask openings:   {len(outcome.openings)} ({new} new); "
@@ -1616,9 +1721,11 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             else:
                 print("  NOTE: mask openings are off; anchors inherit the board's via tenting.")
 
-    # Save unless dry-run and at least one anchor was placed (or cleared).
+    # Save unless dry-run and at least one anchor or copy was placed (or cleared).
     if not dry_run and (
-        outcome.placed_count or (clear_outcome is not None and clear_outcome.removed_count)
+        outcome.placed_count
+        or outcome.copies
+        or (clear_outcome is not None and _cleared_anything(clear_outcome))
     ):
         try:
             pcb.save(output_path)

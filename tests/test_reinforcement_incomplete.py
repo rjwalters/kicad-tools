@@ -564,8 +564,14 @@ class TestStitchedDoubledCopper:
 
     Eligibility is *declared* in the current-paths sidecar, never inferred from
     the copper. Undeclared, the net yields no finding. Declared
-    ``reinforcement_eligible: true``, the rule is working as designed and
-    reports the missing anchors / mask opening on it.
+    ``reinforcement_eligible: true`` with no sidecar record, the rule is
+    working as designed and reports the missing anchors / mask opening on it.
+
+    Issue #8916 changed two things here, deliberately. (d) no longer fires on
+    the via at (70, 50): it pins the two branches together mid-run, so the
+    path does not change layer there (``PathResolution.series_layer_changes``).
+    And once the sidecar records the doubling as a parallel copy, the legs
+    need no wire at all.
     """
 
     @staticmethod
@@ -583,16 +589,46 @@ class TestStitchedDoubledCopper:
 
     def test_declared_eligible_doubled_copper_is_flagged_as_designed(self):
         results = _run(self._board(), eligible=True)
-        assert set(_subchecks(results)) == {"a", "b", "d"}
+        assert set(_subchecks(results)) == {"a", "b"}
+
+    def test_mid_run_stitching_via_is_not_a_layer_change(self):
+        """Was ``d`` before #8916: the via sits inside both branches."""
+        assert "d" not in _subchecks(_run(self._board(), eligible=True))
+
+    def test_recorded_parallel_copy_needs_no_wire(self):
+        """The same copper, recorded by ``--strategy parallel``, is clean."""
+        record = {
+            "net": NET,
+            "layer": "B.Cu",
+            "kind": "run",
+            "leg_start": {"x": 20.0, "y": 50.0},
+            "leg_end": {"x": 120.0, "y": 50.0},
+            "anchors": [],
+            "wire_gauge_awg": 16,
+            "status": "parallel",
+            "strategy": "parallel",
+            "copy_status": "placed",
+            "copy_layer": "F.Cu",
+            "polyline": [{"x": 20.0, "y": 50.0}, {"x": 120.0, "y": 50.0}],
+            "copy_segments": [
+                {"start": {"x": 20.0, "y": 50.0}, "end": {"x": 120.0, "y": 50.0}, "width_mm": 2.6}
+            ],
+            "stitch_vias": [{"x": 70.0, "y": 50.0}],
+        }
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=[record])
+        assert rule.check(self._board(), _rules()).violations == []
 
 
 class TestBelowMinWireLengthInteraction:
     """Issue #8915 asked what this rule reports once a declared-eligible path's
-    only leg falls under the default 15 mm minimum. Measured, not changed here:
-    the path still resolves ``ok``, so it is checked from its resolved segments
-    and yields the ``a`` (no anchor holes) + ``b`` (no mask opening) warnings --
-    **not** ``no_wire``, which only fires for an *unresolved* declared-eligible
-    path. Changing that belongs to the ``--strategy`` issue (#8916).
+    only leg falls under the default 15 mm minimum. Measured: the path still
+    resolves ``ok``, so it is checked from its resolved segments and yields the
+    ``a`` (no anchor holes) + ``b`` (no mask opening) warnings -- **not**
+    ``no_wire``, which only fires for an *unresolved* declared-eligible path.
+
+    Issue #8916 gives that short leg somewhere to go: ``--strategy auto``
+    copies it onto the opposite outer layer, the wire list records the copy,
+    and ``a`` / ``b`` stop firing for it. A ``wire`` leg still earns them.
     """
 
     @staticmethod
@@ -613,3 +649,23 @@ class TestBelowMinWireLengthInteraction:
 
     def test_leg_above_the_minimum_is_clean(self):
         assert _subchecks(_run(self._reinforced_short(25.0))) == []
+
+    def test_auto_strategy_copy_clears_a_and_b(self):
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board(length=12.0)
+        result = reinforce_net(pcb, NET, current_paths=[_spec(True)], strategy="auto")
+        assert [leg.strategy for leg in result.legs] == ["parallel"]
+        wires = build_wire_records(result, 0.0, 0.0)
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
+        assert _subchecks(rule.check(pcb, _rules())) == []
+
+    def test_wire_strategy_short_leg_still_reports_a_and_b(self):
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board(length=12.0)
+        result = reinforce_net(pcb, NET, current_paths=[_spec(True)], strategy="wire")
+        rule = ReinforcementIncompleteRule(
+            specs=[_spec(True)], wires=build_wire_records(result, 0.0, 0.0)
+        )
+        assert set(_subchecks(rule.check(pcb, _rules()))) == {"a", "b"}
