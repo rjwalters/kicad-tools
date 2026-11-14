@@ -30,6 +30,7 @@ import runpy
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from kicad_tools.core.project_file import create_minimal_project, save_project
 from kicad_tools.core.schematic_uuids import UuidSequence
@@ -1231,9 +1232,7 @@ def create_stm32_pcb(output_dir: Path) -> Path:
             f"    (fp_line (start {sx} {sy}) (end {ex} {ey})\n"
             f'      (stroke (width 0.15) (type solid)) (layer "F.SilkS") '
             f'(uuid "{uid}"))'
-            for ((sx, sy), (ex, ey)), uid in (
-                (c, generate_uuid()) for c in silk_corners
-            )
+            for ((sx, sy), (ex, ey)), uid in ((c, generate_uuid()) for c in silk_corners)
             if ((sx, sy), (ex, ey)) not in silk_dropped
         ]
         silk_lines.append(
@@ -2133,6 +2132,131 @@ def relocate_drill_clearance_step(routed_path: Path) -> bool:
     return True
 
 
+# Issue #8844 (operator ruling 2026-11-13): the ``redundant_copper_staircase``
+# rule (#8868) fires on board 04's post-route copper -- the stair steps the
+# ``kct stitch`` / ``tie_power_pads`` pad tails and the ``quantize_escapes``
+# doglegs leave behind.  The ruling is to remove them from the copper rather
+# than record them as ``known_issues``, so this deterministic post-copper pass
+# runs immediately before the final re-pour.
+#
+# It is driven entirely by the rule's own verdict: for each chain the rule
+# flags, it lays the very path the rule named as clear (and verified with the
+# rule's own clearance oracle), at the chain's widest width.  Nothing about
+# this board's geometry is hard-coded, so it holds for a fresh re-route as
+# well as the committed copper -- a hard-coded chain would hard-fail the
+# ``board-04-end-to-end`` regen job the moment the router moved a trace.
+#
+# ``kct optimize-traces`` is deliberately NOT used: its staircase pass cannot
+# collapse a chain whose legs change width (board 04's OSC_OUT B.Cu escape
+# steps through 0.127 / 0.15 / 0.2 mm), and the passes that would collapse it
+# also rewrite copper the reviewed escapes depend on.
+#: Rounds of flag-and-collapse before giving up (one is enough on this board;
+#: a second only runs if collapsing one chain exposes another).
+_STAIRCASE_MAX_ROUNDS = 6
+
+
+def _staircase_clear_path(
+    rule: Any, chain: list[Any], layer: str
+) -> tuple[list[tuple[float, float]] | None, float, int]:
+    """The replacement path for one flagged chain: ``(points, width, net)``.
+
+    Mirrors ``RedundantCopperRule._report_staircase``'s candidate order
+    (diagonal-first, then orthogonal-first) and re-validates the winner with
+    the rule's own ``_path_clear`` -- the same oracle that decided the finding
+    was reportable -- so the copper laid here is the copper the rule asked for.
+    ``points`` is None when no candidate is clear (the rule should then not
+    have reported the chain; the caller refuses rather than guessing).
+    """
+    pts = [chain[0][1], *[step[2] for step in chain]]
+    start, end = pts[0], pts[-1]
+    bends = rule._bend_count(pts)
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    diag = min(abs(dx), abs(dy))
+    mid_diagonal = (start[0] + math.copysign(diag, dx), start[1] + math.copysign(diag, dy))
+    mid_orthogonal = (end[0] - math.copysign(diag, dx), end[1] - math.copysign(diag, dy))
+    if diag < 1e-6 or math.dist(mid_diagonal, end) < 1e-6:
+        candidates = [[start, end]]
+    else:
+        candidates = [[start, mid_diagonal, end], [start, mid_orthogonal, end]]
+
+    net = chain[0][0].net_number
+    width = max(segment.width for segment, _from, _to in chain)
+    for candidate in candidates:
+        if rule._bend_count(candidate) >= bends:
+            continue
+        legs = list(zip(candidate, candidate[1:], strict=False))
+        if rule._path_clear(legs, net, layer, width):
+            return candidate, width, net
+    return None, width, net
+
+
+def compress_staircases(routed_path: Path) -> bool:
+    """Collapse every ``redundant_copper_staircase`` chain in the copper (#8844).
+
+    Must run AFTER the copper-mutating passes that *create* the staircases
+    (``fix_osc_escape`` / ``stitch_pcb`` / ``tie_power_pads`` /
+    ``relocate_drill_clearance_step`` / ``quantize_escapes``) and the #8399
+    ``cleanup_copper`` prune, and BEFORE :func:`fill_zones`, so the final
+    re-pour backs the GND plane off the newly placed copper.
+
+    Each collapse replaces an axis-aligned stair run with a 45 degree diagonal
+    plus an orthogonal leg, so the 100% 0/45/90/135 census ``quantize_escapes``
+    establishes is preserved by construction.  Returns False (fails the
+    recipe) if any chain the rule flags is still flagged at the end.
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.redundant_copper import RedundantCopperRule
+
+    class _FlaggedChains(RedundantCopperRule):
+        """The rule, plus the chains behind each staircase finding."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.flagged: list[tuple[list[Any], str, str]] = []
+
+        def _report_staircase(self, chain, label, layer, results):  # type: ignore[no-untyped-def]
+            before = len(results.violations)
+            super()._report_staircase(chain, label, layer, results)
+            if len(results.violations) > before:
+                self.flagged.append((chain, label, layer))
+
+    print("\n" + "=" * 60)
+    print("Compressing track staircases (issue #8844)...")
+    print("=" * 60)
+
+    collapsed = 0
+    for round_number in range(1, _STAIRCASE_MAX_ROUNDS + 1):
+        pcb = PCB.load(routed_path)
+        rule = _FlaggedChains()
+        rule.check(pcb, None)
+        if not rule.flagged:
+            print(f"   No staircase findings ({collapsed} chain(s) collapsed)")
+            return True
+
+        print(f"   Round {round_number}: {len(rule.flagged)} staircase chain(s)")
+        changed = False
+        for chain, label, layer in rule.flagged:
+            path, width, net = _staircase_clear_path(rule, chain, layer)
+            if path is None:
+                print(f"      [{label}] on {layer}: no clear replacement path")
+                continue
+            pcb.remove_segments([segment for segment, _from, _to in chain])
+            for point_a, point_b in zip(path, path[1:], strict=False):
+                pcb.add_trace(point_a, point_b, width=width, layer=layer, net=net)
+            print(
+                f"      [{label}] on {layer}: {len(chain)} -> {len(path) - 1} "
+                f"segments at {width} mm"
+            )
+            collapsed += 1
+            changed = True
+        if not changed:
+            break
+        pcb.save(routed_path)
+
+    print("\n   FAILED: staircase findings remain after compression")
+    return False
+
+
 def fill_zones(routed_path: Path) -> bool:
     """
     Re-pour the copper zones (GND B.Cu plane) after stitching.
@@ -2542,6 +2666,16 @@ def main() -> int:
             raise RuntimeError("pcb add-fiducials failed")
         if run_add_board_info(routed_path, auto=True) != 0:
             raise RuntimeError("pcb add-board-info failed")
+
+        # Issue #8844 (operator ruling 2026-11-13): collapse the four
+        # ``redundant_copper_staircase`` chains the post-route copper passes
+        # leave behind, rather than recording them as ``known_issues``.  Runs
+        # after every copper-mutating pass and the #8399 prune, and before the
+        # re-pour below so the GND plane backs off the compressed copper.
+        staircase_success = compress_staircases(routed_path)
+        if not staircase_success:
+            raise RuntimeError("compress_staircases did not pass (#8844)")
+
         fill_success = fill_zones(routed_path)
 
         # Step 7: Run DRC.  Issue #3912: run_drc still runs for its

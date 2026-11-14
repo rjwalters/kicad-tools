@@ -127,6 +127,9 @@ class TestBoard04PartialRouteFastFail:
         monkeypatch.setattr(
             "kicad_tools.cli.pcb_add_board_info.run_add_board_info", lambda *a, **k: 0
         )
+        # Issue #8844: the staircase compression reads the routed PCB, which
+        # route_pcb's stub never wrote -- stub it like every other copper step.
+        monkeypatch.setattr(module, "compress_staircases", lambda *a, **k: True)
         monkeypatch.setattr(module, "fill_zones", lambda *a, **k: True)
         monkeypatch.setattr(module, "run_drc", lambda *a, **k: True)
         monkeypatch.setattr(module, "generate_manufacturing", lambda *a, **k: True)
