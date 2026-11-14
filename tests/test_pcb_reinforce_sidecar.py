@@ -195,3 +195,52 @@ def test_unanchored_leg_that_still_wants_a_wire_keeps_its_record(tmp_path):
     unanchored = next(w for w in wires if w["status"] == "unanchored")
     assert unanchored["anchors"] == []
     assert "only the longest leg" in unanchored["reason"]
+
+
+# --------------------------------------------------------------------------
+# Issue #8916: parallel-copy records
+# --------------------------------------------------------------------------
+
+
+def test_absent_strategy_reads_as_wire():
+    """Pre-#8916 records carry no ``strategy``; they stay wires (no version bump)."""
+    from kicad_tools.pcb.reinforcement_sidecar import SIDECAR_VERSION, is_parallel
+
+    assert SIDECAR_VERSION == 1
+    assert not is_parallel({"net": "N", "layer": "F.Cu"})
+    assert is_parallel({"net": "N", "layer": "F.Cu", "strategy": "parallel"})
+
+
+def test_parallel_record_key_ignores_which_side_it_was_met_from():
+    """A re-run that meets the leg from its copy's side replaces the record."""
+    from kicad_tools.pcb.reinforcement_sidecar import wire_key
+
+    def w(layer, copy_layer):
+        return {
+            "net": "N",
+            "layer": layer,
+            "copy_layer": copy_layer,
+            "strategy": "parallel",
+            "leg_start": {"x": 0.0, "y": 0.0},
+            "leg_end": {"x": 12.0, "y": 0.0},
+        }
+
+    assert wire_key(w("B.Cu", "F.Cu")) == wire_key(w("F.Cu", "B.Cu"))
+    assert len(merge_wires([w("B.Cu", "F.Cu")], [w("F.Cu", "B.Cu")])) == 1
+    wire = {k: v for k, v in w("B.Cu", "F.Cu").items() if k not in ("strategy", "copy_layer")}
+    assert wire_key(wire) != wire_key(w("B.Cu", "F.Cu"))
+
+
+def test_parallel_short_leg_is_recorded_and_cleared(tmp_path):
+    """A 12 mm leg below the #8915 minimum: a wire gets no record, a copy does,
+    and --clear removes the copy's copper and its record."""
+    p = _short_board(tmp_path, 12.0)
+    assert run_pcb_command(_args(p, strategy="parallel")) == 0
+    wires = load_wires(sidecar_path(p))
+    assert [(w["net"], w["strategy"], w["copy_layer"]) for w in wires] == [
+        ("NET_A", "parallel", "B.Cu")
+    ]
+    assert any(s.layer == "B.Cu" for s in PCB.load(p).segments)
+    assert run_pcb_command(_args(p, clear=True)) == 0
+    assert not any(s.layer == "B.Cu" for s in PCB.load(p).segments)
+    assert load_wires(sidecar_path(p)) == []

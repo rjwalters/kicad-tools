@@ -2619,6 +2619,29 @@ def _add_pcb_parser(subparsers) -> None:
         "--spacing mm along the run.",
     )
     pcb_reinforce.add_argument(
+        "--strategy",
+        dest="strategy",
+        choices=["wire", "parallel", "auto"],
+        default="wire",
+        help="How each leg is reinforced (Issue #8916). wire (default): the "
+        "buttress wire -- two end anchors and a mask opening. parallel: a "
+        "same-net, same-width copy of the leg on the opposite outer layer "
+        "(F.Cu <-> B.Cu), tied to it at both ends (the through-hole pad or "
+        "through via the leg ends on, else a stitching via) and by stitching "
+        "vias about every 5 mm (the board's default via, never closer than "
+        "kct stitch's same-net spacing); no anchors, no mask opening. Every "
+        "copy track and via passes the same clearance checks as an anchor "
+        "(class floors, .kicad_dru rules, --voltage-map creepage, "
+        "hole-to-hole); a copy that does not fit whole is refused and "
+        "reported, never written in part. The minimum wire length does not "
+        "filter parallel legs. auto: parallel for a leg shorter than the "
+        "minimum wire length (--min-wire-length, default 15 mm; 0 makes "
+        "every leg a wire), wire for the rest. parallel and auto need "
+        "--anchor-mode ends: with --anchor-mode spaced they exit with an "
+        "error (spaced mode has no per-leg layout, and no default minimum "
+        "for auto to compare against).",
+    )
+    pcb_reinforce.add_argument(
         "--end-offset",
         dest="end_offset",
         type=float,

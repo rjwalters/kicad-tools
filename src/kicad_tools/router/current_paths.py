@@ -1054,6 +1054,47 @@ class PathResolution:
             return None
         return min(candidates, key=lambda c: c.width_mm)
 
+    @property
+    def series_layer_changes(self) -> tuple[LayerChange, ...]:
+        """``layer_changes`` without the stitching vias inside doubled copper (#8916).
+
+        A via that pins two branches of a :class:`ParallelGroup` together
+        part-way along the run carries no series current: the path does not
+        leave one layer for the other there, it continues on both. Such a via
+        is recognised by geometry, never by size: every path segment touching
+        it belongs to a parallel group and, on each layer it joins, the copper
+        passes THROUGH it (the via sits inside a segment, or two segments end
+        on it). A via where a branch starts or ends -- the tie at an SMD end
+        of a doubled run, say -- is a real layer change: the copy's share of
+        the current crosses it, and it stays in this list.
+
+        ``layer_changes`` itself is unchanged, so an audit still lists every
+        via that joins two layers.
+        """
+        grouped = {id(seg) for group in self.parallel_groups for seg in group.segments}
+        if not grouped:
+            return self.layer_changes
+        tol = 0.01
+
+        def stitching(position: tuple[float, float], layers: tuple[str, str]) -> bool:
+            half_edges: dict[str, int] = {}
+            for seg in self.segments:
+                if point_to_segment_distance(*position, *seg.start, *seg.end) > tol:
+                    continue
+                if id(seg) not in grouped:
+                    return False
+                at_end = min(math.dist(position, seg.start), math.dist(position, seg.end)) <= tol
+                half_edges[seg.layer] = half_edges.get(seg.layer, 0) + (1 if at_end else 2)
+            return all(half_edges.get(layer, 0) >= 2 for layer in layers)
+
+        return tuple(
+            change
+            for change in self.layer_changes
+            if not all(
+                stitching(pos, (change.from_layer, change.to_layer)) for pos, _, _ in change.vias
+            )
+        )
+
 
 def _node_key(point: tuple[float, float]) -> tuple[float, float]:
     return (round(point[0], _COORD_DECIMALS), round(point[1], _COORD_DECIMALS))
