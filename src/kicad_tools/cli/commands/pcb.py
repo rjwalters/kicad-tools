@@ -1380,13 +1380,18 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     # (in memory; nothing is written under --dry-run). --replace carries on to
     # place new anchors and writes once.
     clear_outcome = None
+    # Issue #8916: the records are also how a parallel re-run tells its own
+    # earlier copper from copper that predates the tool.
+    prior_wires = (
+        _load_sidecar_wires(pcb_path) if (clear_only or replace or strategy != "wire") else None
+    )
     if clear_only or replace:
         try:
             clear_outcome = clear_anchors(
                 pcb,
                 net_name,
                 wire_gauge_awg=wire_gauge,
-                sidecar_wires=_load_sidecar_wires(pcb_path),
+                sidecar_wires=prior_wires,
             )
         except ReinforceError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -1417,6 +1422,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             mask_opening=mask_opening,
             mask_width_mm=mask_width,
             strategy=strategy,
+            sidecar_wires=prior_wires,
         )
     except ReinforceError as e:
         print(f"Error: {e}", file=sys.stderr)

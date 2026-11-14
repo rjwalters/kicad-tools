@@ -436,6 +436,15 @@ class TestSidecarAndCompleteness:
         kinds = {v.items[1].split("@")[0] for v in rule.check(pcb, _rules()).violations}
         assert {"a", "b"} <= kinds
 
+    def test_record_whose_original_was_deleted_is_not_trusted(self):
+        """A lone copy is a plain leg again, not one half of a doubled one."""
+        pcb, result = self._reinforced("auto")
+        wires = build_wire_records(result, 0.0, 0.0)
+        pcb.remove_segments(_on(pcb, "B.Cu"))
+        rule = ReinforcementIncompleteRule(specs=[_spec()], wires=wires)
+        kinds = {v.items[1].split("@")[0] for v in rule.check(pcb, _rules()).violations}
+        assert {"a", "b"} <= kinds
+
     def test_wire_leg_still_needs_its_wire(self):
         pcb = _two_pad_leg(length=40.0)
         # A parallel record for a different leg of the net is no excuse.
@@ -469,12 +478,137 @@ class TestIdempotent:
         kw = {"current_paths": [_spec()]} if gated else {}
         first = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules(), **kw)
         n_seg, n_via = len(pcb.segments), len(pcb.vias)
-        second = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules(), **kw)
+        # The re-run knows its own copper from the record, never from its size.
+        records = build_wire_records(first, 0, 0)
+        second = reinforce_net(
+            pcb, NET, strategy="parallel", design_rules=_rules(), sidecar_wires=records, **kw
+        )
         assert (len(pcb.segments), len(pcb.vias)) == (n_seg, n_via)
         assert [leg.status for leg in second.legs if leg.status != "unhandled"][0] == LEG_PARALLEL
         if gated:
             assert sorted(leg.status for leg in second.legs) == sorted([LEG_PARALLEL, LEG_COPY])
         assert build_wire_records(first, 0, 0) == build_wire_records(second, 0, 0)
+
+
+# --------------------------------------------------------------------------
+# Ownership is provenance (the record), never size or shape (PR #8945 review)
+# --------------------------------------------------------------------------
+
+
+def _at(pcb: PCB, x: float, y: float) -> bool:
+    return any(math.dist(v.position, (x, y)) < 1e-6 for v in pcb.vias)
+
+
+def _leg_to_router_via(*, redundant: bool) -> PCB:
+    """A B.Cu leg from TH pad J1 to a pre-existing router via of the stitch size.
+
+    The via carries the net on to J2 on F.Cu. With ``redundant`` a thin B.Cu
+    detour also reaches J2's side, so the via is not the net's only layer link.
+    """
+    size, drill = stitch_via_geometry(_rules())
+    pcb = PCB.create(width=200, height=100, center=False)
+    _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=NET, drill=1.0, size=2.0)
+    _add_th_pad_footprint(pcb, ref="J2", x=32.0, y=70.0, net=NET, drill=1.0, size=2.0)
+    pcb.add_trace((20.0, 50.0), (32.0, 50.0), width=2.0, layer="B.Cu", net=NET)
+    pcb.add_via(32.0, 50.0, size=size, drill=drill, layers=("F.Cu", "B.Cu"), net=NET)
+    pcb.add_trace((32.0, 50.0), (32.0, 70.0), width=2.0, layer="F.Cu", net=NET)
+    if redundant:
+        pcb.add_trace((20.0, 50.0), (20.0, 70.0), width=0.5, layer="F.Cu", net=NET)
+        pcb.add_trace((20.0, 70.0), (32.0, 70.0), width=0.5, layer="F.Cu", net=NET)
+    return pcb
+
+
+class TestPreExistingCopper:
+    @pytest.mark.parametrize("redundant", [False, True])
+    def test_leg_end_on_a_stitch_size_router_via_is_an_existing_tie(self, redundant):
+        pcb = _leg_to_router_via(redundant=redundant)
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules(), layer="B.Cu")
+        (copy,) = result.copies
+        # Both ends are already tied by a barrel: nothing placed at (32, 50),
+        # and the router via is in no record.
+        assert all(math.dist(p, (32.0, 50.0)) > 1e-6 for p in copy.stitch_vias)
+        (leg,) = [leg for leg in result.legs if leg.copy is copy]
+        assert "a tie via" not in leg.reason
+        records = build_wire_records(result, 0.0, 0.0)
+        listed = [(p["x"], p["y"]) for w in records for p in w.get("stitch_vias") or []]
+        assert (32.0, 50.0) not in listed
+
+        cleared = clear_anchors(pcb, NET, sidecar_wires=records, design_rules=_rules())
+        # The copy goes whole (it is never the net's only link) ...
+        assert cleared.copies_refused == [] and len(cleared.copies_removed) == 1
+        assert [(s.start, s.end) for s in _on(pcb, "B.Cu")] == [((20.0, 50.0), (32.0, 50.0))]
+        # ... and the board's own via stays.
+        assert _at(pcb, 32.0, 50.0)
+        assert len(pcb.vias) == 1
+
+    def test_clear_never_removes_a_via_a_record_does_not_name(self):
+        pcb = _leg_to_router_via(redundant=True)
+        before = sorted(v.position for v in pcb.vias)
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules(), layer="B.Cu")
+        assert result.copies and len(pcb.vias) > len(before)
+        records = build_wire_records(result, 0.0, 0.0)
+        clear_anchors(pcb, NET, sidecar_wires=records, design_rules=_rules())
+        assert sorted(v.position for v in pcb.vias) == before
+
+    def test_rerun_with_the_record_is_idempotent(self):
+        pcb = _leg_to_router_via(redundant=False)
+        first = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules(), layer="B.Cu")
+        records = build_wire_records(first, 0.0, 0.0)
+        n_seg, n_via = len(pcb.segments), len(pcb.vias)
+        second = reinforce_net(
+            pcb,
+            NET,
+            strategy="parallel",
+            design_rules=_rules(),
+            layer="B.Cu",
+            sidecar_wires=records,
+        )
+        assert (len(pcb.segments), len(pcb.vias)) == (n_seg, n_via)
+
+        def copy_records(recs):
+            return [w for w in recs if w.get("strategy") == "parallel"]
+
+        assert copy_records(build_wire_records(second, 0.0, 0.0)) == copy_records(records)
+        (record,) = copy_records(records)
+        assert record["copy_status"] == "placed" and len(record["stitch_vias"]) >= 1
+
+    def test_pre_existing_copy_layer_track_is_neither_rewritten_nor_recorded(self):
+        pcb = _two_pad_leg()
+        # Someone already doubled the leg by hand on F.Cu, same width.
+        pcb.add_trace((20.0, 50.0), (32.0, 50.0), width=3.5, layer="F.Cu", net=NET)
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules(), layer="B.Cu")
+        records = build_wire_records(result, 0.0, 0.0)
+        assert all(not w.get("copy_segments") for w in records)
+        clear_anchors(pcb, NET, sidecar_wires=records, design_rules=_rules())
+        assert len(_on(pcb, "F.Cu")) == 1
+
+
+class TestCopyRecognition:
+    def test_straight_chord_across_a_bent_leg_is_not_its_copy(self):
+        """Both ends of the F.Cu leg lie on the B.Cu U; its body does not."""
+        pcb = PCB.create(width=200, height=100, center=False)
+        for a, b in (((32.0, 50.0), (60.0, 50.0)), ((60.0, 50.0), (60.0, 70.0))):
+            pcb.add_trace(a, b, width=2.0, layer="B.Cu", net=NET)
+        pcb.add_trace((60.0, 70.0), (32.0, 70.0), width=2.0, layer="B.Cu", net=NET)
+        pcb.add_trace((32.0, 50.0), (32.0, 70.0), width=2.0, layer="F.Cu", net=NET)
+        result = reinforce_net(
+            pcb,
+            NET,
+            strategy="parallel",
+            design_rules=_rules(),
+            all_runs=True,
+            layer="B.Cu",
+        )
+        front = [leg for leg in result.legs if leg.layer == "F.Cu"]
+        assert front and all(leg.status != LEG_COPY for leg in front)
+
+    def test_true_copy_is_still_recognised(self):
+        from kicad_tools.pcb.reinforce import _coincident
+
+        bent = [(32.0, 50.0), (60.0, 50.0), (60.0, 70.0), (32.0, 70.0)]
+        assert _coincident(bent, bent, 1.0)
+        assert _coincident([(40.0, 50.0), (60.0, 50.0), (60.0, 60.0)], bent, 1.0)
+        assert not _coincident([(32.0, 50.0), (32.0, 70.0)], bent, 1.0)
 
 
 # --------------------------------------------------------------------------

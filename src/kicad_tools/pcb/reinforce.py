@@ -841,7 +841,7 @@ def _recorded_copies(
             continue
         layer = w["copy_layer"]
         try:
-            recs = [(r["start"], r["end"]) for r in w.get("copy_segments") or []]
+            recs = [(r["start"], r["end"], r.get("width_mm")) for r in w.get("copy_segments") or []]
             stitches = list(w.get("stitch_vias") or [])
             size = w.get("stitch_via_size_mm")
             drill = w.get("stitch_via_drill_mm")
@@ -854,8 +854,9 @@ def _recorded_copies(
             if s.layer == layer
             and on_net(s)
             and any(
-                (near(s.start, a) and near(s.end, b)) or (near(s.start, b) and near(s.end, a))
-                for a, b in recs
+                ((near(s.start, a) and near(s.end, b)) or (near(s.start, b) and near(s.end, a)))
+                and (width is None or abs(s.width - float(width)) <= _ANCHOR_SIZE_TOL_MM)
+                for a, b, width in recs
             )
         ]
         vias = [
@@ -1444,6 +1445,7 @@ def reinforce_net(
     mask_opening: bool | None = None,
     mask_width_mm: float | None = None,
     strategy: str = DEFAULT_STRATEGY,
+    sidecar_wires: list[dict] | None = None,
 ) -> ReinforceResult:
     """Emit same-net PTH buttress-wire anchors along a routed net's trace.
 
@@ -1552,6 +1554,15 @@ def reinforce_net(
             in part. ``parallel`` and ``auto`` need ``anchor_mode="ends"``:
             ``spaced`` mode has no legs, and has no default minimum for
             ``auto`` to compare against.
+        sidecar_wires: Issue #8916. The board's wire-list records (the
+            #8744 sidecar) from earlier passes. They are the only evidence
+            that a same-net via or copy-layer track is this tool's own
+            parallel copper: a re-run recognises (and reuses) exactly the
+            copper a record names. Every other via or track -- even one of
+            the stitching-via size -- predates the tool: a leg end on such a
+            via is already tied, and it is never written into a new record,
+            so ``--clear`` can never remove it. Without the records a
+            re-run treats the earlier copy as pre-existing copper.
 
     Returns:
         A :class:`ReinforceResult` summarising placed/refused anchors, the
@@ -1667,6 +1678,7 @@ def reinforce_net(
                 board_rules=board_rules,
             ),
             dry_run=dry_run,
+            sidecar_wires=sidecar_wires,
         )
 
     # Group by layer; pick the layer with the most cumulative length (MVP).
@@ -2462,16 +2474,37 @@ def _clip_run(
     return out
 
 
+def _close(p: tuple[float, float], q: tuple[float, float]) -> bool:
+    """Same point within the sidecar's matching tolerance (what ``--clear`` uses)."""
+    return abs(p[0] - q[0]) <= _SIDECAR_ANCHOR_TOL_MM and abs(p[1] - q[1]) <= _SIDECAR_ANCHOR_TOL_MM
+
+
 def _coincident(
     points: list[tuple[float, float]], other: list[tuple[float, float]], tol: float
 ) -> bool:
-    """True when every vertex of ``points`` lies within ``tol`` of polyline ``other``."""
-    if len(other) < 2:
+    """True when polyline ``points`` lies within ``tol`` of polyline ``other`` along its length.
+
+    Not just its vertices: each segment of ``points`` is sampled at most
+    ``tol`` apart, so a straight chord whose two ends sit on a bent ``other``
+    (its body crossing open board) is not coincident (PR #8945 review).
+    Sampling at ``tol`` bounds the error between samples by ``tol / 2``.
+    """
+    if len(other) < 2 or not points:
         return False
-    return all(
-        min(_segment_distance(p, a, b) for a, b in zip(other, other[1:], strict=False)) <= tol
-        for p in points
-    )
+    pairs = list(zip(other, other[1:], strict=False))
+
+    def on_other(p: tuple[float, float]) -> bool:
+        return min(_segment_distance(p, a, b) for a, b in pairs) <= tol
+
+    if len(points) == 1:
+        return on_other(points[0])
+    step = max(tol, 1e-3)
+    for (x0, y0), (x1, y1) in zip(points, points[1:], strict=False):
+        n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / step))
+        for k in range(n + 1):
+            if not on_other((x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n)):
+                return False
+    return True
 
 
 def _layer_obstacles(
@@ -2611,6 +2644,7 @@ def _reinforce_ends(
     rules: DesignRules,
     policy: _ClearancePolicy,
     dry_run: bool,
+    sidecar_wires: list[dict] | None = None,
 ) -> ReinforceResult:
     """``anchor_mode="ends"``: two anchors per leg (Issue #8742)."""
     net_name = result.net_name
@@ -2805,14 +2839,19 @@ def _reinforce_ends(
     pass_stitch_holes: list[tuple[float, float, float]] = []
     stitch_floor = _same_net_stitch_spacing(via_size, via_drill, rules)
     board_drills: list[tuple[float, float, float, bool]] = []
+    #: Copper an earlier pass recorded as its own (the sidecar, never size or
+    #: shape): ``id()`` s of the vias and copy-layer tracks a record names.
+    owned_vias: set[int] = set()
+    owned_segments: set[int] = set()
     if strategy != STRATEGY_WIRE:
+        for _cleared, segs, vias in _recorded_copies(
+            pcb, net_name, target_net_number, sidecar_wires or []
+        ):
+            owned_segments.update(id(s) for s in segs)
+            owned_vias.update(id(v) for v in vias)
         for via in pcb.vias:
             if via.drill > 0:
-                own_stitch = (
-                    via.net_number == target_net_number
-                    and abs(via.drill - via_drill) < 1e-6
-                    and abs(via.size - via_size) < 1e-6
-                )
+                own_stitch = id(via) in owned_vias
                 board_drills.append((via.position[0], via.position[1], via.drill, own_stitch))
         for fp in pcb.footprints:
             for pad in fp.pads:
@@ -2824,8 +2863,10 @@ def _reinforce_ends(
     def stitch_violation(p: tuple[float, float], planned) -> _Violation | None:
         """Rule check of one stitching-via candidate; ``None`` when clear.
 
-        A same-net via of this exact size already at ``p`` is this pass's own
-        via from an earlier run (idempotent re-run), not an obstacle.
+        A via an earlier pass recorded (``owned_vias``) already at ``p`` is
+        this tool's own via (idempotent re-run), not an obstacle. Any other
+        via, whatever its size, is an obstacle, so a stitch is never planned
+        on top of copper that predates the tool.
         """
         holes = [(q[0], q[1], anchor_drill) for q in placed_positions]
         holes += pass_stitch_holes + [(q[0], q[1], via_drill) for q in planned]
@@ -2845,8 +2886,9 @@ def _reinforce_ends(
         """How the copy is tied at the leg end ``points[0]``.
 
         ``(False, 0.0)``: the end lands on a plated through-hole pad or a
-        through via, whose barrel already joins the layers -- the copy runs to
-        the vertex. ``(True, arc)``: a stitching via ties it at ``arc`` -- the
+        through via that predates this tool (any via no sidecar record names,
+        whatever its size), whose barrel already joins the layers -- the copy
+        runs to the vertex and nothing is placed or recorded there. ``(True, arc)``: a stitching via ties it at ``arc`` -- the
         vertex itself for a free track end or a junction, or the first point
         whose via clears the SMD pad the leg ends on (no via in an SMD pad).
         ``None``: a pad covers the whole leg.
@@ -2861,8 +2903,8 @@ def _reinforce_ends(
         for via in pcb.vias:
             if via.net_number != target_net_number or via.via_type not in (None, "through"):
                 continue
-            if abs(via.drill - via_drill) < 1e-6 and abs(via.size - via_size) < 1e-6:
-                continue  # an earlier pass's own tie via: re-planned, not relied on
+            if id(via) in owned_vias:
+                continue  # an earlier pass's recorded tie via: re-planned, not relied on
             if math.dist(via.position, start) <= via.size / 2.0 + cap + 1e-6:
                 return False, 0.0
         smd = [f for f in copper if f.pad is not None]
@@ -3001,14 +3043,33 @@ def _reinforce_ends(
             v, pos = hit
             refuse_copy(leg, copy_layer, pos, v, "its track would break a clearance rule")
             return
+        # A piece already on the copy layer that no record names predates the
+        # tool: it is the copy's copper there, but neither written again nor
+        # recorded, so ``--clear`` can never remove it.
+        foreign = [
+            (a, b, width)
+            for a, b, width in segments
+            if any(
+                id(s) not in owned_segments
+                and s.layer == copy_layer
+                and s.net_number == target_net_number
+                and abs(s.width - width) <= _ANCHOR_SIZE_TOL_MM
+                and (
+                    (_close(s.start, a) and _close(s.end, b))
+                    or (_close(s.start, b) and _close(s.end, a))
+                )
+                for s in pcb.segments
+            )
+        ]
         copy = ParallelCopy(
             layer=copy_layer,
-            segments=segments,
+            segments=[piece for piece in segments if piece not in foreign],
             stitch_vias=planned,
             via_size_mm=via_size,
             via_drill_mm=via_drill,
+            existing_segments=len(foreign),
         )
-        for a, b, width in segments:
+        for a, b, width in copy.segments:
             if dry_run:
                 continue
             if not pcb.add_trace(a, b, width=width, layer=copy_layer, net=net_name, dedupe=True):
