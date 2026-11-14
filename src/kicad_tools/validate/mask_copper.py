@@ -523,6 +523,28 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         rules_checked=1,
         rules_checked_by_rule={"mask_to_copper": 1},
     )
+    # Issue #8914: an assessment that could not run produces no measurements and
+    # therefore no violations, which is indistinguishable from a board with no
+    # exposure -- the shape of the #8914 report, where a rule-by-rule comparison
+    # against JLCDFM read "mask_to_copper: 0 findings" for a check that may never
+    # have executed.  ``coverage`` and ``reasons`` already reach the report and
+    # the verdict (a default-applied run that cannot execute is ``incomplete``);
+    # what was missing was a *finding* saying so.  Info severity, like
+    # ``physical_copper_gap_incomplete``: missing coverage is not a board defect,
+    # so it is always listed and never blocks.
+    if assessment.coverage != "complete":
+        result.add(
+            DRCViolation(
+                rule_id="mask_to_copper_incomplete",
+                severity="info",
+                message=(
+                    f"Mask-to-copper coverage {assessment.coverage}: "
+                    f"{'; '.join(assessment.reasons) or 'no reason recorded'} "
+                    "(zero mask_to_copper findings below mean the check did not "
+                    "run, not that the board is clean)"
+                ),
+            )
+        )
     for index, measurement in enumerate(assessment.measurements):
         if measurement.disposition == "intentional":
             severity = "info"
