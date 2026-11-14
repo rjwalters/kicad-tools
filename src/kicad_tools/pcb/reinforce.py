@@ -28,7 +28,11 @@ Two placement modes (``anchor_mode``, Issue #8742):
   through-path) plus a branch; loops and higher-degree junctions are
   reported ``unhandled``, never guessed. The per-leg result
   (:class:`LegSummary`, on :attr:`ReinforceResult.legs`) keeps each leg's
-  polyline and its two anchor positions.
+  polyline and its two anchor positions. A leg shorter than
+  :data:`DEFAULT_MIN_WIRE_LENGTH_MM` (15.0 mm, the owner's ruling on #8741)
+  gets no wire at all by default (Issue #8915): it is reported
+  ``unanchored``, is omitted from the wire-list sidecar, and only an explicit
+  ``min_wire_length_mm=0`` anchors it.
 * ``"spaced"``: the historical row of anchors every ``spacing_mm`` along the
   longest run (or every run with ``all_runs``), unchanged.
 
@@ -127,6 +131,17 @@ DEFAULT_END_OFFSET_MM = 1.0
 # ``END_NUDGE_STEPS`` increments, and never past the other end's anchor.
 END_NUDGE_MAX_MM = 2.0
 END_NUDGE_STEPS = 8
+
+# ``ends`` mode: default minimum buttress-wire length (mm) -- the owner's
+# ruling on #8741. A buttress wire needs a through-hole at each end, and each
+# hole needs both outer layers (and the inner planes) clear; on a shorter link
+# the two holes rarely fit, so no wire is wanted there at all. A leg below this
+# is reported and left unanchored rather than anchored badly.
+#
+# ``spaced`` mode does NOT apply this default (its output must not change);
+# only an explicit ``min_wire_length_mm`` / ``min_run_length_mm`` filters there.
+# ``--strategy auto`` (#8916) reads this same constant as its threshold.
+DEFAULT_MIN_WIRE_LENGTH_MM = 15.0
 
 # Issue #8797: how far inward a refused end candidate may be searched. The
 # default bound is a fraction of the leg's length (never less than
@@ -304,6 +319,14 @@ class LegSummary:
     #: fully anchored) and why when not ``opened``.
     mask_status: str = ""
     mask_reason: str = ""
+    #: True when this leg was left unanchored *because* it is shorter than the
+    #: effective minimum buttress-wire length (Issue #8915) -- i.e. the owner
+    #: does not want a wire here at all. Distinguishes that case from every
+    #: other ``unanchored`` leg (refused by a rule, not selected without
+    #: ``--all-runs``, excluded by a declared path), which is why
+    #: :func:`kicad_tools.pcb.reinforcement_sidecar.build_wire_records` can
+    #: omit exactly these legs from the wire list and no others.
+    below_min_wire_length: bool = False
 
 
 @dataclass
@@ -349,8 +372,8 @@ class RunSummary:
     """Per-run anchoring accounting (#4319, tier 2).
 
     One entry per chained run on the target layer -- including runs that were
-    NOT anchored (filtered by ``min_run_length_mm`` or, in default mode, every
-    run but the longest). This lets an agent distinguish "fully reinforced"
+    NOT anchored (filtered by the minimum run/wire length, or, in default
+    mode, every run but the longest). This lets an agent distinguish "fully reinforced"
     from "2 of 31 runs reinforced" straight from ``--format json``.
 
     ``segment_count`` and ``length_mm`` reflect the *merged* geometric run
@@ -1160,6 +1183,45 @@ def _collect_other_net_copper(
     return other
 
 
+def resolve_min_wire_length_mm(
+    min_wire_length_mm: float | None,
+    min_run_length_mm: float | None,
+    anchor_mode: str = DEFAULT_ANCHOR_MODE,
+) -> float | None:
+    """Effective minimum wire/run length (mm) for a pass, or ``None`` for no filter.
+
+    ``--min-wire-length`` (Issue #8915) and the older ``--min-run-length``
+    (#4319) name the same quantity, so either sets it and, when both are
+    given, **the larger wins** -- neither flag may quietly lower a minimum the
+    other asked for.
+
+    The difference is the *default*. In ``ends`` mode, giving neither yields
+    :data:`DEFAULT_MIN_WIRE_LENGTH_MM` (15.0): a buttress wire needs a hole at
+    each end and they rarely fit on a shorter link. Passing ``0`` explicitly
+    restores the pre-#8915 "no minimum" behaviour -- which is why the default
+    is resolved here rather than in argparse, where ``0`` and "flag absent"
+    would be indistinguishable.
+
+    In ``spaced`` mode there is **no** default (``None`` stays ``None``), so an
+    invocation that does not pass either flag is byte-identical to pre-#8915.
+    An explicit value still applies, in both modes.
+
+    Args:
+        min_wire_length_mm: ``--min-wire-length``, or ``None`` if not given.
+        min_run_length_mm: ``--min-run-length``, or ``None`` if not given.
+        anchor_mode: ``"ends"`` or ``"spaced"``; only ``ends`` has a default.
+
+    Returns:
+        The minimum length in mm, or ``None`` when no minimum applies.
+    """
+    given = [v for v in (min_wire_length_mm, min_run_length_mm) if v is not None]
+    if given:
+        return max(given)
+    if anchor_mode == ANCHOR_MODE_ENDS:
+        return DEFAULT_MIN_WIRE_LENGTH_MM
+    return None
+
+
 def reinforce_net(
     pcb: PCB,
     net_name: str,
@@ -1171,6 +1233,7 @@ def reinforce_net(
     dry_run: bool = False,
     all_runs: bool = False,
     min_run_length_mm: float | None = None,
+    min_wire_length_mm: float | None = None,
     current_paths: Sequence[CurrentPathSpec] | None = None,
     net_class_clearances: Mapping[str, float] | None = None,
     pairwise_clearance: PairwiseClearanceTable | None = None,
@@ -1223,7 +1286,16 @@ def reinforce_net(
         min_run_length_mm: When set, only runs at least this long (mm) are
             anchored; shorter runs are still reported (never silently
             dropped). Composes with ``all_runs`` -- filter first, then anchor
-            all that survive.
+            all that survive. Same quantity as ``min_wire_length_mm``; when
+            both are given the larger wins.
+        min_wire_length_mm: Minimum buttress-wire length (mm), Issue #8915.
+            In ``ends`` mode this defaults to
+            :data:`DEFAULT_MIN_WIRE_LENGTH_MM` (15.0) when neither this nor
+            ``min_run_length_mm`` is given -- a wire needs a through-hole at
+            each end and they rarely fit on a shorter leg. Pass ``0.0`` for no
+            minimum (the pre-#8915 behaviour). ``spaced`` mode has no default;
+            an explicit value still applies there. See
+            :func:`resolve_min_wire_length_mm`.
         current_paths: Optional declared branch-specific current-path
             intent (Issue #4980; see
             :mod:`kicad_tools.router.current_paths`). Specs not on
@@ -1347,7 +1419,9 @@ def reinforce_net(
             eligible_resolutions=(partition.eligible if partition is not None else None),
             layer=layer,
             all_runs=all_runs,
-            min_run_length_mm=min_run_length_mm,
+            min_wire_length_mm=resolve_min_wire_length_mm(
+                min_wire_length_mm, min_run_length_mm, ANCHOR_MODE_ENDS
+            ),
             rules=rules,
             policy=_ClearancePolicy(
                 fab_floor=rules.min_clearance_mm,
@@ -1410,8 +1484,13 @@ def reinforce_net(
     # Selection: filter by min length (report -- do not drop -- shorter runs),
     # then by the current-path gate (report -- do not drop -- excluded runs),
     # then anchor either all survivors (all_runs) or just the longest.
-    if min_run_length_mm is not None:
-        eligible = [i for i, g in enumerate(geoms) if g.length_mm >= min_run_length_mm]
+    # ``spaced`` takes NO default minimum (#8915): without either flag this is
+    # ``None`` and the output is byte-identical to pre-#8915.
+    spaced_min_mm = resolve_min_wire_length_mm(
+        min_wire_length_mm, min_run_length_mm, ANCHOR_MODE_SPACED
+    )
+    if spaced_min_mm is not None:
+        eligible = [i for i, g in enumerate(geoms) if g.length_mm >= spaced_min_mm]
     else:
         eligible = list(range(len(geoms)))
     eligible = [i for i in eligible if i not in path_excluded_reasons]
@@ -2093,7 +2172,7 @@ def _reinforce_ends(
     eligible_resolutions: Sequence | None,
     layer: str | None,
     all_runs: bool,
-    min_run_length_mm: float | None,
+    min_wire_length_mm: float | None,
     rules: DesignRules,
     policy: _ClearancePolicy,
     dry_run: bool,
@@ -2178,16 +2257,24 @@ def _reinforce_ends(
 
     geoms = [_run_geometry(c.run) for c in candidates]
 
-    # Selection mirrors ``spaced``: --min-run-length reports (never drops)
-    # short legs; without declared paths only the longest leg is anchored
-    # unless --all-runs. With declared paths the declaration IS the
+    # Selection mirrors ``spaced``: the minimum wire length reports (never
+    # drops) short legs; without declared paths only the longest leg is
+    # anchored unless --all-runs. With declared paths the declaration IS the
     # selection: every eligible leg is anchored.
     not_selected: dict[int, str] = {}
+    #: Legs skipped by the length minimum specifically (#8915) -- not the
+    #: other ``not_selected`` reasons, which still earn a wire record.
+    below_min: set[int] = set()
     selectable = [i for i, c in enumerate(candidates) if c.status is None]
-    if min_run_length_mm is not None:
+    if min_wire_length_mm is not None:
         for i in selectable:
-            if geoms[i].length_mm < min_run_length_mm:
-                not_selected[i] = f"shorter than --min-run-length {min_run_length_mm:g} mm"
+            if geoms[i].length_mm < min_wire_length_mm:
+                not_selected[i] = (
+                    f"shorter than the {min_wire_length_mm:g} mm minimum buttress-wire "
+                    "length (--min-wire-length): a wire needs a through-hole at each "
+                    "end and the two rarely fit on a shorter link"
+                )
+                below_min.add(i)
         selectable = [i for i in selectable if i not in not_selected]
     if not gated and not all_runs and selectable:
         longest = max(selectable, key=lambda i: (geoms[i].length_mm, -i))
@@ -2342,6 +2429,7 @@ def _reinforce_ends(
             leg.status, leg.reason = cand.status, cand.reason
         elif index in not_selected:
             leg.status, leg.reason = LEG_UNANCHORED, not_selected[index]
+            leg.below_min_wire_length = index in below_min
         elif overlaps := _courtyard_overlaps(pcb, cand.layer, g.points, result.wire_gauge_awg):
             attempted_here = True
             leg.status = LEG_UNANCHORED

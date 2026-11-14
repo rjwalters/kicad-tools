@@ -309,6 +309,7 @@ kct pcb reinforce board.kicad_pcb --net VBUS                        # ends mode 
 kct pcb reinforce board.kicad_pcb --net VBUS --current-paths current_paths.json
 kct pcb reinforce board.kicad_pcb --net VBUS --end-offset 2.0 --dry-run --format json
 kct pcb reinforce board.kicad_pcb --net VBUS --anchor-mode spaced --spacing 15
+kct pcb reinforce board.kicad_pcb --net VBUS --min-wire-length 0   # no 15 mm minimum
 ```
 
 Two placement modes:
@@ -345,6 +346,25 @@ Two placement modes:
   ends and every `--spacing` mm (default 15) along the run. `--spacing` is
   ignored, with a warning, in `ends` mode.
 
+**Minimum wire length (#8915).** `--min-wire-length MM` defaults to **15.0** in
+`ends` mode: a wire needs a through-hole at each end, and each hole needs both
+outer layers and the inner planes clear, so the two rarely fit on a shorter
+link. A leg below the minimum is reported `unanchored`, with a reason naming
+the minimum, and gets no anchors, no solder-mask opening and no wire-list
+entry. `--min-wire-length 0` restores the pre-#8915 behaviour (every leg is a
+candidate). `--min-run-length` is an accepted alias for the same value; when
+both are given the larger wins. `--anchor-mode spaced` has **no** default
+minimum, so its output is unchanged, but a value given on either flag still
+applies to it. `--format json` reports `min_wire_length_mm` (what was asked
+for, null when neither flag was given) and `min_wire_length_effective_mm`
+(what was enforced for this mode).
+
+Where a path declared `reinforcement_eligible` has only a leg below the
+minimum, it now carries no wire, so `kct check`'s `reinforcement_incomplete`
+rule reports that net's `a` (no anchor holes) and `b` (no continuous mask
+opening) sub-checks as **warnings**. Drop the declaration for a link too short
+to carry a wire, or pass `--min-wire-length 0`.
+
 **Wire list sidecar (#8744).** Each non-dry-run `ends` pass writes or updates
 `<board>.reinforcement.json` (next to the `-o` output when given), `version: 1`,
 one entry per leg: `net`, `layer`, `kind`, `path` (first declared current path,
@@ -352,7 +372,8 @@ else null; `paths` lists all), `leg_start`/`leg_end`, `anchors` (two `{x,y}`,
 sheet-absolute), `length_mm` (along the leg), `straight_line_mm` (between the
 anchors), `wire_gauge_awg`, `bare_diameter_mm`, `mask_opening` (null until
 #8743) and `status` (legs that are `too_short`/`unhandled` are listed with no
-anchors). Re-running replaces a wire with the same net + layer + leg ends,
+anchors; a leg skipped by `--min-wire-length` is **omitted entirely** — the
+owner wants no wire there, so it is not on the cut list, #8915). Re-running replaces a wire with the same net + layer + leg ends,
 keeps other nets' wires and never duplicates; output is sorted and has no
 timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
 embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
@@ -361,7 +382,8 @@ embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
 Declared current paths that do not resolve (moved/removed pad, ambiguous
 loop) are listed under `unresolved_paths` and warned about on stderr; they
 get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
-`end_offset_mm`, `unresolved_paths` and `legs` (`net`, `layer`, `kind`,
+`end_offset_mm`, `min_wire_length_mm`, `min_wire_length_effective_mm`,
+`unresolved_paths` and `legs` (`net`, `layer`, `kind`,
 `length_mm`, `width_mm`, `anchors`, `status` in
 `full|partial|unanchored|too_short|unhandled`, `reason`, `paths`,
 `polyline`) to the existing keys; coordinates are sheet-absolute.
