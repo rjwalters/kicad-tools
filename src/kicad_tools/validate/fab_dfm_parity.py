@@ -33,7 +33,7 @@ from typing import Literal
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Version of the table below; bump on any row change.
-TABLE_VERSION = 2
+TABLE_VERSION = 3
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -94,17 +94,28 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`mask_to_copper` is default-on for an explicit --mfr `jlcpcb*` since #8842 "
         "(interim 0.09 mm danger / 0.15 mm warning); a bare `kct check` with no "
         "--mfr does not engage it, and the native path needs an unmodified saved "
-        "source. Observed 5 danger.",
+        "source. Observed 5 danger. The rule has no same-net exclusion and traces "
+        "are in its comparison set, so the fab's same-net track-in-pad-opening "
+        "items are in scope; since #8914 an assessment that could not complete "
+        "reports `mask_to_copper_incomplete` at info, so zero findings no longer "
+        "read as a clean board. Whether the #8914 report's zero count was an "
+        "incomplete run or a measurement gap is still unresolved.",
     ),
     ParityRow(
         "tht_to_smd",
         ("tht_smd_spacing",),
         "partial",
         True,
-        "`tht_smd_spacing` (#8843) judges plated through-hole *component* pads only: "
-        "vias are excluded by default and same-footprint pad pairs are skipped, "
-        "while JLCDFM flags through-hole pads and vias. Fab-view gated -- runs only "
-        "when the effective --mfr is exactly `jlcpcb`. Observed 5 danger.",
+        "`tht_smd_spacing` (#8843) judges plated through-hole component pads plus, "
+        "since #8914, vias whose drill is at least 1.0 mm (the fab classes a hole "
+        "by size: the three top-side dangers kct missed on the #8914 board were all "
+        "1.3-1.42 mm wire-anchor vias). Still skipped: same-footprint pad pairs, "
+        "sub-1.0 mm fan-out vias, and the fab's via-to-via pairing (its `smd` side "
+        "also counts a small exposed via pad: #8914 item 5, tracked in #8925). A "
+        "pad shape the rule "
+        "cannot measure now reports `tht_smd_spacing_incomplete` at info instead of "
+        "vanishing. Fab-view gated -- runs only when the effective --mfr is exactly "
+        "`jlcpcb`. Observed 5 danger.",
     ),
     ParityRow(
         "silkscreen_to_pad",

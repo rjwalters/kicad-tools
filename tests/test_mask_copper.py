@@ -57,7 +57,14 @@ def test_actual_cli_missing_policy_never_prints_or_serializes_pass(tmp_path, cap
     )
     data = json.loads(capsys.readouterr().out)
     assert not data["summary"]["passed"]
-    assert data["violations"] == []
+    # Issue #8914: a check that could not run no longer serializes as zero
+    # findings -- that silence was read as "kct sees no exposure here" in a
+    # rule-by-rule comparison against JLCDFM.  Info severity, so the verdict
+    # above is unchanged.
+    assert [(v["rule_id"], v["severity"]) for v in data["violations"]] == [
+        ("mask_to_copper_incomplete", "info")
+    ]
+    assert "policy" in data["violations"][0]["message"]
     assert data["mask_copper_assessments"][0]["coverage"] == "not_run"
     assert (
         json.loads(report.read_text())["mask_copper_assessments"] == data["mask_copper_assessments"]
@@ -420,6 +427,41 @@ def test_warning_tier_does_not_fail_verdict(gap, expected, passed):
     assert severities <= (
         {"warning"} if expected == "warning" else {"error"} if expected else set()
     )
+
+
+@pytest.mark.parametrize(
+    ("coverage", "reasons"),
+    [
+        ("incomplete", ["native unavailable"]),
+        ("incomplete", []),
+        ("not_run", ["An explicit process-specific mask-to-copper policy is required"]),
+    ],
+)
+def test_incomplete_coverage_is_reported_as_a_finding(coverage, reasons):
+    """Issue #8914: "never ran" must not be indistinguishable from "found nothing"."""
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    found = assessment_results(
+        MaskCopperAssessment(coverage=coverage, reasons=list(reasons))
+    ).violations
+    assert [(v.rule_id, v.severity) for v in found] == [("mask_to_copper_incomplete", "info")]
+    assert coverage in found[0].message
+    for reason in reasons:
+        assert reason in found[0].message
+    if not reasons:
+        assert "no reason recorded" in found[0].message
+
+
+def test_complete_assessment_with_no_findings_reports_nothing():
+    """The other half of #8914: a run that did happen and found nothing stays silent."""
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(conductor_x=1.1 + 0.2)
+    policy = MaskCopperPolicy(0.09, "order", "process", "rev", warning_clearance_mm=0.15)
+    assessment = assess_attributed_geometry(geometry, policy)
+    assert assessment.coverage == "complete"
+    assert not assessment.measurements
+    assert not assessment_results(assessment).violations
 
 
 def test_warning_clearance_must_not_be_below_clearance():

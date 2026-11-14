@@ -856,13 +856,26 @@ class DRCChecker:
         results.merge(physical_gap.check_pad_mask_bridge(self.pcb, self.fab_view_copper_oz))
         return self._absolutize(results)
 
-    def check_tht_smd_spacing(self) -> DRCResults:
-        """THT pad / via to SMD pad spacing (Issue #8843); fab-view (jlcpcb) only."""
+    def check_tht_smd_spacing(self, via_drill_mm: float | None = None) -> DRCResults:
+        """THT pad / anchor via to SMD pad spacing (Issue #8843); fab-view (jlcpcb) only.
+
+        ``via_drill_mm`` overrides the drill diameter at which a via starts
+        being judged like a THT component pad; ``None`` uses the rule's
+        calibrated :data:`~.rules.tht_smd_spacing.ANCHOR_DRILL_MM` default.
+        Before Issue #8914 this method called the rule with no arguments at
+        all, which pinned the old ``include_vias=False`` default on every
+        ``kct check`` run and made the via arm unreachable.
+        """
         if not self.fab_view:
             return DRCResults()
-        from .rules.tht_smd_spacing import check_tht_smd_spacing
+        from .rules.tht_smd_spacing import ANCHOR_DRILL_MM, check_tht_smd_spacing
 
-        return self._absolutize(check_tht_smd_spacing(self.pcb))
+        return self._absolutize(
+            check_tht_smd_spacing(
+                self.pcb,
+                via_drill_mm=ANCHOR_DRILL_MM if via_drill_mm is None else via_drill_mm,
+            )
+        )
 
     def check_clearances(self) -> DRCResults:
         """Check clearance rules (trace-to-trace, trace-to-pad, etc.).
