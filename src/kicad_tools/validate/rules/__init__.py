@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from .silkscreen import (
         check_all_silkscreen,
         check_silk_edge_clearance,
+        check_silk_hole_overlap,
         check_silk_over_copper,
         check_silk_over_mask_opening,
         check_silkscreen_line_width,
@@ -75,6 +76,7 @@ _EXPORT_MODULES: dict[str, str] = {
     "check_schematic_wire_symbol": ".schematic_wire_symbol",
     "check_all_silkscreen": ".silkscreen",
     "check_silk_edge_clearance": ".silkscreen",
+    "check_silk_hole_overlap": ".silkscreen",
     "check_silk_over_copper": ".silkscreen",
     "check_silk_over_mask_opening": ".silkscreen",
     "check_silkscreen_line_width": ".silkscreen",
@@ -124,6 +126,7 @@ __all__ = [
     "check_schematic_fields",
     "check_schematic_wire_symbol",
     "check_silk_edge_clearance",
+    "check_silk_hole_overlap",
     "check_silk_over_copper",
     "check_silk_over_mask_opening",
     "check_silkscreen_line_width",

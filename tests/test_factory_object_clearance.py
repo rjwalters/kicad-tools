@@ -93,6 +93,9 @@ def test_python_object_specific_clearance(tmp_path, kind, gap, options, expected
     path = board_fixture(tmp_path / "probe.kicad_pcb", kind, gap, **options)
     pcb = PCB.load(path)
     rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
+    # Single-tier native floor; two-tier bands are tested in
+    # test_silk_pad_clearance_bands_8844.py (Issue #8844).
+    rules = replace(rules, silk_to_pad_danger_mm=None, silk_to_pad_warning_mm=None)
     results = (
         check_silk_pad_clearance(pcb, rules)
         if kind == "silk"
