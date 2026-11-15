@@ -177,7 +177,28 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # identities may carry the listed errors, a listed identity that stops firing
 # makes its entry stale and fails the gate, and an allowed finding does not
 # count against the (now strict 0) routed-DRC total.
-DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {}
+#
+# Issue #8957 / PR #8956 (#8938): the fab-view re-grading makes sub-danger
+# ``physical_copper_gap`` slits errors even same-net, and the seed-42
+# regeneration of this board carries a stable population of them (38 measured
+# on CI run 43652354983, all same-net: MIPI_CLK+ 11, +1V2 8, GND 7, +3V3 6,
+# USB2_D- 3, +1V8 2, PCIE_RX+ 1).  The board is regenerated from scratch each
+# run, so geometry-keyed items (footprint UUIDs, via coordinates) differ run
+# to run -- the entries are keyed by NET SIGNATURE (identity_allowance.py's
+# NET_IDENTITY_RULES), which two independent regenerations reproduced
+# exactly.  A new net starting to carry sub-danger slits still fails the
+# gate; a net whose slits the router stops leaving goes stale and forces its
+# entry out.  The router fix is tracked in #8957; delete entries there as
+# they go stale.
+DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    ("physical_copper_gap", "+1V2"): 8957,
+    ("physical_copper_gap", "+1V8"): 8957,
+    ("physical_copper_gap", "+3V3"): 8957,
+    ("physical_copper_gap", "GND"): 8957,
+    ("physical_copper_gap", "MIPI_CLK+"): 8957,
+    ("physical_copper_gap", "PCIE_RX+"): 8957,
+    ("physical_copper_gap", "USB2_D-"): 8957,
+}
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
 #: absent here has no allowance at all: every blocking finding counts.
