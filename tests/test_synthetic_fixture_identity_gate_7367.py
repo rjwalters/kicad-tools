@@ -118,6 +118,7 @@ def with_board07_synthetic(gate):
 
 
 BOARD07_GAP_NETS = (
+    "+1V2",
     "DQS_N",
     "DQS_P",
     "GND",

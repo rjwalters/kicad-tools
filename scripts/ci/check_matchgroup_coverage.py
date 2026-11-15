@@ -644,7 +644,21 @@ def count_errors_via_kct_check(
 # fails the gate; a net whose slits the router stops leaving goes stale and
 # forces its entry out.  The router fix is tracked in #8957; delete entries
 # there as they go stale.
+#
+# The +1V2 entry (PR #8955): #8937's zone arm restores the authored zone
+# ``connect_pads`` clearance (0.3 mm on this board's three pour zones) that
+# the unconditional fab-floor rule (0.1016 mm here) used to replace at
+# refill, so the pour pipeline's stitch/repair rounds place a different
+# via population.  CI run 43688361347 measured the total at 129 (GND
+# 118 -> 110; every other net's count unchanged) and one NEW identity:
+# +1V2, one same-net finding -- a +1V2 via annulus (Via@118.99/60.12,
+# F.Cu-B.Cu) 0.0585 mm from its own +1V2 pad on F.Cu, ``same_net`` true in
+# the violation record.  Reproduced from the run's E2E artifact and
+# identical in both failing jobs; the same fab-view class as the entries
+# above (the fab cannot see nets), so it joins the #8957 allowance rather
+# than reverting the restored authored clearance.
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
+    ("physical_copper_gap", "+1V2"): 8957,
     ("physical_copper_gap", "DQS_N"): 8957,
     ("physical_copper_gap", "DQS_P"): 8957,
     ("physical_copper_gap", "GND"): 8957,
