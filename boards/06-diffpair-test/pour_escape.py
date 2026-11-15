@@ -50,6 +50,12 @@ _FOLDED_FLOOR_FAMILIES = {
     # rule per class.  Folding each board-wide is conservative, like the
     # layer-scoped floors above.
     "Reviewed clearance": ("clearance", "clearance"),
+    # Issue #8937: the managed block now restores each zone's authored
+    # ``connect_pads`` clearance as a layer-scoped, net-conditioned rule.
+    # Folding each board-wide is conservative, like the reviewed classes
+    # above: the escape path then keeps that much clearance from every
+    # copper, the zone's own net included.
+    "Zone clearance": ("clearance", "clearance"),
 }
 # Families the generator can also emit that can never constrain the copper
 # this search adds (an F.Cu track and/or a through via, away from the board
@@ -82,7 +88,7 @@ _IGNORED_FLOOR_FAMILIES = {
 _MAX_CONSTRAINT_FAMILIES = frozenset({"Max Hole Size"})
 _DRU_RULE_RE = re.compile(
     r'\(rule "(?P<name>[^"]+)"\n'
-    r"(?:\s*\(layer (?P<layer>\w+)\)\n)?"
+    r'(?:\s*\(layer (?P<layer>"[^"]+"|\w+)\)\n)?'
     r'(?:\s*\(condition "(?P<condition>[^"]*)"\)\n)?'
     r"\s*\(constraint (?P<constraint>\w+) \((?P<kind>min|max) (?P<value>[0-9.]+)mm\)\)\)"
 )

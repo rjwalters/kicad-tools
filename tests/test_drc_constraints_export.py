@@ -814,10 +814,13 @@ class TestDruManagedBlockMerge:
         # migrated file, so the warning fires at most once per migration) ...
         assert merge_dru_floors(warned, fresh, path=dru_path) == warned
         merge_dru_floors(marked, fresh, path=dru_path)
-        # ... and user-content append.
+        # ... and user-owned insert (silent like every non-legacy branch;
+        # the block is anchored below the version form, above the user's
+        # rules -- Issue #8937's ordering).
         user_file = '(version 1)\n(rule "My HV Gap"\n  (constraint clearance (min 2.5mm)))\n'
         appended = merge_dru_floors(user_file, fresh, path=dru_path)
-        assert user_file.strip("\n") in appended
+        assert appended.startswith("(version 1)\n")
+        assert '(rule "My HV Gap"' in appended
         assert capsys.readouterr().err == ""
 
     def test_legacy_replace_warning_reaches_stderr_via_write_path(
@@ -871,24 +874,36 @@ class TestDruManagedBlockMerge:
         assert not unmarked, f"legacy-unmarked committed sidecars: {unmarked}"
 
     def test_user_owned_file_is_never_clobbered(self, tmp_path: Path):
-        """A no-marker, fully user-owned file keeps every byte of content.
+        """A no-marker, fully user-owned file keeps every byte of rule content.
 
         The managed block is merged in ALONGSIDE the user's rules (the
         stronger option from #4600's acceptance criteria) rather than
         skipping the write -- the sidecar must still deliver the tier
-        floors for kicad-cli floor parity (#3919).
+        floors for kicad-cli floor parity (#3919).  Since #8937 the block
+        is inserted ABOVE the user's rules (KiCad's last-match precedence
+        must let a hand-written clearance keep governing, not the fab
+        floor) but BELOW the leading ``(version ...)`` form -- a
+        design-rules file whose first element is not the version form
+        does not load.
         """
+        from kicad_tools.manufacturers.dru_generator import DRU_FLOORS_BLOCK_BEGIN
+
         board = tmp_path / "demo.kicad_pcb"
         board.write_text("(kicad_pcb)")
-        user_content = '(version 1)\n(rule "Antenna Keepout"\n  (constraint clearance (min 3mm)))\n'
+        user_rule = '(rule "Antenna Keepout"\n  (constraint clearance (min 3mm)))'
+        user_content = f"(version 1)\n{user_rule}\n"
         dru = board.with_suffix(".kicad_dru")
         dru.write_text(user_content, encoding="utf-8")
 
         merged = self._emit(board)
-        assert merged.startswith(user_content)
-        assert '(rule "Antenna Keepout"' in merged
+        assert merged.startswith("(version 1)\n")
+        assert user_rule in merged
         assert '(rule "Trace Width - jlcpcb-tier1"' in merged
         assert merged.count("(version 1)") == 1
+        # The block sits above the user's rule (its clearance keeps
+        # governing) and below the version header (the file stays loadable).
+        assert merged.index(DRU_FLOORS_BLOCK_BEGIN) < merged.index(user_rule)
+        assert merged.index("(version 1)") < merged.index(DRU_FLOORS_BLOCK_BEGIN)
 
     def test_user_file_without_version_header_gains_exactly_one(self, tmp_path: Path):
         board = tmp_path / "demo.kicad_pcb"

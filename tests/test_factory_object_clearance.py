@@ -609,7 +609,11 @@ def test_custom_rule_survives_repeated_emission(tmp_path):
     first = dru.read_bytes()
     write_drc_constraints(path, rules, manufacturer_id="jlcpcb", layers=4)
     assert dru.read_bytes() == first
-    assert custom.strip() in first.decode()
+    # The user's rule content survives below the anchored block (Issue
+    # #8937: the block sits above foreign rules, below the version form).
+    text = first.decode()
+    assert text.startswith("(version 1)\n")
+    assert '# Reviewed creepage\n(rule "Reviewed HV" (constraint clearance (min 2mm)))' in text
     assert first.count(b'(rule "Silk to Pad') == 1
 
 

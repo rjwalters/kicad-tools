@@ -20,6 +20,27 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # directory name.  Each entry cites the issue that owns the refresh; remove the
 # entry when that lands (strict xfail turns an unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {
+    # Issue #8937 (PR #8955) re-emitted the routed ``.kicad_dru`` of the
+    # boards whose recipes byte-reproduce it (01/05/06; the recipe-replay
+    # tests pin the committed sidecar to the current emitter, so reverting
+    # the DRU is not an option).  Board 06's evidence was re-pinned on the
+    # pinned toolchain; boards 01/05 could not be -- ``refresh_readiness.py``
+    # refuses on the same unaccepted physical_copper_gap/redundant-copper/
+    # silk warning floods board 07's entry cites (the #8399/#8938-era
+    # stalemate, reproduced with main's code on pristine main boards).
+    # That work owns the re-pin; remove these entries when it lands.
+    "01-voltage-divider": (
+        "Issue #8937/#8399: PR #8955 re-emitted the routed .kicad_dru "
+        "(zone-clearance rules, raised SMD floor); `refresh_readiness.py` refuses "
+        "to re-pin while physical_copper_gap/redundant-copper/silk warnings remain "
+        "unaccepted. The #8399 warning-flood work owns the re-pin."
+    ),
+    "05-bldc-motor-controller": (
+        "Issue #8937/#8399: PR #8955 re-emitted the routed .kicad_dru "
+        "(zone-clearance rules); `refresh_readiness.py` refuses to re-pin while "
+        "physical_copper_gap/redundant-copper/silk warnings remain unaccepted. "
+        "The #8399 warning-flood work owns the re-pin."
+    ),
     "07-matchgroup-test": (
         "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "
         "sources; `refresh_readiness.py` refuses to re-pin while redundant_copper_* "

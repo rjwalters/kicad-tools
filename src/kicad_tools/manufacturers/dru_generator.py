@@ -488,9 +488,13 @@ def merge_dru_floors(
             file=sys.stderr,
         )
         merged = f"{DRU_VERSION_HEADER}\n\n{block}\n"
-        _gate_dru_loosenings(
-            existing, dru_content, merged, authored=authored, allow=allow, path=path
-        )
+        # The pre-#4600 sidecar this branch just classified is kct's own
+        # generated output, not an authored "before" state: handing it to
+        # the gate as ``existing`` would re-classify its tier floors as
+        # authored rules and refuse the very replacement #4667 established
+        # (a profile switch legitimately moves the floor).  Only the
+        # ``authored`` baseline bounds how far down the replacement may go.
+        _gate_dru_loosenings(None, dru_content, merged, authored=authored, allow=allow, path=path)
         return merged
 
     # Insert; ensure a version header exists (mirrors ``merge_dru_block``'s
@@ -500,10 +504,18 @@ def merge_dru_floors(
     # native-zone clearance rule would let the floor *override* a designer
     # minimum -- the exact #8937 defect class.  Above the foreign rules the
     # floor still floors, and the designer's stricter rule still wins.
-    prefix = existing if existing.endswith("\n") else existing + "\n"
-    if re.search(r"^\s*\(version\b", existing, re.MULTILINE):
-        merged = f"{block}\n{prefix}"
+    # "Above the foreign content" means above the foreign *rules*: a
+    # ``.kicad_dru`` whose first element is not the ``(version ...)`` form
+    # is not a valid design-rules file (``load_design_rules`` and KiCad
+    # both require the header first), so when a leading version form is
+    # present the block is anchored immediately after it.
+    version_form = re.search(r"^\s*\(version[^)]*\)[ \t]*\n?", existing, re.MULTILINE)
+    if version_form:
+        head = existing[: version_form.end()]
+        tail = existing[version_form.end() :].lstrip("\n")
+        merged = f"{head}\n{block}\n\n{tail}"
     else:
+        prefix = existing if existing.endswith("\n") else existing + "\n"
         merged = f"{DRU_VERSION_HEADER}\n\n{block}\n{prefix}"
     merged = _check_dru_loadable(merged, path)
     _gate_dru_loosenings(existing, dru_content, merged, authored=authored, allow=allow, path=path)
