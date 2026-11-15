@@ -799,3 +799,101 @@ class TestRecordlessRerun:
         assert run_pcb_command(_args(board, strategy="parallel")) == 0
         second = PCB.load(board)
         assert len(second.vias) == n_vias
+
+
+class TestSmdEndTieAdoption:
+    """Issue #8970: on a leg ending in SMD pads the end ties themselves
+    accreted across record-less re-runs. ``end_tie`` adopted same-net vias
+    with a vertex-anchored test, but an SMD tie sits inward of the pad
+    (``pad_half_extent + via_size/2 + min_clearance``), one ``min_clearance``
+    past that test's reach -- so each pass that re-planned the original leg
+    planted a fresh pair beside the pair already there (+4 vias per leg at
+    the fixed point, reached on pass 4; a three-pass probe stops on the
+    ``11 -> 11`` plateau and misses it). The ties are now adopted at the
+    re-derived tie arc like interior stitches: credited to
+    ``existing_vias``, never recorded, so ``--clear`` still cannot remove
+    them (#8945's contract).
+    """
+
+    @staticmethod
+    def _smd_leg(length: float) -> PCB:
+        pcb = PCB.create(width=200, height=100, center=False)
+        _smd_pad(pcb, "J1", 20.0, 50.0)
+        _smd_pad(pcb, "J2", 20.0 + length, 50.0)
+        pcb.add_trace((20.0, 50.0), (20.0 + length, 50.0), width=1.0, layer="B.Cu", net=NET)
+        return pcb
+
+    @pytest.mark.parametrize(("length", "first_pass"), [(20.0, 5), (40.0, 9)], ids=["20mm", "40mm"])
+    def test_six_recordless_runs_hold_pass_one_count_and_positions(self, length, first_pass):
+        """Five-plus passes: the defect's fixed point is only reached on 4."""
+        pcb = self._smd_leg(length)
+        counts = []
+        pass_one = None
+        for i in range(6):
+            reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+            counts.append(len(_stitches(pcb)))
+            if i == 0:
+                pass_one = sorted(v.position for v in _stitches(pcb))
+        assert counts == [first_pass] * 6, counts
+        assert sorted(v.position for v in _stitches(pcb)) == pass_one
+
+    def test_adopted_ties_credit_existing_vias_and_stay_out_of_the_record(self):
+        pcb = self._smd_leg(40.0)
+        reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        (leg,) = [l for l in result.legs if l.status == LEG_PARALLEL]
+        (copy,) = result.copies
+        # 7 interior stitches + the two end ties, all adopted in place.
+        assert copy.stitch_vias == []
+        assert copy.existing_vias == 9
+        assert "ends tied by a tie via" in leg.reason
+        records = build_wire_records(result, 0.0, 0.0)
+        assert all(
+            w["stitch_vias"] == [] for w in records if w.get("strategy") == STRATEGY_PARALLEL
+        )
+        before = sorted(v.position for v in pcb.vias)
+        clear_anchors(pcb, NET, sidecar_wires=records, design_rules=_rules())
+        assert sorted(v.position for v in pcb.vias) == before
+
+    def test_recorded_rerun_of_an_smd_leg_stays_byte_identical(self):
+        pcb = self._smd_leg(40.0)
+        first = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        n = (len(pcb.segments), len(pcb.vias))
+        records = build_wire_records(first, 0.0, 0.0)
+        second = reinforce_net(
+            pcb, NET, strategy="parallel", design_rules=_rules(), sidecar_wires=records
+        )
+        assert (len(pcb.segments), len(pcb.vias)) == n
+        assert build_wire_records(first, 0.0, 0.0) == build_wire_records(second, 0.0, 0.0)
+
+    def test_matching_via_between_pad_and_tie_arc_is_still_an_obstacle(self):
+        size, drill = stitch_via_geometry(_rules())
+        pcb = self._smd_leg(40.0)
+        # Same net, stitch geometry, on the leg -- but between the pad edge
+        # and the tie arc: past the vertex test's reach (0.8 mm), yet outside
+        # the end-tie adoption window (which starts at the 0.927 mm arc) and
+        # outside the copy span, so no interior target claims it either.
+        # Nobody's tie, nobody's stitch.
+        pcb.add_via(20.85, 50.0, size=size, drill=drill, net=NET)
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        assert result.refused_copies == []
+        (copy,) = result.copies
+        assert copy.existing_vias == 0
+        assert len(_stitches(pcb)) == 10  # the seed plus this pass's own 9
+        # Its own tie still lands past the pad, slid inward past the seed by
+        # the hole-to-hole nudge rather than on top of it.
+        assert _at(pcb, 20.927, 50.0) is False
+        xs = sorted(v.position[0] for v in _stitches(pcb))
+        assert xs[0] == pytest.approx(20.85)  # the seed, untouched
+        assert xs[1] > 21.0  # this pass's tie slid inward past it
+
+    def test_th_control_and_interior_adoption_unchanged_five_passes(self):
+        pcb = _two_pad_leg(length=40.0)
+        counts = []
+        result = None
+        for _ in range(5):
+            result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+            counts.append(len(_stitches(pcb)))
+        assert counts == [7] * 5
+        assert all(c.stitch_vias == [] for c in result.copies)
+        assert sum(c.existing_vias for c in result.copies) == 7
