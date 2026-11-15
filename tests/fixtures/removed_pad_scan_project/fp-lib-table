@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "scanlib")(type "KiCad")(uri "${KIPRJMOD}/scanlib.pretty")(options "")(descr "Issue #8942 test project library"))
+)
