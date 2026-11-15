@@ -235,6 +235,11 @@ class SchematicNetlistMixin:
                 if pos_rounded not in point_to_pins:
                     point_to_pins[pos_rounded] = []
                 point_to_pins[pos_rounded].append(PinRef(symbol_ref=sym.reference, pin=pin.number))
+                # KiCad treats a hidden power-input pin as a global net named
+                # after the pin, as a power symbol is (legacy power symbols
+                # without the library ``(power)`` flag rely on this).
+                if pin.hidden and pin.pin_type == "power_in" and pin.name not in ("", "~"):
+                    point_to_net_names.setdefault(pos_rounded, []).append(pin.name)
 
                 # Connect to wires (KiCad: pins connect at wire endpoints
                 # or junctions only, never to a wire crossing mid-span)
