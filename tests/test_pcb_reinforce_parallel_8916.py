@@ -837,6 +837,43 @@ class TestSmdEndTieAdoption:
         assert counts == [first_pass] * 6, counts
         assert sorted(v.position for v in _stitches(pcb)) == pass_one
 
+    @staticmethod
+    def _smd_leg_l(a: float, b: float) -> PCB:
+        """Cornered B.Cu leg (20,50) -> (20,50+a) -> (20+b,50+a), SMD ends."""
+        pcb = PCB.create(width=200, height=100, center=False)
+        _smd_pad(pcb, "J1", 20.0, 50.0, rotation=90.0)
+        _smd_pad(pcb, "J2", 20.0 + b, 50.0 + a)
+        pcb.add_trace((20.0, 50.0), (20.0, 50.0 + a), width=1.0, layer="B.Cu", net=NET)
+        pcb.add_trace((20.0, 50.0 + a), (20.0 + b, 50.0 + a), width=1.0, layer="B.Cu", net=NET)
+        return pcb
+
+    @pytest.mark.parametrize(
+        ("a", "b", "first_pass"), [(20.0, 40.0, 13), (5.0, 45.0, 11)], ids=["L20/40", "L5/45"]
+    )
+    def test_six_recordless_runs_on_a_cornered_leg_hold_pass_one(self, a, b, first_pass):
+        """A corner between the SMD pads puts the far end's tie arc in the
+        reversed polyline's own arc frame. With unequal segment lengths the
+        forward cumulative arc is a different frame, and the far tie arc it
+        derived was scaled by the first segments' length ratio: adoption
+        missed the planted tie and the copy span ran past it, so every later
+        pass planted a fresh partial stitch set into the mis-spanned copy
+        (+16 unrecorded vias by pass 5 on L 20/40) -- this issue's accretion,
+        on a leg shape no straight-leg test reaches. The count is flat for
+        two passes (13 -> 13) before stepping up, so a shorter probe passes
+        while the defect accretes; hence six passes and positions, not just
+        counts.
+        """
+        pcb = self._smd_leg_l(a, b)
+        counts = []
+        pass_one = None
+        for i in range(6):
+            reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+            counts.append(len(_stitches(pcb)))
+            if i == 0:
+                pass_one = sorted(v.position for v in _stitches(pcb))
+        assert counts == [first_pass] * 6, counts
+        assert sorted(v.position for v in _stitches(pcb)) == pass_one
+
     def test_adopted_ties_credit_existing_vias_and_stay_out_of_the_record(self):
         pcb = self._smd_leg(40.0)
         reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())

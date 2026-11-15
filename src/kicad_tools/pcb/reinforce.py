@@ -3026,7 +3026,9 @@ def _reinforce_ends(
             return
         ties = [
             end_tie(points, cum, cand.layer, cand.run[0].width / 2.0),
-            end_tie(points[::-1], cum, cand.layer, cand.run[-1].width / 2.0),
+            end_tie(
+                points[::-1], _cumulative_arc(points[::-1]), cand.layer, cand.run[-1].width / 2.0
+            ),
         ]
         if ties[0] is None or ties[1] is None:
             refuse_copy(leg, copy_layer, points[0], no_room, "same-net pad copper covers the leg")
