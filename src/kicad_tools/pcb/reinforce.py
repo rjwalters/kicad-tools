@@ -2677,6 +2677,9 @@ def _reinforce_ends(
     candidates: list[_LegCandidate] = []
     excluded_runs: list[list[Segment]] = []
     path_names: dict[int, list[str]] = {}
+    # Declared design current per path name (#8950): an SMD end's tie row is
+    # sized from the largest current declared over the leg.
+    declared_current_a: dict[str, float] = {}
     target_layer: str | None = layer
 
     if gated:
@@ -2685,6 +2688,7 @@ def _reinforce_ends(
                 covering = path_names.setdefault(id(seg), [])
                 if res.spec.name not in covering:
                     covering.append(res.spec.name)
+            declared_current_a[res.spec.name] = res.spec.thermal_design_current().current_a
         for lay in sorted(by_layer):
             segs = by_layer[lay]
             eligible = [s for s in segs if id(s) in path_names]
@@ -2964,6 +2968,26 @@ def _reinforce_ends(
         if not copy_layer:
             refuse_copy(leg, "", points[0], no_room, f"{cand.layer} is an inner layer")
             return
+        # #8950: at an SMD end a single default via is far below a
+        # high-current leg's ampacity, so the tie is a packed row sized from
+        # the declared current covering this leg -- one via per
+        # ceil(I / barrel capacity), placed whole or not at all. Without a
+        # declared current there is nothing to size a row from: one via, as
+        # before.
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+        names: list[str] = []
+        for s in cand.run:
+            for name in path_names.get(original_ids.get(id(s), id(s)), ()):
+                if name not in names:
+                    names.append(name)
+        row_current_a = max(
+            (declared_current_a[name] for name in names if name in declared_current_a),
+            default=0.0,
+        )
+        row_need = 1
+        if row_current_a > 0.0:
+            row_need = max(1, math.ceil(row_current_a / via_barrel_current_capacity(via_drill)))
         ties = [
             end_tie(points, cum, cand.layer, cand.run[0].width / 2.0),
             end_tie(points[::-1], cum, cand.layer, cand.run[-1].width / 2.0),
@@ -2973,6 +2997,9 @@ def _reinforce_ends(
             return
         planned: list[tuple[float, float]] = []
         span = [ties[0][1], total - ties[1][1]]
+        #: Arc of each end's innermost placed tie via (#8950): interior
+        #: stitches only run between the two tie rows.
+        inner = [None, None]
         reach = STITCH_PITCH_MM / 2.0
         steps = max(1, round(reach / (END_NUDGE_MAX_MM / END_NUDGE_STEPS)))
         for end, sign in ((0, 1.0), (1, -1.0)):
@@ -3000,6 +3027,32 @@ def _reinforce_ends(
                 return
             span[end] = chosen[0]
             planned.append(chosen[1])
+            inner[end] = chosen[0]
+            if row_need > 1:
+                # Step the rest of the row inward at the same-net minimum
+                # centre spacing, reusing the ordinary rule checks per
+                # candidate; the far end's clear arc is left to the far end.
+                far_bound = (
+                    total - ties[1][1] - stitch_floor if end == 0 else ties[0][1] + stitch_floor
+                )
+                for k in range(1, row_need):
+                    t = chosen[0] + sign * stitch_floor * k
+                    p = _point_at_arc(points, cum, t)
+                    v = stitch_violation(p, planned)
+                    within = t <= far_bound + 1e-9 if end == 0 else t >= far_bound - 1e-9
+                    if v is None and within and not _too_close(p, planned, stitch_floor):
+                        planned.append(p)
+                        inner[end] = t
+                        continue
+                    why = (
+                        f"no room for the end tie row of {row_need} via(s) "
+                        f"({row_current_a:g} A), only {k} fit"
+                    )
+                    if v is None:
+                        v = no_room
+                        why += f" in {abs(far_bound - chosen[0]):.3f} mm of clear leg"
+                    refuse_copy(leg, copy_layer, p, v, why)
+                    return
         lo, hi = span
         if hi - lo < stitch_floor - 1e-9:
             refuse_copy(
@@ -3010,16 +3063,23 @@ def _reinforce_ends(
                 f"{max(0.0, hi - lo):.3f} mm between its end ties, need {stitch_floor:.3f} mm",
             )
             return
-        n = max(0, math.ceil((hi - lo) / STITCH_PITCH_MM - 1e-9) - 1)
-        while n > 0 and (hi - lo) / (n + 1) < stitch_floor - 1e-9:
+        # Interior stitches only run between the innermost tie vias, so a
+        # tie row (#8950) is never asked to share its span with them.
+        ilo, ihi = lo, hi
+        if inner[0] is not None:
+            ilo = max(ilo, inner[0])
+        if inner[1] is not None:
+            ihi = min(ihi, inner[1])
+        n = max(0, math.ceil((ihi - ilo) / STITCH_PITCH_MM - 1e-9) - 1)
+        while n > 0 and (ihi - ilo) / (n + 1) < stitch_floor - 1e-9:
             n -= 1
-        pitch = (hi - lo) / (n + 1)
+        pitch = (ihi - ilo) / (n + 1) if n else 0.0
         for k in range(1, n + 1):
-            target = lo + k * pitch
+            target = ilo + k * pitch
             first = None
             chosen_p = None
             for t in _nudge_arc_candidates(target, total, pitch):
-                if not lo + stitch_floor - 1e-9 <= t <= hi - stitch_floor + 1e-9:
+                if not ilo + stitch_floor - 1e-9 <= t <= ihi - stitch_floor + 1e-9:
                     continue
                 p = _point_at_arc(points, cum, t)
                 if _too_close(p, planned, stitch_floor):
