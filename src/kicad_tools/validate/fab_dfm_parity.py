@@ -12,6 +12,24 @@ Rules for editing the table:
 
 * A sibling rule PR flips its own row (``not_covered`` -> ``partial`` /
   ``covered``) and fills ``kct_rules``.
+* ``count_rule_ids`` (issue #8940) is the finding-attribution key: the exact
+  ``rule_id`` s whose findings count toward that row's kct error/warning
+  counts in the parity comparison.  It must be a *partition* -- no rule id
+  may appear in two rows -- and every entry must be an id ``kct check``
+  actually emits; tests enforce both.  ``kct_rules`` is coverage *provenance*
+  at mixed granularity (mostly category ids) and is deliberately NOT the
+  attribution key.  Ids deliberately unattributed: ``*_incomplete`` run-state
+  infos, ``clearance_net0_bridge`` and the zone-clearance ids (the fab does
+  not judge zone-fill clearance), and the kct-only silk advisories
+  (``silk_over_mask_opening``, ``silk_edge_clearance``, ``silk_overlap``,
+  ``silk_ref_obscured``, ``silkscreen_text_height``).  ``physical_copper_gap``
+  is one id for both the trace and the pad fab bands; it is attributed to
+  ``pad_spacing`` because its severity-graded findings on both recorded
+  boards are pad-adjacent (same-net pad-band errors and pad mask-bridge
+  errors) -- an imprecision the partition forces, disclosed here.
+  ``count_rule_ids`` adds no parity *claim*, so it does not bump
+  :data:`TABLE_VERSION` (a bump would change the stanza header and break the
+  byte-identical no-result contract, issue #8940 AC 2).
 * Every rule named in ``kct_rules`` of a ``covered`` / ``partial`` row must be
   something ``kct check`` can actually emit -- a real category
   (``cli/check_categories.py``) or a finer rule id registered in
@@ -30,7 +48,10 @@ Rules for editing the table:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from pathlib import Path
+from typing import Literal, Mapping, Sequence
+
+from .violations import DRCViolation
 
 Status = Literal["covered", "partial", "not_covered"]
 
@@ -56,6 +77,11 @@ class ParityRow:
     kct_rules: tuple[str, ...]
     status: Status
     danger_capable: bool
+    #: Finding attribution key (issue #8940): the exact ``rule_id`` s whose
+    #: findings count toward this row's kct error/warning counts.  Empty for
+    #: rows kct does not measure at all (rendered "n/a", not 0).  Must form a
+    #: partition across rows -- see the module docstring.
+    count_rule_ids: tuple[str, ...] = ()
     note: str = ""
 
     def to_dict(self) -> dict:
@@ -76,6 +102,9 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("clearance", "physical_copper_gap"),
         "partial",
         True,
+        # Non-pad copper spacing: the pair-type clearance ids with no pad on
+        # either side (segment/via gaps -- the fab's trace_spacing population).
+        ("clearance_segment_segment", "clearance_segment_via", "clearance_via_via"),
         "net-aware `clearance` always; the net-agnostic fab-view pass "
         "(`physical_copper_gap`, #8843) adds same-net copper but runs only when the "
         "effective --mfr is exactly `jlcpcb` -- a `jlcpcb-tier*` profile gets "
@@ -93,6 +122,10 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("clearance", "physical_copper_gap"),
         "partial",
         True,
+        # Pad-involving clearance ids plus the whole physical pass: one rule
+        # id covers both fab bands (see module docstring), and its graded
+        # findings on both recorded boards are pad-adjacent.
+        ("clearance_pad_pad", "clearance_pad_segment", "clearance_pad_via", "physical_copper_gap"),
         "as `trace_spacing`, plus the 2 oz pad mask-bridge check inside "
         "`physical_copper_gap`; that check runs on outer layers only (#8913) and "
         "judges a declared 2 oz outer weight only, otherwise reporting "
@@ -113,6 +146,7 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("mask_to_copper",),
         "partial",
         True,
+        ("mask_to_copper",),
         "`mask_to_copper` is default-on for an explicit --mfr `jlcpcb*` since #8842 "
         "(interim 0.09 mm danger / 0.15 mm warning); a bare `kct check` with no "
         "--mfr does not engage it, and the native path needs an unmodified saved "
@@ -128,6 +162,7 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("tht_smd_spacing",),
         "partial",
         True,
+        ("tht_smd_spacing",),
         "`tht_smd_spacing` (#8843) judges plated through-hole component pads plus, "
         "since #8914, vias whose drill is at least 1.0 mm (the fab classes a hole "
         "by size: the three top-side dangers kct missed on the #8914 board were all "
@@ -147,6 +182,9 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("silkscreen",),
         "partial",
         True,
+        # The geometric pass (silk over exposed copper) and the text-over-pad
+        # heuristic; NOT silk_over_mask_opening (no pad involved).
+        ("silk_over_copper", "silkscreen_over_pad"),
         "silk_over_copper reported 3 warnings where JLCDFM reported 54 danger.",
     ),
     ParityRow(
@@ -154,6 +192,7 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("silk_hole_overlap",),
         "partial",
         True,
+        ("silk_hole_overlap",),
         "`silk_hole_overlap` (#8844) flags silk that *overlaps* a via/PTH/NPTH drill "
         "circle, tented vias included -- a rule id under the `silkscreen` category. "
         "Threshold is 0 mm, so a silk-to-hole gap narrower than JLCDFM's clearance "
@@ -166,6 +205,7 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         (),
         "not_covered",
         False,
+        (),
         "no rule: no copper-weight-aware annular-ring floor exists yet. Observed 100 warnings.",
     ),
     ParityRow(
@@ -173,6 +213,7 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("mask_negative_expansion",),
         "covered",
         False,
+        ("mask_negative_expansion",),
         "`mask_negative_expansion` (#8847) warns on every opening whose effective "
         "margin is < 0 mm; default-on pure geometry read from the saved source, so "
         "an unsaved or edited board reports coverage unknown rather than a pass. "
@@ -183,6 +224,7 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("mask_multi_segment",),
         "covered",
         False,
+        ("mask_multi_segment",),
         "`mask_multi_segment` (#8847) warns on every opening whose geometry is more "
         "than one disjoint piece; same default-on saved-source snapshot as "
         "`mask_negative_expansion`. The recorded 21 warnings were not re-measured.",
@@ -192,6 +234,9 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("dangling_copper",),
         "covered",
         False,
+        # Both dangling-end ids the row's rule emits (track ends and
+        # under-bonded vias are both unconnected-end defects).
+        ("track_dangling", "via_dangling"),
         "parity with the observed 5 warnings.",
     ),
     ParityRow(
@@ -199,6 +244,7 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         (),
         "not_covered",
         False,
+        (),
         "no rule; `sharp_trace_corner` is in flight on #8840. Observed 3 warnings.",
     ),
     ParityRow(
@@ -206,6 +252,7 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         (),
         "not_covered",
         False,
+        (),
         "no rule; `missing_plated_hole` is in flight on #8840. Observed 2 warnings.",
     ),
     ParityRow(
@@ -213,14 +260,53 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         ("silkscreen",),
         "partial",
         False,
+        # The two >= 0.15 mm stroke/thickness floors this row's note names;
+        # silkscreen_text_height is a different (unknown-bucket) floor.
+        ("silkscreen_line_width", "silkscreen_text_thickness"),
         "`silkscreen_line_width` (every silk graphic primitive) and "
         "`silkscreen_text_thickness` (text) enforce JLCPCB's published >= 0.15 mm. "
         "Not covered: JLCDFM flags silk that meets that floor (#8844: 63 "
         "warnings on gerbers with no silk stroke below 0.150 mm). How JLCDFM "
         "selects the items it flags is unknown (#8943).",
     ),
-    ParityRow("fiducial", ("fiducials",), "covered", False, "checked; no finding on the board."),
+    ParityRow(
+        "fiducial",
+        ("fiducials",),
+        "covered",
+        False,
+        ("fiducials_missing",),
+        "checked; no finding on the board.",
+    ),
 )
+
+
+@dataclass(frozen=True)
+class RowComparison:
+    """One row's kct-vs-fab count comparison (issue #8940).
+
+    ``None`` counts mean "not measured": ``kct_*`` is ``None`` when the row
+    has no ``count_rule_ids`` (kct has no rule at all, so 0 would read as
+    "clean"); ``fab_*`` is ``None`` when the recorded result carries no entry
+    for the category.
+    """
+
+    category: str
+    kct_errors: int | None
+    kct_warnings: int | None
+    fab_danger: int | None
+    fab_warning: int | None
+    #: The row's headline signal (AC 4): the fab recorded danger, kct covers
+    #: the category, and kct still reports zero errors.
+    fab_only_danger: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "kct_errors": self.kct_errors,
+            "kct_warnings": self.kct_warnings,
+            "fab_danger": self.fab_danger,
+            "fab_warning": self.fab_warning,
+            "fab_only_danger": self.fab_only_danger,
+        }
 
 
 @dataclass(frozen=True)
@@ -230,13 +316,19 @@ class ParityReport:
     manufacturer: str
     rows: tuple[ParityRow, ...]
     incomplete_categories: tuple[str, ...]
+    #: Per-category kct-vs-fab counts; ``None`` unless a recorded result was
+    #: supplied (issue #8940).
+    comparisons: tuple[RowComparison, ...] | None = None
+    #: Recorded-result categories with no parity-table row (issue #8940);
+    #: surfaced instead of silently dropped.
+    unmapped_recorded: tuple[str, ...] = ()
 
     @property
     def incomplete(self) -> bool:
         return bool(self.incomplete_categories)
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "table_version": TABLE_VERSION,
             "source": SOURCE,
             "retrieved": RETRIEVED,
@@ -244,6 +336,54 @@ class ParityReport:
             "rows": [r.to_dict() for r in self.rows],
             "incomplete_categories": list(self.incomplete_categories),
         }
+        if self.comparisons is not None:
+            data["comparison"] = {c.category: c.to_dict() for c in self.comparisons}
+        if self.unmapped_recorded:
+            data["unmapped_recorded_categories"] = list(self.unmapped_recorded)
+        return data
+
+
+class RecordedResultError(ValueError):
+    """A recorded fab DFM result was unreadable or malformed (issue #8940)."""
+
+
+def load_recorded_result(path: str | Path) -> dict[str, dict[str, int]]:
+    """Read and validate a recorded fab DFM result (issue #8940).
+
+    The file must be JSON in the shape of
+    ``tests/fixtures/fab_dfm_parity/jlcdfm_*.json``: an object with a
+    ``counts`` mapping of category name to ``{"danger": int, "warning": int}``.
+    Returns just the ``counts`` mapping.  Raises :class:`RecordedResultError`
+    with an operator-readable message on any problem -- never a silent fall
+    back to the uncompared stanza.
+    """
+    import json
+
+    p = Path(path)
+    try:
+        text = p.read_text()
+    except OSError as exc:
+        raise RecordedResultError(f"cannot read {p}: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise RecordedResultError(f"{p} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RecordedResultError(f"{p}: expected a JSON object, got {type(data).__name__}")
+    counts = data.get("counts")
+    if not isinstance(counts, dict):
+        raise RecordedResultError(f"{p}: no 'counts' object at the top level")
+    for category, entry in counts.items():
+        if not isinstance(category, str) or not isinstance(entry, dict):
+            raise RecordedResultError(f"{p}: counts entry {category!r} is not an object")
+        for key in ("danger", "warning"):
+            value = entry.get(key)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise RecordedResultError(
+                    f"{p}: counts[{category!r}][{key!r}] must be a non-negative integer, "
+                    f"got {value!r}"
+                )
+    return counts
 
 
 def applies_to(manufacturer: str | None) -> bool:
@@ -255,31 +395,107 @@ def applies_to(manufacturer: str | None) -> bool:
 
 
 def evaluate_parity(
-    manufacturer: str | None, table: tuple[ParityRow, ...] = PARITY_TABLE
+    manufacturer: str | None,
+    table: tuple[ParityRow, ...] = PARITY_TABLE,
+    *,
+    findings: Sequence[DRCViolation] = (),
+    recorded_counts: Mapping[str, Mapping[str, int]] | None = None,
 ) -> ParityReport | None:
     """Evaluate the parity table for *manufacturer*; ``None`` when it does not apply.
 
     A danger-capable ``not_covered`` row makes the report ``incomplete``;
     ``partial`` rows are listed but never trigger it.
+
+    With *recorded_counts* (issue #8940) the report also carries a
+    :class:`RowComparison` per row: kct error/warning counts over *findings*
+    attributed by each row's ``count_rule_ids`` (the same ``is_error`` /
+    ``is_warning`` predicates the headline totals use, so the tallies cannot
+    disagree) beside the fab's recorded danger/warning counts.  Rows kct does
+    not measure get ``None`` kct counts, not zero.
     """
     if not applies_to(manufacturer):
         return None
     incomplete = tuple(r.category for r in table if r.danger_capable and r.status == "not_covered")
-    return ParityReport(str(manufacturer), table, incomplete)
+    comparisons: tuple[RowComparison, ...] | None = None
+    unmapped: tuple[str, ...] = ()
+    if recorded_counts is not None:
+        claimed = {r.category for r in table}
+        unmapped = tuple(sorted(set(recorded_counts) - claimed))
+        comps = []
+        for r in table:
+            kct_errors: int | None
+            kct_warnings: int | None
+            if r.count_rule_ids:
+                ids = frozenset(r.count_rule_ids)
+                kct_errors = sum(1 for v in findings if v.rule_id in ids and v.is_error)
+                kct_warnings = sum(1 for v in findings if v.rule_id in ids and v.is_warning)
+            else:
+                kct_errors = None
+                kct_warnings = None
+            recorded = recorded_counts.get(r.category)
+            fab_danger = int(recorded["danger"]) if recorded is not None else None
+            fab_warning = int(recorded["warning"]) if recorded is not None else None
+            comps.append(
+                RowComparison(
+                    r.category,
+                    kct_errors,
+                    kct_warnings,
+                    fab_danger,
+                    fab_warning,
+                    fab_only_danger=(
+                        fab_danger is not None
+                        and fab_danger > 0
+                        and kct_errors is not None
+                        and kct_errors == 0
+                    ),
+                )
+            )
+        comparisons = tuple(comps)
+    return ParityReport(
+        str(manufacturer), table, incomplete, comparisons=comparisons, unmapped_recorded=unmapped
+    )
 
 
 def format_parity_stanza(report: ParityReport) -> str:
-    """Text rendering for ``kct check`` (printed after the Coverage stanza)."""
+    """Text rendering for ``kct check`` (printed after the Coverage stanza).
+
+    Without a recorded result the output is byte-identical to the pre-#8940
+    stanza (AC 2); with one, each row gains ``| kct ... | fab ...`` count
+    columns, ``fab danger, kct 0 errors`` rows are visibly marked (AC 4), and
+    rows kct cannot measure read ``n/a`` rather than 0 (AC 7).
+    """
     lines = [
         "",
         f"Fab DFM parity (JLCDFM, table v{TABLE_VERSION}, {RETRIEVED}): "
         f"{len(report.incomplete_categories)} danger-capable categor"
         f"{'y' if len(report.incomplete_categories) == 1 else 'ies'} not covered",
     ]
+    comparisons = (
+        {c.category: c for c in report.comparisons} if report.comparisons is not None else None
+    )
     for r in report.rows:
         rules = ", ".join(r.kct_rules) or "-"
         flag = " [danger-capable]" if r.danger_capable else ""
-        lines.append(f"  {r.status.replace('_', ' '):<11} {r.category}{flag}: {rules}")
+        line = f"  {r.status.replace('_', ' '):<11} {r.category}{flag}: {rules}"
+        if comparisons is not None:
+            c = comparisons[r.category]
+            if c.kct_errors is None:
+                kct = "n/a (not measured)"
+            else:
+                kct = f"{c.kct_errors} err, {c.kct_warnings} warn"
+            fab = (
+                "not recorded"
+                if c.fab_danger is None
+                else f"{c.fab_danger} danger, {c.fab_warning} warn"
+            )
+            line += f" | kct {kct} | fab {fab}"
+            if c.fab_only_danger:
+                line += " | ** fab danger, kct 0 errors **"
+        lines.append(line)
+    if report.unmapped_recorded:
+        lines.append(
+            "  recorded categories not in the parity table: " + ", ".join(report.unmapped_recorded)
+        )
     if report.incomplete:
         lines.append(
             "  INCOMPLETE: kct has no rule for the categories above; a pass here does "

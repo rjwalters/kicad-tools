@@ -438,6 +438,70 @@ def point_clear_of_copper(
 
 
 # ---------------------------------------------------------------------------
+# Same-net pad slit-band predicate (Issue #8957)
+# ---------------------------------------------------------------------------
+
+
+def same_net_pad_gap_acceptable(
+    x: float,
+    y: float,
+    via_size: float,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
+    min_gap_mm: float,
+) -> bool:
+    """True iff a via annulus at (x, y) keeps the fab-view copper gap to every
+    same-net SMD pad out of the slit band.
+
+    Issue #8957: ``stitch --avoid-pad-overlap`` keeps a via's DRILL out of
+    same-net SMD pads (#3271) but nothing constrained the via's copper
+    ANNULUS gap to the pad it escapes.  A via seated just outside its own
+    pad leaves two wedge-shaped notches of air on either side of the
+    connecting stub -- in fab view a ``physical_copper_gap`` error regardless
+    of nets (#8938): a fab sees copper, not nets.
+
+    The constraint is two acceptable regions, not one floor:
+
+    * ``gap <= 0`` -- the annulus touches or overlaps its own pad, so the
+      copper is one union and there is no slit (the drill must still clear
+      the pad bbox, which is what ``--avoid-pad-overlap`` enforces);
+    * ``gap >= min_gap_mm`` -- the fab's error edge for the pad population,
+      read from the resolved stackup (``GapBand.error_edge_mm`` of the
+      ``pad_spacing`` dfm entry; e.g. 0.15 mm on jlcpcb ``4layer_1oz``,
+      0.13 mm on ``4layer_2oz``).
+
+    and the band ``(0, min_gap_mm)`` in between is rejected -- the caller's
+    placement ladder goes on trying candidates.
+
+    Args:
+        x, y: Proposed via center (mm, world coordinates).
+        via_size: Via pad (annulus) diameter in mm.
+        same_net_pad_bboxes: Axis-aligned SMD pad bounding boxes on the
+            via's own net, as ``(min_x, min_y, max_x, max_y)`` (extra
+            trailing tuple elements, as in ``find_all_pad_bboxes`` output,
+            are ignored).  ``None`` or empty disables the test.
+        min_gap_mm: The fab-view pad-population error edge in mm.
+            ``<= 0`` disables the test (every position acceptable).
+
+    Returns:
+        True when the annulus gap is acceptable for every pad (union or
+        beyond the edge), False when any pad sees a gap inside the band.
+    """
+    if min_gap_mm <= 0 or not same_net_pad_bboxes:
+        return True
+    radius = via_size / 2
+    for bbox in same_net_pad_bboxes:
+        dx = max(0.0, bbox[0] - x, x - bbox[2])
+        dy = max(0.0, bbox[1] - y, y - bbox[3])
+        gap = math.hypot(dx, dy) - radius
+        # The two acceptable regions: unioned with the pad, or clear of the
+        # fab error edge.  The 1e-9 slack mirrors _pad_conflict's float-noise
+        # tolerance for a gap computed as exactly ``min_gap_mm``.
+        if 1e-9 < gap < min_gap_mm - 1e-9:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Shared segment-vs-foreign-via predicate (Issue #2998 / #3002)
 # ---------------------------------------------------------------------------
 
