@@ -105,6 +105,44 @@ def test_macro_exposure_zero_primitive_erases():
     assert not image.contains(_point(0.5, 0.5))
 
 
+def test_macro_aperture_scales_with_inch_units():
+    # Under %MOIN the macro circle must land in millimetres exactly like the
+    # standard-aperture path three lines below it in the %ADD handler.
+    inch = "%FSLAX46Y46*%\n%MOIN*%\n%LPD*%\n"
+    standard = inch + "%ADD10C,0.1*%D10*X0Y0D03*M02*"
+    macro = inch + "%AMCirc*1,1,0.1,0,0*%%ADD10Circ*%D10*X0Y0D03*M02*"
+    expected = math.pi * (0.1 * 25.4 / 2) ** 2
+    standard_image = parse_gerber_geometry(standard).geometry
+    macro_image = parse_gerber_geometry(macro).geometry
+    assert standard_image.area == pytest.approx(expected, rel=1e-5)
+    assert macro_image.area == standard_image.area
+
+
+def test_leading_clear_macro_primitive_erases_nothing():
+    # The macro image starts empty, so a clear-first primitive adds no copper
+    # (the dark-then-clear order is pinned by test_macro_exposure_zero_primitive_erases).
+    source = (
+        HEADER
+        + "%AMLC2*1,0,0.4,3,3*4,1,4,-0.5,-0.5,0.5,-0.5,0.5,0.5,-0.5,0.5,-0.5,-0.5,0*%"
+        + "%ADD10LC2*%D10*X0Y0D03*M02*"
+    )
+    image = parse_gerber_geometry(source).geometry
+    assert image.area == pytest.approx(1.0, abs=1e-4)
+    assert image.bounds == pytest.approx((-0.5, -0.5, 0.5, 0.5), abs=1e-4)
+
+
+def test_draw_with_macro_aperture_rejects():
+    # Macro apertures are flashed only: the D01 sweep's convex hull is exact
+    # for the convex C/R/O/P templates but over-reports non-convex macro shapes.
+    source = (
+        HEADER
+        + "%AMLC2*4,1,4,-0.5,-0.5,0.5,-0.5,0.5,0.5,-0.5,0.5,-0.5,-0.5,0*%"
+        + "%ADD10LC2*%D10*X0Y0D02*X2000000Y0D01*M02*"
+    )
+    with pytest.raises(GerberGeometryError, match="Draw with macro aperture: LC2"):
+        parse_gerber_geometry(source)
+
+
 def _point(x: float, y: float):
     from shapely.geometry import Point
 
