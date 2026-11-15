@@ -14,8 +14,27 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-15
+
+- **PR #8960**: fix: resolve project fp-lib-table footprints in removed-pad scan and report gaps as coverage
+- **PR #8956**: fix: severity-grade fab-view copper gaps from the DFM threshold table
+- **Issue #8942** (closed): readiness: "Removed-pad scan skipped" when a footprint lives in a project-local library (fp-lib-table)
+- **Issue #8938** (closed): Fab DFM parity: JLCDFM danger-level findings are kct warnings (58 fab danger items, 0 kct errors, Overall PASSED)
+
 ### 2026-11-14
 
+- **PR #8953**: fix(current-paths): quote loop witnesses at their sheet position (#8928)
+- **PR #8952**: docs: record pad mask-bridge outer-layer scope in physical-copper-gap guide
+- **PR #8945**: feat(pcb): reinforce --strategy wire|parallel|auto (parallel copper for short links)
+- **PR #8944**: fix(check): correct silkscreen line-width parity row; pin line-width coverage (#8844)
+- **PR #8941**: feat(check): pair anchor vias against exposed via annuli in tht_smd_spacing
+- **PR #8934**: test: pin same-net in-opening conductor as a mask_to_copper error
+- **Issue #8932** (closed): Pin the same-net track-in-mask-opening case mask_to_copper is asked about most
+- **Issue #8931** (closed): Document the pad mask-bridge outer-layer scope in the physical-copper-gap user guide
+- **Issue #8928** (closed): reinforcement_incomplete [skipped] message quotes witness coordinates board-relative on a non-zero-origin board
+- **Issue #8925** (closed): tht_smd_spacing does not pair a plated hole against an exposed via annulus (JLCDFM counts one)
+- **Issue #8916** (closed): pcb reinforce: parallel-copper strategy for short high-current links (--strategy wire|parallel|auto)
+- **Issue #8844** (closed): Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width
 - **PR #8854**: feat: two-tier silk-to-pad bands and silk_hole_overlap rule
 - **PR #8927**: fix: repair acute two-segment trace fold-backs in router cleanup
 - **Issue #8919** (closed): Router emits two-segment acute fold-backs that sharp_trace_corner now gates
