@@ -3,13 +3,45 @@
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 __all__ = ["run_pcb_command"]
 
 
 #: Upper bound on re-plan passes in one ``kct pcb prune`` run (#8730).
 _PRUNE_MAX_PASSES = 10
+
+
+def _sheet_reporters(
+    pcb,
+) -> tuple[float, float, Callable[[Any], list[float]], Callable[[dict[str, Any]], dict[str, Any]]]:
+    """Report renderers in the sheet frame the KiCad GUI shows (#8493, #8798).
+
+    Router and prune coordinates are board-relative; every coordinate a report
+    quotes must be sheet-absolute so pasting it into the KiCad GUI's locator
+    finds the copper. Returns ``(origin_x, origin_y, sheet_point,
+    sheet_witness)``: ``sheet_point`` shifts a ``(x, y)`` pair by the board's
+    ``board_origin`` and ``sheet_witness`` shifts a witness dict's coordinate
+    keys in place, leaving absent keys absent (never injecting ``0``).
+    """
+    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+
+    def sheet(point) -> list[float]:
+        return [point[0] + origin_x, point[1] + origin_y]
+
+    def sheet_witness(witness: dict[str, Any]) -> dict[str, Any]:
+        out = dict(witness)
+        for key in ("start", "end", "position"):
+            if key in out:
+                out[key] = sheet(out[key])
+        if out.get("blocking_branches"):
+            out["blocking_branches"] = [
+                {**b, "start": sheet(b["start"]), "end": sheet(b["end"])}
+                for b in out["blocking_branches"]
+            ]
+        return out
+
+    return origin_x, origin_y, sheet, sheet_witness
 
 
 def _carry_sidecars(src: Path, dst: Path) -> None:
@@ -847,6 +879,10 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         return 1
     assert res is not None  # _PRUNE_MAX_PASSES >= 1, so the loop ran at least once
 
+    # Quote sheet positions like the sibling commands and kct check (#8954);
+    # the library's plans and uncut loops stay board-relative.
+    origin_x, origin_y, _sheet, _sheet_witness = _sheet_reporters(pcb)
+
     def _net(p) -> dict[str, Any]:
         return {
             "net": p.net_name or p.net_number,
@@ -854,11 +890,33 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             "vias_removed": len(p.remove_vias),
             "ends_snapped": len(p.snaps),
             "stubs_added": [
-                {"layer": layer, "start": list(a), "end": list(b), "width": w}
+                {"layer": layer, "start": _sheet(a), "end": _sheet(b), "width": w}
                 for layer, a, b, w in p.stubs
             ],
             **({"reject_reason": p.reject_reason} if p.reject_reason else {}),
         }
+
+    def _sheet_uncut_loop(u: dict[str, Any]) -> dict[str, Any]:
+        """One uncut-loop entry, re-quoted at sheet positions (#8954)."""
+        out = dict(u)
+        if "witness" in out:
+            # audit_loops_left entry: re-render the text from the raw witness,
+            # then shift the witness dict itself, so text and dict agree.
+            from kicad_tools.router.current_paths import witness_text
+
+            out["segments"] = [witness_text(out["witness"], (origin_x, origin_y))]
+            out["witness"] = _sheet_witness(out["witness"])
+        elif "segment_ends" in out:
+            ends = out["segment_ends"]
+            out["segments"] = [
+                f"({e['a'][0] + origin_x}, {e['a'][1] + origin_y})->"
+                f"({e['b'][0] + origin_x}, {e['b'][1] + origin_y}) {e['layer']}"
+                for e in ends
+            ]
+            out["segment_ends"] = [
+                {"a": _sheet(e["a"]), "b": _sheet(e["b"]), "layer": e["layer"]} for e in ends
+            ]
+        return out
 
     changed = (
         res.stats["segments_removed"]
@@ -878,7 +936,7 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         "snapped": res.stats["ends_snapped"],
         "nets": [_net(p) for p in res.accepted],
         "rejected_by_drc": [_net(p) for p in res.rejected],
-        "uncut_loops": res.uncut_loops,
+        "uncut_loops": [_sheet_uncut_loop(u) for u in res.uncut_loops],
         "scope": {"nets": nets, "region": list(region) if region else None},
         "region_skipped": [_net(p) for p in res.region_skipped],
     }
@@ -1792,22 +1850,7 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
     audit = audit_current_paths(pcb, specs)
     output_format = getattr(args, "format", "text")
     # Report sheet coordinates, the frame ``kct check`` uses (#8798).
-    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
-
-    def _sheet(point) -> list[float]:
-        return [point[0] + origin_x, point[1] + origin_y]
-
-    def _sheet_witness(witness: dict[str, Any]) -> dict[str, Any]:
-        out = dict(witness)
-        for key in ("start", "end", "position"):
-            if key in out:
-                out[key] = _sheet(out[key])
-        if out.get("blocking_branches"):
-            out["blocking_branches"] = [
-                {**b, "start": _sheet(b["start"]), "end": _sheet(b["end"])}
-                for b in out["blocking_branches"]
-            ]
-        return out
+    origin_x, origin_y, _sheet, _sheet_witness = _sheet_reporters(pcb)
 
     def _reason(resolution: PathResolution) -> str:
         """``reason`` plus its witness, quoted at sheet positions (#8928)."""
