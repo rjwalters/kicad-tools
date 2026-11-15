@@ -140,6 +140,26 @@ def ampacity_pour_unknown(unmeasured: dict[str, str]) -> Coverage:
     return unknown("ampacity", f"pour not measurable ({detail})")
 
 
+def collapse_reasons(reasons: Sequence[str], limit: int) -> str:
+    """De-duplicate reason strings (first-occurrence order) and truncate.
+
+    The one shared collapse rule behind every human-readable rendering of
+    mask-copper incompleteness (issue #8949): the live case carries reason
+    lists where 13 of 19 strings are the same
+    ``"F.Mask: unattributed native mask region"`` line, which buries the
+    distinct causes.  ``mask_copper_unknown`` composes this into its
+    coverage-row detail; ``kct check``'s stdout stanza composes it with a
+    wider bound.  An empty list renders the ``"no reason reported"``
+    placeholder, never a spurious ``(+0 more)``.
+    """
+    distinct = list(dict.fromkeys(reason for reason in reasons if reason))
+    shown = distinct[:limit]
+    detail = "; ".join(shown) if shown else "no reason reported"
+    if len(distinct) > len(shown):
+        detail += f" (+{len(distinct) - len(shown)} more)"
+    return detail
+
+
 def mask_copper_unknown(coverage: str, reasons: Sequence[str], *, limit: int = 3) -> Coverage:
     """``mask_to_copper`` coverage when the assessment could not evaluate the board.
 
@@ -159,16 +179,12 @@ def mask_copper_unknown(coverage: str, reasons: Sequence[str], *, limit: int = 3
     invert the row's meaning.  ``summarize_verdict`` keys on ``passed``, which
     is correct for a *verdict* but not for this row.
 
-    The reason detail is de-duplicated (first-occurrence order) and truncated:
-    the live incomplete case carries 19 reason strings, 13 of them the same
-    ``"F.Mask: unattributed native mask region"`` line, and this string lands
-    verbatim in every committed report.
+    The reason detail is de-duplicated (first-occurrence order) and truncated
+    via :func:`collapse_reasons` -- the shared collapse rule the CLI's
+    stdout stanza uses too (issue #8949).  This string lands verbatim in
+    every committed report, so its ``limit`` stays tight.
     """
-    distinct = list(dict.fromkeys(reason for reason in reasons if reason))
-    shown = distinct[:limit]
-    detail = "; ".join(shown) if shown else "no reason reported"
-    if len(distinct) > len(shown):
-        detail += f" (+{len(distinct) - len(shown)} more)"
+    detail = collapse_reasons(reasons, limit=limit)
     return unknown("mask_to_copper", f"assessment {coverage} ({detail})")
 
 
