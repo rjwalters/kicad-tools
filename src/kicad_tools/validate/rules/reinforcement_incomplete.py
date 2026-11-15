@@ -150,14 +150,6 @@ class _WirePlan:
     skipped: list[PathResolution] = field(default_factory=list)
 
 
-_FLOAT_RE = re.compile(r"-?\d+\.\d{4,}")
-
-
-def _round_floats(text: str) -> str:
-    """Round float literals with more than 3 decimals to 3 dp (witness coordinates)."""
-    return _FLOAT_RE.sub(lambda m: f"{float(m.group()):.3f}", text)
-
-
 class ReinforcementIncompleteRule(DRCRule):
     """DRC rule verifying that reinforced runs are buildable (Issue #8746).
 
@@ -365,8 +357,12 @@ class ReinforcementIncompleteRule(DRCRule):
         )
 
     def _emit_skipped(self, results: DRCResults, pcb: PCB, res: PathResolution) -> None:
+        from kicad_tools.router.current_paths import describe_witness
+
         net = res.spec.net_name
-        reason = _round_floats(res.reason)
+        # ``reason`` is coordinate-free; the witness is quoted at the sheet
+        # position, like every other coordinate in this rule's text (#8928).
+        reason = res.reason + describe_witness(res.witness, (self._ox, self._oy))
         results.add(
             DRCViolation(
                 rule_id=self.rule_id,

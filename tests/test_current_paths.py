@@ -12,6 +12,7 @@ mirroring the pattern already established in ``tests/test_pcb_reinforce.py``.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -23,12 +24,14 @@ from kicad_tools.router.current_paths import (
     CurrentPathSpec,
     PathEndpoint,
     audit_current_paths,
+    describe_witness,
     dump_current_path_specs,
     load_current_path_specs,
     parse_current_path_specs,
     reinforcement_eligible_segment_ids,
     resolve_current_path,
     unmodeled_copper,
+    witness_text,
 )
 from kicad_tools.schema.pcb import Footprint, Pad
 
@@ -1223,7 +1226,9 @@ class TestParallelGroups:
         branches = r.witness["blocking_branches"]
         assert {b["layer"] for b in branches} == {"F.Cu", "B.Cu"}
         assert len(branches) == 2
-        assert "blocking branches" in r.reason
+        # The branches are rendered from the witness, not baked into reason (#8928).
+        assert "blocking branches" not in r.reason
+        assert "[blocking branches: " in describe_witness(r.witness)
 
     def test_loop_through_third_pad_stays_ambiguous(self) -> None:
         from kicad_tools.schema.pcb import PCB
@@ -1244,3 +1249,97 @@ class TestParallelGroups:
         pcb.add_trace(("U3", "1"), ("J2", "1"), width=2.0, layer="F.Cu", net="NET1")
         r = resolve_current_path(pcb, _j_spec())
         assert r.status == "ambiguous"
+
+
+# --------------------------------------------------------------------------
+# Witness rendering (issue #8928)
+# --------------------------------------------------------------------------
+
+_COORD_RE = re.compile(r"\(\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*\)")
+
+
+def _same_layer_detour_pcb(*, center: bool = False):
+    from kicad_tools.schema.pcb import PCB
+
+    pcb = PCB.create(width=100, height=100, center=center)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=32, y=50, net="NET1")
+    pcb.add_trace(("J1", "1"), ("J2", "1"), width=2.0, layer="F.Cu", net="NET1")
+    pcb.add_trace(("J1", "1"), (26, 60), width=2.0, layer="B.Cu", net="NET1")
+    pcb.add_trace((26, 60), ("J2", "1"), width=2.0, layer="B.Cu", net="NET1")
+    return pcb
+
+
+class TestWitnessRendering:
+    """``reason`` is prose; the witness is rendered per frame (issue #8928)."""
+
+    def test_reason_quotes_no_coordinates_for_any_status(self) -> None:
+        import dataclasses
+
+        missing = dataclasses.replace(_j_spec(), source=PathEndpoint("NOPE", "1"))
+        resolutions = [
+            resolve_current_path(_doubled_pcb(vias=(24,)), _j_spec()),  # resolved
+            resolve_current_path(_doubled_pcb(vias=(24,)), missing),  # unresolved
+            resolve_current_path(_same_layer_detour_pcb(), _j_spec()),  # ambiguous
+            resolve_current_path(_same_layer_detour_pcb(center=True), _j_spec()),
+            resolve_current_path(_doubled_pcb(), _j_spec()),
+        ]
+        assert {r.status for r in resolutions} == {"resolved", "unresolved", "ambiguous"}
+        assert any(r.witness for r in resolutions), "no witness exercised"
+        for r in resolutions:
+            assert not _COORD_RE.search(r.reason), f"{r.status}: {r.reason}"
+
+    def test_reason_is_identical_across_board_origins(self) -> None:
+        flat = resolve_current_path(_same_layer_detour_pcb(), _j_spec())
+        shifted_pcb = _same_layer_detour_pcb(center=True)
+        assert tuple(shifted_pcb.board_origin) != (0.0, 0.0)
+        shifted = resolve_current_path(shifted_pcb, _j_spec())
+        assert flat.status == shifted.status == "ambiguous"
+        assert flat.reason == shifted.reason
+        # The witness stays board-relative; only the renderer applies an origin.
+        assert flat.witness == shifted.witness
+
+    def test_segment_witness_and_branches_take_the_origin(self) -> None:
+        witness = {
+            "kind": "segment",
+            "layer": "B.Cu",
+            "start": [70.0, 58.0],
+            "end": [70.0, 50.0],
+            "width": 0.25,
+            "blocking_branches": [{"layer": "F.Cu", "start": [20.0, 50.0], "end": [32.0, 50.0]}],
+        }
+        assert describe_witness(witness, (48.5, 55.0)) == (
+            " [witness: segment (118.500, 113.000)->(118.500, 105.000) on B.Cu]"
+            " [blocking branches: (68.500, 105.000)->(80.500, 105.000) on F.Cu]"
+        )
+
+    def test_default_origin_is_board_relative(self) -> None:
+        witness = {"kind": "segment", "layer": "B.Cu", "start": [70.0, 58.0], "end": [70.0, 50.0]}
+        assert describe_witness(witness) == (
+            " [witness: segment (70.000, 58.000)->(70.000, 50.000) on B.Cu]"
+        )
+        assert witness_text(witness) == "segment (70.000, 58.000)->(70.000, 50.000) on B.Cu"
+
+    def test_via_witness_takes_the_origin(self) -> None:
+        witness = {"kind": "via", "layer": "F.Cu", "position": [10.0, 20.0]}
+        assert (
+            describe_witness(witness, (1.5, -2.0)) == " [witness: via barrel at (11.500, 18.000)]"
+        )
+
+    def test_empty_blocking_branches_add_nothing(self) -> None:
+        witness = {
+            "kind": "via",
+            "layer": "F.Cu",
+            "position": [10.0, 20.0],
+            "blocking_branches": [],
+        }
+        assert "blocking" not in describe_witness(witness)
+
+    def test_long_floats_round_to_three_places(self) -> None:
+        witness = {"kind": "via", "layer": "F.Cu", "position": [10.799999999999997, 10.8]}
+        assert describe_witness(witness) == " [witness: via barrel at (10.800, 10.800)]"
+
+    def test_empty_witness_renders_nothing(self) -> None:
+        assert describe_witness({}) == ""
+        assert describe_witness({}, (5.0, 5.0)) == ""
+        assert witness_text({}) == ""

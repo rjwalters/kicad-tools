@@ -2667,11 +2667,16 @@ def audit_loops_left(
     as an uncut loop (with the audit's witness) on a net prune has not already
     reported one for, so a prune run that reports no remaining loops never
     disagrees with ``pcb current-paths-audit``.  Copper is never cut here.
+
+    The witness text is rendered board-relative (origin ``(0, 0)``) on purpose:
+    every other ``uncut_loops[].segments`` entry, the ``witness`` dict beside it
+    and prune's ``stubs_added`` ends are all board-relative, so one
+    sheet-absolute entry would mix frames inside a single report (#8928).
     """
     from kicad_tools.router.current_paths import (
         STATUS_AMBIGUOUS,
-        _describe_witness,
         resolve_current_path,
+        witness_text,
     )
 
     seen = {str(u.get("net")) for u in reported}
@@ -2687,7 +2692,7 @@ def audit_loops_left(
         out.append(
             {
                 "net": spec.net_name,
-                "segments": [_describe_witness(w).strip(" []").removeprefix("witness: ")],
+                "segments": [witness_text(w)],
                 "min_width": round(float(cast("float", w.get("width", 0.0))), 6),
                 "reason": (
                     "the current-path audit still sees a loop/parallel path that "

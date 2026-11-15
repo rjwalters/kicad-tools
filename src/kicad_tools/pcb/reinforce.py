@@ -454,6 +454,10 @@ class UnresolvedPath:
     path: str
     status: str
     reason: str
+    #: :attr:`PathResolution.witness` (board-relative). ``reason`` quotes no
+    #: coordinates; reporters append ``describe_witness(witness, origin)`` in
+    #: their own frame (#8928).
+    witness: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass
@@ -1651,7 +1655,9 @@ def reinforce_net(
     partition = reinforcement_path_resolutions(pcb, net_path_specs) if net_path_specs else None
     if partition is not None:
         result.unresolved_paths = [
-            UnresolvedPath(path=res.spec.name, status=res.status, reason=res.reason)
+            UnresolvedPath(
+                path=res.spec.name, status=res.status, reason=res.reason, witness=res.witness
+            )
             for res in partition.unresolved
         ]
 
