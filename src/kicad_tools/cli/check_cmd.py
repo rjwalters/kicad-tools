@@ -145,8 +145,28 @@ _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
         "clearance_segment_segment",
         "clearance_via_via",
         "clearance_pad_via",
+        # Issue #8938: physical_copper_gap findings carry the structured
+        # ``same_net`` flag (a same-net slit is one net, so the two-name
+        # classifier below sees nothing to compare).
+        "physical_copper_gap",
     }
 )
+
+
+def _finding_relationship(v: DRCViolation) -> str | None:
+    """Net-relationship tag for a finding header / BY RULE tally (#4102, #8938).
+
+    Rules carrying the structured :attr:`DRCViolation.same_net` flag (#8938)
+    are classified from it directly -- a same-net physical gap has a single
+    net, which the two-name :func:`_net_relationship` cannot compare.
+    """
+    if v.rule_id == "physical_copper_gap":
+        if v.same_net is None:
+            return None
+        return "same-net" if v.same_net else "different-net"
+    if v.rule_id in _NET_RELATIONSHIP_RULE_IDS:
+        return _net_relationship(v.nets)
+    return None
 
 
 def _authored_min_clearance_mm(pcb_path: str | Path) -> float | None:
@@ -2445,6 +2465,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # Create checker with manufacturer rules
     try:
+        # Issue #8938: resolve the stackup's fab-view gap bands (same DFM-table
+        # lookup path as _apply_dfm_table below) for the net-agnostic copper
+        # gap pass.  None (no table / no entry) fails closed in the checker.
+        fab_view_gap_policy = None
+        if effective_mfr == "jlcpcb":
+            fab_view_gap_policy = _resolve_fab_gap_policy(
+                effective_mfr,
+                layers,
+                resolved_copper_outer,
+                resolved_copper_inner,
+                preset_copper_oz,
+                len(pcb.copper_layers),
+            )
         checker = DRCChecker(
             pcb,
             manufacturer=effective_mfr,
@@ -2470,6 +2503,7 @@ def main(argv: list[str] | None = None) -> int:
             # Issue #8843: net-agnostic fab view is default-on under jlcpcb.
             fab_view=effective_mfr == "jlcpcb",
             fab_view_copper_oz=resolved_copper_outer,
+            fab_view_gap_policy=fab_view_gap_policy,
             courtyard_waivers=courtyard_waivers,
             # Issue #4673: strict (real-geometry) connectivity is the
             # default; --legacy-connectivity is the explicit opt-out and
@@ -4014,6 +4048,60 @@ def _copper_weights_provenance(
     }
 
 
+def _dfm_stackup_args(
+    layers: int | None,
+    outer: float | None,
+    inner: float | None,
+    preset_oz: float,
+    n_layers_fallback: int,
+    profile,
+) -> tuple[int, float, float, bool]:
+    """Resolve the DFM table lookup key ``(n_layers, eff_outer, eff_inner, assumed)``.
+
+    The one stackup-resolution path for the DFM threshold table (#8839), shared
+    by :func:`_apply_dfm_table` (floors) and the fab-view gap-band resolution
+    (#8938), so both always agree on which entry applies.
+    """
+    n_layers = layers if layers is not None else n_layers_fallback
+    base = profile.get_design_rules(n_layers, preset_oz)
+    eff_outer = outer if outer is not None else (preset_oz if preset_oz else 1.0)
+    assumed = outer is None or (n_layers > 2 and inner is None)
+    if n_layers <= 2:
+        eff_inner = 0.0
+    else:
+        eff_inner = inner if inner is not None else base.inner_copper_oz
+    return n_layers, eff_outer, eff_inner, assumed
+
+
+def _resolve_fab_gap_policy(
+    mfr: str,
+    layers: int | None,
+    outer: float | None,
+    inner: float | None,
+    preset_oz: float,
+    n_layers_fallback: int,
+):
+    """The stackup's fab-view gap bands for ``DRCChecker(fab_view_gap_policy=...)``.
+
+    ``None`` when the fab has no table or the stackup has no entry: the gap
+    pass then fails closed (issue #8938) instead of severity-grading from
+    assumed edges -- the missing entry already drives an ``incomplete``
+    verdict via :func:`_apply_dfm_table`.
+    """
+    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
+
+    profile = get_profile(mfr)
+    if profile.dfm_thresholds is None:
+        return None
+    n_layers, eff_outer, eff_inner, _assumed = _dfm_stackup_args(
+        layers, outer, inner, preset_oz, n_layers_fallback, profile
+    )
+    entry = profile.get_dfm_entry(n_layers, eff_outer, eff_inner)
+    if entry is None:
+        return None
+    return fab_gap_policy_from_entry(entry)
+
+
 def _apply_dfm_table(
     checker: DRCChecker,
     mfr: str,
@@ -4038,14 +4126,9 @@ def _apply_dfm_table(
             "reason": f"no table for {mfr}",
         }
         return False
-    n_layers = layers if layers is not None else len(checker.pcb.copper_layers)
-    base = profile.get_design_rules(n_layers, preset_oz)
-    eff_outer = outer if outer is not None else (preset_oz if preset_oz else 1.0)
-    assumed = outer is None or (n_layers > 2 and inner is None)
-    if n_layers <= 2:
-        eff_inner = 0.0
-    else:
-        eff_inner = inner if inner is not None else base.inner_copper_oz
+    n_layers, eff_outer, eff_inner, assumed = _dfm_stackup_args(
+        layers, outer, inner, preset_oz, len(checker.pcb.copper_layers), profile
+    )
     entry = profile.get_dfm_entry(n_layers, eff_outer, eff_inner)
     stackup = f"{n_layers}-layer, {eff_outer:g}oz outer / {eff_inner:g}oz inner"
     if assumed:
@@ -4211,7 +4294,7 @@ def output_table(
             by_rule[v.rule_id]["warnings"] += 1
 
         if v.rule_id in _NET_RELATIONSHIP_RULE_IDS:
-            relationship = _net_relationship(v.nets)
+            relationship = _finding_relationship(v)
             if relationship is not None:
                 counts = by_rule_relationship.setdefault(
                     v.rule_id, {"same-net": 0, "different-net": 0}
@@ -4291,11 +4374,22 @@ def output_table(
     # Render them in a dedicated WAIVED section so a reviewer can audit each
     # documented exception (with its reason / tracking issue).
     if waived:
+        # Issue #8938: state how many waived findings are the same-net class,
+        # so a deliberate class waiver is visible as a count, not just as
+        # rows in the listing below.
+        same_net_waived = sum(1 for v in waived if v.same_net)
         print(f"\n{'-' * 60}")
         print("WAIVED (documented exceptions, non-blocking):")
+        if same_net_waived:
+            print(
+                f"  Same-net findings waived: {same_net_waived} "
+                "(each named below with its reason and issue)"
+            )
         for v in waived:
             print(f"\n  [W] {v.rule_id}")
             print(f"      {v.message}")
+            if v.waiver_reason:
+                print(f"      Waiver reason: {v.waiver_reason}")
             if v.waiver_issue:
                 print(f"      Waiver issue: {v.waiver_issue}")
             if verbose:
@@ -4332,7 +4426,7 @@ def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None
     # (different-net drill-wall breakage -> short) from lower-risk same-net /
     # floating pairs -- without eyeballing two net names.  Presentational only;
     # severity is unchanged.
-    relationship = _net_relationship(v.nets) if v.rule_id in _NET_RELATIONSHIP_RULE_IDS else None
+    relationship = _finding_relationship(v) if v.rule_id in _NET_RELATIONSHIP_RULE_IDS else None
     header = v.rule_id if relationship is None else f"{v.rule_id} ({relationship})"
     print(f"\n{indent}[{symbol}] {header}")
     print(f"{indent}    {v.message}")

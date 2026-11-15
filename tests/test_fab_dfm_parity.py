@@ -14,6 +14,20 @@ FIX = Path(__file__).parent / "fixtures" / "fab_dfm_parity"
 RECORDED = json.loads((FIX / "jlcdfm_8838_board.json").read_text())["counts"]
 ROWS = {r.category: r for r in fdp.PARITY_TABLE}
 
+#: Every recorded real-board case.  #8938 adds the 4-layer 1 oz board beside
+#: the original 2 oz one; the table's properties are asserted against the
+#: UNION across boards, not either board alone.
+RECORDED_BOARDS = (
+    "jlcdfm_8838_board.json",
+    "jlcdfm_8938_board.json",
+)
+
+
+def _all_recorded_counts():
+    """The per-board ``counts`` dicts, folded over every recorded board."""
+    return [json.loads((FIX / name).read_text())["counts"] for name in RECORDED_BOARDS]
+
+
 #: JLCDFM category -> the ``kct check`` rule id(s) that cover it (Issue #8902).
 #:
 #: Maintained by hand, and deliberately allowed to name ids that do **not**
@@ -94,19 +108,57 @@ def test_rules_are_real_check_categories():
 
 
 def test_table_matches_recorded_categories():
-    assert set(ROWS) == set(RECORDED)
+    seen: set[str] = set()
+    for counts in _all_recorded_counts():
+        assert set(counts) <= set(ROWS), f"unknown category recorded: {set(counts) - set(ROWS)}"
+        seen |= set(counts)
+    assert seen == set(ROWS)
 
 
 def test_danger_capable_matches_recorded_danger():
-    for cat, counts in RECORDED.items():
-        assert ROWS[cat].danger_capable == (counts["danger"] > 0), cat
+    """Danger-capable means danger-capable on ANY recorded board (#8938).
+
+    The single-board assertion broke by construction when the 1 oz board
+    landed: ``trace_spacing`` is 2 danger there, 0 on the #8938 board, and
+    ``silkscreen_to_pad`` 54 vs 0.  The property the table means is the union.
+    """
+    danger_any = {
+        cat for counts in _all_recorded_counts() for cat, c in counts.items() if c["danger"] > 0
+    }
+    for cat, row in ROWS.items():
+        assert row.danger_capable == (cat in danger_any), cat
+
+
+def test_8938_fixture_records_the_resolved_stackup():
+    """Band logic keys on the stackup, so it must be data, not prose (#8938)."""
+    fixture = json.loads((FIX / "jlcdfm_8938_board.json").read_text())
+    assert fixture["stackup"] == "4layer_1oz"
 
 
 def test_recorded_danger_not_covered_is_incomplete():
     report = fdp.evaluate_parity("jlcpcb")
-    for cat, counts in RECORDED.items():
-        if counts["danger"] > 0 and ROWS[cat].status == "not_covered":
-            assert cat in report.incomplete_categories
+    for counts in _all_recorded_counts():
+        for cat, c in counts.items():
+            if c["danger"] > 0 and ROWS[cat].status == "not_covered":
+                assert cat in report.incomplete_categories
+
+
+def test_recorded_danger_with_zero_kct_errors_fails_the_suite():
+    """A category where a recorded board reports danger must be covered by a
+    rule that can emit errors (issue #8938).
+
+    The defect this pins: every danger-capable row was ``partial`` with a
+    covering rule that downgraded the fab's danger geometry to warnings, so
+    kct reported zero errors on a board carrying 58 fab danger items.  The
+    rule-side bite (real bands on the measured geometry) lives in
+    ``test_physical_copper_gap.py``; this pins the table side.
+    """
+    for counts in _all_recorded_counts():
+        for cat, c in counts.items():
+            if c["danger"] > 0:
+                row = ROWS[cat]
+                assert row.kct_rules, f"{cat}: fab danger but no covering rule"
+                assert row.status != "not_covered", cat
 
 
 def test_covered_danger_rows_have_findings_on_fixture():
@@ -209,3 +261,25 @@ def test_guard_ignores_a_row_whose_rule_has_not_shipped():
     """A ``not_covered`` row whose mapped id does not exist yet is not drift."""
     table = (fdp.ParityRow("x", (), "not_covered", True, "in flight"),)
     assert _drifted_rows(table, {"x": ("not_a_real_rule_yet",)}, _implemented_rule_ids()) == []
+
+
+def test_fab_danger_severity_fails_verdict_and_exit():
+    """Issue #8938 AC: an unwaived fab-danger-level finding makes DRC FAILED,
+    ``Overall:`` not PASSED, and a non-zero exit."""
+    from kicad_tools.cli.check_cmd import evaluate_check_verdict
+    from kicad_tools.validate.violations import DRCResults, DRCViolation
+
+    pcb = FIX / "tht_to_smd.kicad_pcb"
+    res = DRCResults()
+    res.add(
+        DRCViolation(
+            "physical_copper_gap",
+            "error",
+            "Physical copper gap 0.0800mm < 0.1500mm",
+            nets=("GND",),
+            same_net=True,
+        )
+    )
+    v = evaluate_check_verdict(pcb, res, drc_only=True, manufacturer="jlcpcb")
+    assert v.verdict == "fail"
+    assert v.exit_code != 0

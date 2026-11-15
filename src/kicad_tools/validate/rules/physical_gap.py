@@ -42,13 +42,11 @@ TOLERANCE = 0.001
 # this stays within the 1e-8 mm overlap threshold, so results are unchanged.
 _CONNECTOR_SHAVE_MM = 4e-9
 
-# Fab-view thresholds applied by default under ``--mfr jlcpcb`` (Issue #8843).
-# Source: JLCDFM observations recorded in epic #8838 (2026-11-12) -- observed
-# from gerbers, NOT documented by the fab.  A versioned per-manufacturer /
-# per-copper-weight table is epic #8838 item 2; until it lands these live in
-# this one place.
-FAB_VIEW_GAP_DANGER_MM = 0.10  # gap below this: JLCDFM "danger" -> error
-FAB_VIEW_GAP_WARNING_MM = 0.15  # gap below this: JLCDFM "warning" -> warning
+# Fab-view gap bands are NOT constants anymore (issue #8938): they come from
+# the resolved stackup's ``dfm_thresholds`` entry via :class:`FabGapPolicy`,
+# resolved by the CLI into ``DRCChecker(fab_view_gap_policy=...)``.  The mask
+# bridge below stays a constant: it is the only copper-weight-dependent
+# threshold in this module and only judges a declared 2 oz outer weight.
 FAB_VIEW_MASK_BRIDGE_2OZ_MM = 0.20  # pad-to-pad mask-bridge spacing on 2 oz copper
 FAB_VIEW_MASK_BRIDGE_OZ = 2.0
 
@@ -65,6 +63,103 @@ class CopperSource:
     net: str
     identity: str
     kind: str = ""
+
+
+@dataclass(frozen=True)
+class GapBand:
+    """One population's fab-view severity bands, in millimetres (issue #8938).
+
+    A gap strictly below :attr:`error_edge_mm` is an ``error``; a gap between
+    the error edge and :attr:`detection_edge_mm` is a ``warning``; a gap at or
+    above the detection edge is not a fab finding for this population (the fab
+    does not flag it).
+
+    The two recorded edges are **not** consistently ordered across stackups:
+    for ``4layer_2oz`` ``pad_spacing`` the table records ``warning_mm`` (0.13)
+    *below* ``danger_mm`` (0.15) -- the tighter edge errors, the looser warns,
+    which reproduces the fab's recorded 8 danger / 2 warning counts.  Band
+    logic must never assume ``danger_mm <= warning_mm``.
+    """
+
+    danger_mm: float
+    warning_mm: float | None
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.danger_mm) or self.danger_mm <= 0:
+            raise ValueError(f"danger_mm must be finite and positive, got {self.danger_mm!r}")
+        if self.warning_mm is not None and (
+            not math.isfinite(self.warning_mm) or self.warning_mm <= 0
+        ):
+            raise ValueError(f"warning_mm must be finite and positive, got {self.warning_mm!r}")
+
+    @property
+    def error_edge_mm(self) -> float:
+        """The tighter edge: a gap below it is an error.
+
+        With no recorded ``warning_mm`` this is simply ``danger_mm`` -- an
+        explicitly absent warning band is *not* defaulted to 0 or copied from
+        the danger edge silently; it means the fab's warning tier is unknown
+        and unused here (documented in the stackup's ``PARITY_TABLE`` row).
+        """
+        if self.warning_mm is None:
+            return self.danger_mm
+        return min(self.danger_mm, self.warning_mm)
+
+    @property
+    def detection_edge_mm(self) -> float:
+        """Gaps at or above this edge are not fab findings for this population."""
+        if self.warning_mm is None:
+            return self.danger_mm
+        return max(self.danger_mm, self.warning_mm)
+
+    def severity_for(self, distance_mm: float) -> str | None:
+        """``"error"`` / ``"warning"`` / ``None`` (not a fab finding)."""
+        if distance_mm < self.error_edge_mm:
+            return "error"
+        if distance_mm < self.detection_edge_mm:
+            return "warning"
+        return None
+
+
+@dataclass(frozen=True)
+class FabGapPolicy:
+    """Fab-view bands per copper population, from a ``dfm_thresholds`` entry.
+
+    The JLCDFM categories this rule spans get one band each:
+
+    * ``pad`` -- a pad is on either side of the gap (the fab's ``pad_spacing``);
+    * ``trace`` -- no pad and no zone fill involved (the fab's ``trace_spacing``).
+
+    Zone-fill (pour) gaps are their own population and are **not tiered**:
+    JLCDFM does not judge zone-fill clearance -- on the recorded #8938 board
+    1,516 pour-to-pad gaps at 0.10-0.13 mm went unflagged -- so in fab view
+    they report at ``info`` and never block.
+    """
+
+    trace: GapBand
+    pad: GapBand
+    stackup_key: str | None = None  # provenance: the resolved dfm_thresholds key
+
+    @property
+    def detection_edge_mm(self) -> float:
+        """The widest population edge: the pair-prefilter distance."""
+        return max(self.trace.detection_edge_mm, self.pad.detection_edge_mm)
+
+
+def fab_gap_policy_from_entry(entry) -> FabGapPolicy:
+    """Map a ``DfmEntry`` (manufacturers) to a :class:`FabGapPolicy`.
+
+    ``warning_mm`` is carried as recorded -- ``None`` when the stackup does
+    not record one (:class:`GapBand` documents what that means); the entries'
+    inverted-ordering case is handled by :attr:`GapBand.error_edge_mm`.
+    """
+    trace = entry.thresholds["trace_spacing"]
+    pad = entry.thresholds["pad_spacing"]
+    return FabGapPolicy(
+        trace=GapBand(trace.danger_mm, trace.warning_mm),
+        pad=GapBand(pad.danger_mm, pad.warning_mm),
+        stackup_key=entry.key,
+    )
 
 
 def _arc_geometry(node, origin=(0.0, 0.0)):
@@ -433,6 +528,7 @@ def _collect(pcb):
                         zone.filled_polygon_layer(fill_index),
                         zone.net_name or net_name(zone.net_number),
                         zone.uuid or f"zone:{index}",
+                        "zone",
                     )
                 )
     # Copper track arcs are not represented in PCB.segments; read only these
@@ -509,19 +605,15 @@ def _facing_edge_pairs(tree, edges, normals, distance_mm):
     return list(zip(left[order].tolist(), right[order].tolist(), strict=True))
 
 
-def check_physical_copper_gap(
-    pcb, minimum_mm: float, *, error_below_mm: float | None = None
-) -> DRCResults:
-    """Report open gaps; never reinterpret a copper join as zero clearance.
+def _scan_copper_gaps(pcb, minimum_mm: float, make_finding) -> DRCResults:
+    """Shared slit scan; *make_finding* severity-classifies one measured gap.
 
-    ``error_below_mm`` enables two severity tiers (Issue #8843): a gap below
-    it is an ``error``, a gap in ``[error_below_mm, minimum_mm)`` is a
-    ``warning``; a slit whose two sides are the same net is a ``warning`` at any
-    distance. Every gap is still listed. ``None`` keeps the historical
-    single-tier behaviour (everything ``error``).
-
-    Facing-edge screening excludes local corners. This is a slit detector,
-    not a guarantee about acute notches, etching chemistry or stale zone fills.
+    Called with keyword arguments ``distance`` (mm), ``nets`` / ``ids`` (the
+    owners' net names / identities), ``kinds`` (the owners' source kinds),
+    ``a`` / ``b`` (the closest boundary points), ``layer``, and the sheet-frame
+    origin ``ox`` / ``oy`` for message coordinates.  Returning ``None`` skips
+    the finding (e.g. a gap the fab does not judge); a returned violation
+    replaces any earlier one for the same copper pair when it measures closer.
     """
     import numpy as np
     import shapely
@@ -642,33 +734,126 @@ def check_physical_copper_gap(
                 ]
                 ids = tuple(sorted({identity for side in owners for identity, _ in side}))
                 nets = tuple(sorted({net for side in owners for _, net in side}))
+                kinds = {local[k].kind for side in owner_indices for k in side}
                 key = ids, nets
                 if key in findings and (findings[key].actual_value or 0) <= distance:
                     continue
-                # Tiered mode: [error_below, minimum) is a warning, and a
-                # same-net-only slit is a warning at any distance (issue
-                # #8843 allows this): it is always listed, but it cannot
-                # short two nets, so it must not block the build.
-                tiered_warning = error_below_mm is not None and (
-                    distance >= error_below_mm or len(nets) == 1
-                )
-                findings[key] = DRCViolation(
-                    "physical_copper_gap",
-                    "warning" if tiered_warning else "error",
-                    f"Physical copper gap {distance:.4f}mm < {minimum_mm:.4f}mm; "
-                    f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
-                    f"({b.x + ox:.6f}, {b.y + oy:.6f})",
-                    location=((a.x + b.x) / 2, (a.y + b.y) / 2),
-                    layer=layer,
-                    actual_value=distance,
-                    required_value=minimum_mm,
-                    items=ids,
+                violation = make_finding(
+                    distance=distance,
                     nets=nets,
-                    closest_locations=((a.x, a.y), (b.x, b.y)),
+                    ids=ids,
+                    kinds=kinds,
+                    a=a,
+                    b=b,
+                    layer=layer,
+                    ox=ox,
+                    oy=oy,
                 )
+                if violation is not None:
+                    findings[key] = violation
         for key in sorted(findings):
             results.add(findings[key])
     return results
+
+
+def check_physical_copper_gap(
+    pcb, minimum_mm: float, *, error_below_mm: float | None = None
+) -> DRCResults:
+    """Report open gaps; never reinterpret a copper join as zero clearance.
+
+    ``error_below_mm`` enables two severity tiers (Issue #8843): a gap below
+    it is an ``error``, a gap in ``[error_below_mm, minimum_mm)`` is a
+    ``warning``. Every gap is still listed. ``None`` keeps the historical
+    single-tier behaviour (everything ``error``).
+
+    Issue #8938: a slit whose two sides are the same net is **no longer**
+    downgraded to a warning -- the fab cannot see nets and fails the board on
+    a sub-danger slit regardless. Same-net findings are labelled
+    (``DRCViolation.same_net``) so a project can waive the class deliberately
+    through ``.kct_waivers.json`` instead of never seeing it.
+
+    Facing-edge screening excludes local corners. This is a slit detector,
+    not a guarantee about acute notches, etching chemistry or stale zone fills.
+    """
+
+    def make_finding(*, distance, nets, ids, kinds, a, b, layer, ox, oy):
+        tiered_warning = error_below_mm is not None and distance >= error_below_mm
+        return DRCViolation(
+            "physical_copper_gap",
+            "warning" if tiered_warning else "error",
+            f"Physical copper gap {distance:.4f}mm < {minimum_mm:.4f}mm; "
+            f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
+            f"({b.x + ox:.6f}, {b.y + oy:.6f})",
+            location=((a.x + b.x) / 2, (a.y + b.y) / 2),
+            layer=layer,
+            actual_value=distance,
+            required_value=minimum_mm,
+            items=ids,
+            nets=nets,
+            closest_locations=((a.x, a.y), (b.x, b.y)),
+            same_net=len(nets) == 1,
+        )
+
+    return _scan_copper_gaps(pcb, minimum_mm, make_finding)
+
+
+def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
+    """Fab-view pass under a resolved :class:`FabGapPolicy` (issue #8938).
+
+    Severity follows the fab's recorded bands per copper population:
+
+    * a pad on either side (no zone fill) -> ``policy.pad`` (the fab's
+      ``pad_spacing``);
+    * no pad and no zone fill -> ``policy.trace`` (the fab's ``trace_spacing``);
+    * a zone fill on either side -> ``info``, never tiered: JLCDFM does not
+      judge zone-fill clearance (on the recorded #8938 board 1,516 pour-to-pad
+      gaps at 0.10-0.13 mm went unflagged), so tiering them would turn
+      geometry the fab accepts into build-blocking errors.
+
+    A gap at or above its population's detection edge is not a fab finding
+    and is not listed: with no recorded ``warning_mm`` the warning band does
+    not exist, and gaps the fab does not judge must not be severity-graded
+    from guessed edges.
+    """
+
+    def make_finding(*, distance, nets, ids, kinds, a, b, layer, ox, oy):
+        if "zone" in kinds:
+            return DRCViolation(
+                "physical_copper_gap",
+                "info",
+                f"Zone-fill clearance gap {distance:.4f}mm; closest boundaries "
+                f"({a.x + ox:.6f}, {a.y + oy:.6f}) and ({b.x + ox:.6f}, {b.y + oy:.6f}); "
+                "zone-fill (pour) copper is not judged by JLCDFM (issue #8938)",
+                location=((a.x + b.x) / 2, (a.y + b.y) / 2),
+                layer=layer,
+                actual_value=distance,
+                items=ids,
+                nets=nets,
+                closest_locations=((a.x, a.y), (b.x, b.y)),
+                same_net=len(nets) == 1,
+            )
+        band = policy.pad if "pad" in kinds else policy.trace
+        severity = band.severity_for(distance)
+        if severity is None:
+            return None
+        edge = band.error_edge_mm if severity == "error" else band.detection_edge_mm
+        return DRCViolation(
+            "physical_copper_gap",
+            severity,
+            f"Physical copper gap {distance:.4f}mm < {edge:.4f}mm; "
+            f"closest boundaries ({a.x + ox:.6f}, {a.y + oy:.6f}) and "
+            f"({b.x + ox:.6f}, {b.y + oy:.6f})",
+            location=((a.x + b.x) / 2, (a.y + b.y) / 2),
+            layer=layer,
+            actual_value=distance,
+            required_value=edge,
+            items=ids,
+            nets=nets,
+            closest_locations=((a.x, a.y), (b.x, b.y)),
+            same_net=len(nets) == 1,
+        )
+
+    return _scan_copper_gaps(pcb, policy.detection_edge_mm, make_finding)
 
 
 def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
@@ -689,8 +874,8 @@ def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
     This is also why ``copper_oz`` is the correct weight to judge against even
     though callers pass the *outer* weight (``resolved_copper_outer``, see
     ``cli/check_cmd.py``): :data:`FAB_VIEW_MASK_BRIDGE_2OZ_MM` is the only
-    copper-weight-dependent threshold in this module -- :data:`FAB_VIEW_GAP_DANGER_MM`
-    and :data:`FAB_VIEW_GAP_WARNING_MM` do not scale with weight -- and it now
+    copper-weight-dependent threshold in this module -- the fab-view gap bands
+    (:class:`FabGapPolicy`, issue #8938) do not scale with weight -- and it now
     runs only on layers whose weight *is* the outer weight. A per-weight /
     per-layer-class threshold table (which would need the inner weight,
     already plumbed as ``DRCChecker(copper_oz_inner=...)``) is epic #8838 item 2.

@@ -66,6 +66,13 @@ class DRCViolation:
     required_value: float | None = None
     items: tuple[str, ...] = ()
     nets: tuple[str, ...] = ()
+    # Issue #8938: True when every side of the finding sits on one net (a
+    # same-net slit).  The fab cannot see nets and fails the board on such a
+    # gap regardless, so the gap is still severity-graded -- this flag only
+    # labels the class, so a project can waive it deliberately through
+    # ``.kct_waivers.json`` instead of never seeing it.  ``None`` when the
+    # emitting rule does not classify (``physical_copper_gap`` always does).
+    same_net: bool | None = None
     waived: bool = False
     waiver_reason: str | None = None
     waiver_issue: str | None = None
@@ -138,6 +145,9 @@ class DRCViolation:
             "required_value": self.required_value,
             "items": list(self.items),
             "nets": list(self.nets),
+            # Issue #8938: labels the same-net class without re-deriving it
+            # from ``nets`` (and stays None for rules that do not classify).
+            "same_net": self.same_net,
             # Status distinguishes a waived finding from an active one at a
             # glance for JSON consumers.  Waived findings render as
             # ``"waived"`` regardless of their underlying ``severity`` (Issue
