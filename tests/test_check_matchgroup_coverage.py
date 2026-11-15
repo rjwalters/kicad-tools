@@ -79,11 +79,18 @@ class TestBoard07Allowance:
     def test_fixture_finding_allowance_is_fab_gap_only(self):
         """Issues #5333/#6448 emptied the pair/impedance/skew entries, so the
         identity allowance holds only the #8957 fab-view ``physical_copper_gap``
-        nets (PR #8956): every other blocking finding counts."""
+        nets: the nine pre-PR-#8955 nets plus ``+1V2``, this PR's same-net
+        fab-gap slit (a +1V2 via annulus 0.0585 mm from its own pad, produced
+        by the restored authored zone clearance; measured in CI run
+        43688361347 and documented in the comment block at
+        ``scripts/ci/check_matchgroup_coverage.py`` above
+        ``MATCHGROUP_FIXTURE_ALLOWED_FINDINGS``).  Every other blocking
+        finding counts."""
         mod = _load_helper_module()
         assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS) == {
             ("physical_copper_gap", net)
             for net in (
+                "+1V2",
                 "DQS_N",
                 "DQS_P",
                 "GND",
