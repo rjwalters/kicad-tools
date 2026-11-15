@@ -90,6 +90,55 @@ CHECK_STRAY = "stray"
 _Point = tuple[float, float]
 
 
+def _poly_total(poly: list[_Point]) -> float:
+    """Total arc length of a polyline."""
+    return sum(math.dist(a, b) for a, b in zip(poly, poly[1:], strict=False))
+
+
+def _arc_along(poly: list[_Point], p: _Point) -> float:
+    """Arc length of the polyline point nearest ``p``."""
+    best_t, best_d, walked = 0.0, float("inf"), 0.0
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:], strict=False):
+        dx, dy = x1 - x0, y1 - y0
+        seg2 = dx * dx + dy * dy
+        u = 0.0
+        if seg2 > 1e-18:
+            u = max(0.0, min(1.0, ((p[0] - x0) * dx + (p[1] - y0) * dy) / seg2))
+        d = math.hypot(p[0] - (x0 + u * dx), p[1] - (y0 + u * dy))
+        if d < best_d:
+            best_d, best_t = d, walked + u * math.sqrt(seg2)
+        walked += math.hypot(dx, dy)
+    return best_t
+
+
+def _poly_between(poly: list[_Point], t0: float, t1: float) -> list[_Point]:
+    """The polyline between arc lengths ``t0 <= t1`` (interpolated ends)."""
+    total = _poly_total(poly)
+    t0, t1 = max(0.0, min(total, t0)), max(0.0, min(total, t1))
+    if t1 - t0 <= 1e-9 or len(poly) < 2:
+        return [poly[0], poly[-1]]
+    out = [_point_at_arc_on(poly, t0)]
+    walked = 0.0
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:], strict=False):
+        walked += math.hypot(x1 - x0, y1 - y0)
+        if t0 + 1e-9 < walked < t1 - 1e-9:
+            out.append((x1, y1))
+    out.append(_point_at_arc_on(poly, t1))
+    return out
+
+
+def _point_at_arc_on(poly: list[_Point], t: float) -> _Point:
+    """Interpolate the point at arc length ``t`` along a polyline."""
+    walked = 0.0
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:], strict=False):
+        seg_len = math.hypot(x1 - x0, y1 - y0)
+        if walked + seg_len >= t - 1e-9 and seg_len > 1e-12:
+            frac = max(0.0, min(1.0, (t - walked) / seg_len))
+            return (x0 + frac * (x1 - x0), y0 + frac * (y1 - y0))
+        walked += seg_len
+    return poly[-1]
+
+
 def reinforcement_waived_nets(entries: Iterable[Any]) -> frozenset[str]:
     """Nets whose ampacity waiver cites reinforcement.
 
@@ -472,11 +521,16 @@ class ReinforcementIncompleteRule(DRCRule):
         """True when a placed parallel-copy record covers ``leg`` (Issue #8916).
 
         The record is not taken on trust: the leg must lie on the recorded
-        polyline, on the record's leg layer or copy layer, AND every recorded
-        copy segment must still be on the board (same net, copy layer, same
-        two ends), AND so must the original leg (each piece of the recorded
-        polyline on the record's leg layer). A wire leg, a refused copy, or a
-        copy or original someone deleted is checked as a wire as before.
+        polyline, on the record's leg layer or copy layer, AND the copy layer
+        must carry same-net copper along the span the record promises the
+        copy -- the recorded copy segments' extent, or, when every piece was
+        already on the board and none was recorded (a leg doubled by hand,
+        issue #8951), the whole polyline -- AND so must the original leg
+        (each piece of the recorded polyline on the record's leg layer).
+        Coverage along the length, not just the recorded pieces' endpoints,
+        also bites when an unrecorded piece of the copy goes missing. A wire
+        leg, a refused copy, or a copy or original someone deleted is checked
+        as a wire as before.
         """
         from kicad_tools.pcb.reinforcement_sidecar import is_parallel
 
@@ -491,17 +545,17 @@ class ReinforcementIncompleteRule(DRCRule):
                 ):
                     continue
                 poly = [(p["x"] - self._ox, p["y"] - self._oy) for p in w["polyline"]]
+                copy_layer = w["copy_layer"]
                 recs = [
                     (
                         (r["start"]["x"] - self._ox, r["start"]["y"] - self._oy),
                         (r["end"]["x"] - self._ox, r["end"]["y"] - self._oy),
                     )
-                    for r in w["copy_segments"]
+                    for r in w.get("copy_segments") or []
                 ]
-                copy_layer = w["copy_layer"]
             except (KeyError, TypeError, AttributeError):
                 continue
-            if len(poly) < 2 or not recs:
+            if len(poly) < 2:
                 continue
             if any(self._dist_to_polyline(poly, p) > tol for p in leg.points):
                 continue
@@ -518,15 +572,18 @@ class ReinforcementIncompleteRule(DRCRule):
                     )
                 ]
 
-            board = board_on(copy_layer)
-            copy_present = all(
-                any(
-                    (math.dist(a, sa) < 0.05 and math.dist(b, sb) < 0.05)
-                    or (math.dist(a, sb) < 0.05 and math.dist(b, sa) < 0.05)
-                    for sa, sb in board
-                )
-                for a, b in recs
-            )
+            # Where the copy must cover the polyline: the recorded segments'
+            # extent when some were written this pass -- a copy whose ends
+            # are tied by stitching vias deliberately stops short of the
+            # vertices -- else the whole polyline, the only promise there is
+            # when every piece predates the tool (an empty ``copy_segments``).
+            total = _poly_total(poly)
+            arcs = [_arc_along(poly, q) for rec in recs for q in rec]
+            t0, t1 = (min(arcs), max(arcs)) if arcs else (0.0, total)
+            if t1 - t0 <= 1e-9:
+                t0, t1 = 0.0, total
+            span = _poly_between(poly, t0, t1)
+            copy_present = self._polyline_covered(span, board_on(copy_layer))
             # The original leg it doubles must still be there too: the
             # recorded polyline covered by same-net copper on the record's leg
             # layer along its length. A lone copy whose original was deleted is

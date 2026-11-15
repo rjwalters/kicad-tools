@@ -725,3 +725,77 @@ def test_clear_anchors_api_removes_only_recorded_copies():
     assert [c.vias for c in cleared.copies_removed] == [2]
     assert [(s.start, s.end) for s in _on(pcb, "F.Cu")] == [((20.0, 80.0), (32.0, 80.0))]
     assert math.isclose(len(_stitches(pcb)), 0)
+
+
+class TestRecordlessRerun:
+    """Issue #8951, case 1: without the sidecar a parallel re-run used to see
+    its own earlier stitching vias as obstacles and nudge a fresh set in
+    beside them (7 -> 14 -> 21 vias on a 40 mm leg), leaving copper that
+    ``--clear`` can never remove. An unowned, size-matched, same-net through
+    via lying on the leg inside the copy span is now adopted in place -- the
+    interior-stitch counterpart of what ``end_tie`` already does at the ends
+    -- credited to ``existing_vias`` but recorded nowhere, so ``--clear``
+    still cannot remove it.
+    """
+
+    def test_three_recordless_runs_leave_the_via_count_stable(self):
+        pcb = _two_pad_leg(length=40.0)
+        counts = []
+        result = None
+        for _ in range(3):
+            result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+            counts.append(len(_stitches(pcb)))
+        assert counts == [7, 7, 7]
+        # Runs 2 and 3 placed nothing: they adopted the first run's stitches.
+        assert all(c.stitch_vias == [] for c in result.copies)
+        assert sum(c.existing_vias for c in result.copies) == 7
+
+    def test_adopted_vias_reach_the_record_and_never_clear(self):
+        pcb = _two_pad_leg(length=40.0)
+        reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        records = build_wire_records(result, 0.0, 0.0)
+        assert all(
+            w["stitch_vias"] == [] for w in records if w.get("strategy") == STRATEGY_PARALLEL
+        )
+        before = sorted(v.position for v in pcb.vias)
+        clear_anchors(pcb, NET, sidecar_wires=records, design_rules=_rules())
+        assert sorted(v.position for v in pcb.vias) == before
+
+    def test_size_mismatched_same_net_via_is_still_an_obstacle(self):
+        pcb = _two_pad_leg(length=40.0)
+        pcb.add_via(45.0, 50.0, size=1.2, drill=0.6, net=NET)  # on an interior target
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        assert result.refused_copies == []
+        # Not adopted: this pass still wrote its own stitch beside the via.
+        assert all(c.existing_vias == 0 for c in result.copies)
+        assert len(_stitches(pcb)) == 7
+        assert all(math.dist(v.position, (45.0, 50.0)) > 0.05 for v in _stitches(pcb))
+
+    def test_matching_via_off_the_leg_is_not_adopted(self):
+        size, drill = stitch_via_geometry(_rules())
+        pcb = _two_pad_leg(length=40.0)
+        pcb.add_via(45.0, 55.0, size=size, drill=drill, net=NET)  # 5 mm off the leg
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        assert result.refused_copies == []
+        assert all(c.existing_vias == 0 for c in result.copies)
+        # The seed via plus this pass's own 7 stitches.
+        assert len(_stitches(pcb)) == 8
+
+    def test_wire_strategy_stays_idempotent_recordless(self):
+        pcb = _two_pad_leg(length=40.0)
+        counts = []
+        for _ in range(3):
+            reinforce_net(pcb, NET, strategy="wire", design_rules=_rules())
+            counts.append(len([v for v in pcb.vias if v.net_name == NET]))
+        assert counts == [2, 2, 2]
+
+    def test_cli_recordless_rerun_keeps_the_via_count(self, board):
+        """The CLI repro: reinforce, lose the sidecar, re-run -- same vias."""
+        assert run_pcb_command(_args(board, strategy="parallel")) == 0
+        first = PCB.load(board)
+        n_vias = len(first.vias)
+        sidecar_path(board).unlink()
+        assert run_pcb_command(_args(board, strategy="parallel")) == 0
+        second = PCB.load(board)
+        assert len(second.vias) == n_vias
