@@ -710,3 +710,113 @@ class TestBelowMinWireLengthInteraction:
             specs=[_spec(True)], wires=build_wire_records(result, 0.0, 0.0)
         )
         assert set(_subchecks(rule.check(pcb, _rules()))) == {"a", "b"}
+
+
+class TestFullyPreExistingCopy:
+    """Issue #8951, case 2: a leg doubled by hand before ``reinforce`` ran has
+    every copy piece reused unrecorded, so its record is ``copy_status:
+    placed`` with ``copy_segments: []``. The rule used to skip such records
+    entirely and raise subchecks a/b on a leg ``kct pcb reinforce`` itself
+    reported as placed. The copy is now credited by checking coverage along
+    the recorded polyline on the copy layer -- and, symmetrically, deleting
+    an unrecorded piece of a placed copy stops the credit again.
+    """
+
+    @staticmethod
+    def _hand_doubled(length: float = 40.0):
+        """A leg whose copy-layer twin was drawn by hand, then reinforced.
+
+        The twin mirrors the leg's segment decomposition piece for piece, so
+        ``reinforce`` reuses every piece without recording it.
+        """
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board(length=length)
+        step = length / 4
+        xs = [20.0 + i * step for i in range(5)]
+        for a, b in zip(xs, xs[1:], strict=False):
+            # Same width as the leg's own pieces, so every twin piece is
+            # foreign-matched (same endpoints, same width) and none recorded.
+            pcb.add_trace((a, 50.0), (b, 50.0), width=2.0, layer="B.Cu", net=NET)
+        result = reinforce_net(pcb, NET, current_paths=[_spec(True)], strategy="parallel")
+        wires = build_wire_records(result, 0.0, 0.0)
+        return pcb, wires, result
+
+    def test_record_carries_no_copy_segments(self):
+        _, wires, result = self._hand_doubled()
+        assert result.refused_copies == []
+        placed = [w for w in wires if w.get("copy_status") == "placed"]
+        assert placed and all(not w["copy_segments"] for w in placed)
+
+    def test_hand_doubled_leg_raises_no_a_or_b(self):
+        pcb, wires, _ = self._hand_doubled()
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
+        assert _subchecks(rule.check(pcb, _rules())) == []
+
+    def test_gated_hand_doubled_leg_raises_nothing_either(self):
+        pcb, wires, _ = self._hand_doubled()
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires, waived_nets=(NET,))
+        results = rule.check(pcb, _rules())
+        assert "a" not in _subchecks(results) and "b" not in _subchecks(results)
+
+    def test_deleting_an_unrecorded_twin_piece_raises_a_and_b_again(self):
+        pcb, wires, _ = self._hand_doubled()
+        step = 40.0 / 4
+        dead = [
+            s
+            for s in pcb.segments
+            if s.layer == "B.Cu"
+            and s.net_name == NET
+            and abs(s.start[0] - (20.0 + 2 * step)) < 1e-9
+            and abs(s.end[0] - (20.0 + 3 * step)) < 1e-9
+        ]
+        assert len(dead) == 1
+        pcb.remove_segments(dead)
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
+        # With the twin broken, a stitching via also reads as a layer change,
+        # so ``d`` may join in; a and b raising again is the point here.
+        assert {"a", "b"} <= set(_subchecks(rule.check(pcb, _rules())))
+
+    def test_copy_whose_original_was_deleted_is_a_plain_leg_again(self):
+        pcb, wires, _ = self._hand_doubled()
+        dead = [s for s in pcb.segments if s.layer == "F.Cu" and s.net_name == NET]
+        assert dead
+        pcb.remove_segments(dead)
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
+        assert set(_subchecks(rule.check(pcb, _rules()))) == {"a", "b"}
+
+    def test_copy_coverage_matches_by_layer_and_net_not_width(self):
+        """The coverage check mirrors the leg-layer one: ``board_on`` filters
+        by layer and net, not width -- the judgment call recorded for
+        #8951. A twin drawn at a different width still credits the record."""
+        record = {
+            "net": NET,
+            "layer": "F.Cu",
+            "kind": "run",
+            "leg_start": {"x": 20.0, "y": 50.0},
+            "leg_end": {"x": 60.0, "y": 50.0},
+            "anchors": [],
+            "wire_gauge_awg": 16,
+            "status": "parallel",
+            "strategy": "parallel",
+            "copy_status": "placed",
+            "copy_layer": "B.Cu",
+            "polyline": [{"x": 20.0, "y": 50.0}, {"x": 60.0, "y": 50.0}],
+            "copy_segments": [],
+            "stitch_vias": [],
+        }
+        pcb = _board(length=40.0)
+        pcb.add_trace((20.0, 50.0), (60.0, 50.0), width=3.5, layer="B.Cu", net=NET)
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=[record])
+        assert _subchecks(rule.check(pcb, _rules())) == []
+
+    def test_recorded_copy_is_still_credited_over_its_recorded_extent(self):
+        """A normally recorded copy (this suite's other tests) stays credited."""
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board(length=40.0)
+        result = reinforce_net(pcb, NET, current_paths=[_spec(True)], strategy="parallel")
+        rule = ReinforcementIncompleteRule(
+            specs=[_spec(True)], wires=build_wire_records(result, 0.0, 0.0)
+        )
+        assert _subchecks(rule.check(pcb, _rules())) == []

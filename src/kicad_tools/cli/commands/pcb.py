@@ -1109,6 +1109,7 @@ def _print_reinforce_copies(outcome, origin_x: float, origin_y: float) -> None:
                 if c.existing_segments
                 else ""
             )
+            + (f" [{c.existing_vias} via(s) already present]" if c.existing_vias else "")
         )
     for r in outcome.refused_copies:
         print(
