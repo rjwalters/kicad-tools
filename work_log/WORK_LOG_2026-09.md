@@ -2,6 +2,101 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-15
+
+- **PR #5466**: perf(router): avoid cell-view allocation in zone lookup
+- **Issue #5465** (closed): perf(router): avoid cell-view allocations in zone lookup
+- **PR #5463**: fix(router): negotiate physical copper demand and tapered escapes
+- **PR #5462**: chore: install Squad repository coordination workflows
+- **Issue #5461** (closed): Install Squad repository adapters for cross-agent coordination
+- **PR #5460**: perf(router): hoist per-node pad-exit flags out of the A* neighbor loop
+- **PR #5459**: fix(router): enforce physical board edges for lattice copper
+- **Issue #5458** (closed): fix(router): enforce physical board-edge clearance for lattice class-width copper
+- **PR #5457**: fix(router): honor class clearance across lattice through-vias
+- **PR #5456**: router: reverse the final bounded two-terminal relief probe
+- **Issue #5454** (closed): router: honor net-class clearance across lattice through-via spans
+- **PR #5453**: ci: isolate native zone acceptance from parallel pytest workers
+- **Issue #5452** (closed): ci: prevent native zone acceptance from exhausting the Test container memory limit
+- **PR #5451**: perf(sch): reuse footprint pad counts within bulk assignment
+- **Issue #5450** (closed): router: make lattice negotiation history cover physical escape and unequal-width conflicts
+- **PR #5449**: fix(router): preserve physical Kelvin branch separation in lattice routing
+- **PR #5448**: test(parts): simulate retry waits while checking timing policy
+- **PR #5447**: fix(zones): preserve source constraints before HV keepout refill
+- **Issue #5446** (closed): zones: preserve source project and custom rules through HV keepout output and refill
+- **PR #5445**: perf(router): load public exports on demand
+- **Issue #5444** (closed): router: preserve physical Kelvin branch separation in lattice routing
+- **PR #5443**: fix(router): preserve physical pitches in differential routing
+- **Issue #5442** (closed): copper LVS misses a native-confirmed +1V2 open despite 244 bound pads
+- **PR #5440**: fix(board04): select clearance-safe manufacturing via bonds
+- **Issue #5439** (closed): Board04 off-pad manufacturing via relocation shorts fresh routed copper
+- **PR #5438**: feat(route): bind final board and custom rules in a verifiable receipt
+- **PR #5437**: fix(router): validate tapered goal-via landings at emitted width
+- **Issue #5436** (closed): Route outputs: bind effective board/project/custom-rule bytes in a verifiable receipt
+- **Issue #5434** (closed): router: validate tapered goal-via arrivals at emitted copper width
+- **PR #5433**: perf(validate): load public validation rules on demand
+- **PR #5432**: fix(impedance): require resistor topology for sense exclusions
+- **PR #5431**: perf(schema): index zone descendants once instead of 13 repeated finds
+- **Issue #5429** (closed): perf: lazy-load kicad_tools.validate/validate.rules to stop unrelated DRC-rule imports pulling in the whole router
+- **PR #5428**: perf(cli): defer eager CLI/reasoning imports to cut per-invocation startup cost
+- **PR #5427**: perf(router): incremental clearance-window dilation for trace collision checks
+- **Issue #5426** (closed): impedance.py exclude_current_sense over-broad name match can silently disable diff-pair DRC
+- **PR #5424**: perf(validate): vectorize broad-phase candidate-pair queries
+- **PR #5423**: fix(router): preserve physical identity for repeated footprint references
+- **PR #5422**: docs(board07): complete DQ3 stage-boundary diagnosis
+- **PR #5421**: fix(router): widen interior attachment search for wide pad escapes
+- **PR #5420**: ci: serialize native physical-stitch acceptance
+- **Issue #5418** (closed): Preserve physical terminal identity across repeated or empty footprint references
+- **Issue #5417** (closed): ci: serialize native physical-stitch acceptance to prevent measured cgroup OOM
+- **PR #5416**: fix(export): preserve board rules in manufacturing project archive
+- **Issue #5415** (closed): Fix generic manufacturing archive preservation of custom DRU rules
+- **PR #5414**: docs(router): record fresh softstart pairwise proof
+- **PR #5413**: fix: route valid nets while preserving placement-invalid copper
+- **PR #5411**: fix(router): bound Kelvin contact by native pad and trace width
+- **PR #5409**: fix(router): preserve authored gaps in differential sizing
+- **Issue #5408** (closed): router: preserve authored pair gaps during impedance sizing
+- **PR #5404**: fix(board03): make saved copper native-refill stable
+- **PR #5403**: perf(clearance): prune spatially impossible coupling pairs
+- **PR #5402**: fix(router): preserve physical Kelvin branch isolation
+- **PR #5401**: fix(router): attach wide escape necks inside pad copper
+- **PR #5400**: fix(zones): preserve HV keepout gaps through native refill
+- **Issue #5399** (closed): HV pour keepouts: preserve requested copper gap through native refill (1.593915 mm vs 1.600)
+- **PR #5397**: docs(board07): retain DQ3 and DDR-only diagnostic evidence
+- **PR #5396**: feat(stitch): validate physical power completion before promotion
+- **PR #5395**: perf(router): avoid cell views in diagonal corner checks
+- **PR #5394**: fix(readiness): verify finished releases without replacing recipe contents
+- **Issue #5393** (closed): [Epic #3438] Reproduce and localize the remaining Board07 DQ3 open
+- **PR #5392**: fix(router): audit HV pad copper and align search waiver geometry
+- **Issue #5391** (closed): kct readiness: zone_fill gate is vacuous, and the run degrades recipe-finalised bundles
+- **PR #5390**: perf(router): avoid per-call NumPy allocation in _is_via_blocked hot path
+- **PR #5389**: fix(board07): correct HDMI witness widths with native parity checks
+- **Issue #5388** (closed): [Epic #4410] Make via stitching short-free and complete physical power connections
+- **PR #5387**: docs(board07): decide scope of HDMI witness width correction
+- **PR #5386**: fix(board03): preserve corrected copper and report blocked native parity
+- **PR #5385**: fix(analysis): preserve narrow via contacts with copper fills
+- **PR #5384**: fix(schema): preserve the format default for explicit fill-stroke yes
+- **PR #5383**: feat(router): preserve bounded arc and Bezier outline geometry
+- **Issue #5382** (closed): analysis: verify current-main native parity for stroke-encoded fill fragments
+- **PR #5381**: fix(analysis): resolve fill-stroke encoding by token then file version
+- **Issue #5380** (closed): Board03: repair 44 PTH-hole clearance failures under PR #5152 factory rules
+- **PR #5377**: fix(router): reinstall board-edge keepout across trial resets and worker reconstruction
+- **PR #5376**: feat(router): preserve actual custom-pad copper for placement-excluded nets
+- **Issue #5374** (closed): Preserve board-edge keepouts across trial resets and routing grid reconstruction
+- **PR #5373**: feat(router): preserve bounded circle, arc and Bezier outline geometry
+- **Issue #5372** (closed): Router loader refuses gr_curve Edge.Cuts outlines -- next blocker after #5367's gr_circle fix
+- **Issue #5367** (closed): Router loader refuses circular Edge.Cuts outlines (gr_circle) before any pad is parsed
+- **Issue #5362** (closed): analysis: native R13/R14 VCC open is missed by combined physical-contact analyzers
+- **Issue #5357** (closed): [Parent #4946] Preserve actual custom-pad copper for placement-excluded nets
+- **Issue #5348** (closed): [Parent #4946] Enable default partial routing around invalid placement across all CLI modes
+- **Issue #5204** (closed): board-05: real silk-to-pad and inner PTH-hole clearance violations from PR #5152's new factory rules
+- **Issue #5201** (closed): Router via-in-pad placement/repair is not process-eligibility aware (regresses board02 at jlcpcb-tier1)
+- **PR #5189**: feat(manufacturing): model via-in-pad fabrication process eligibility
+- **PR #5152**: fix(drc): enforce object-specific factory clearances
+- **Issue #5126** (closed): board07: regenerate HDMI/TMDS copper to match corrected 0.225mm sidecar width
+- **Issue #5009** (closed): manufacturing: via-in-pad capability bypasses actual process eligibility and ordering requirements
+- **Issue #4946** (closed): router: --allow-offboard is whole-board, not scoped — one off-board footprint vetoes zero-touch routing of an otherwise-clean multi-hundred-net board (BeagleConnect Freedom)
+- **Issue #4409** (closed): router/diffpair: coupled router must actually couple pairs (board 06: 0/9 couple, all budget-exit)
+- **Issue #3803** (closed): Router/DRC fidelity: kct reports routing PASS while native KiCad DRC finds 400+ violations (incl. shorts)
+
 ### 2026-09-14
 
 - **PR #5378**: fix(router): distinguish unknown from verified-empty via-in-pad hole census
