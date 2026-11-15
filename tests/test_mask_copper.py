@@ -339,6 +339,41 @@ def test_sidecar_and_plot_bindings_invalidate_escape_intent(field):
     assert result.measurements[0].disposition == "violation"
 
 
+def test_rule_context_allowlist_admits_full_kct_vocabulary_and_rejects_plot_shaping():
+    """Pin the hoisted native rule-context allowlist without a native interpreter.
+
+    The full constraint vocabulary kct emits anywhere -- the managed
+    ``.kicad_dru`` block plus every shipped tier file (#8948) -- must be
+    admitted, so a board carrying only kct's own rules never reports
+    ``Native object rule context unsupported``. The plot-shaping zone-fill
+    constraints must stay outside; a name newly emitted by the generator
+    turns the first assertion red until its geometry-neutrality is argued and
+    parity-tested, which is the friction the allowlist exists to enforce.
+    """
+    from kicad_tools.validate.mask_copper_geometry import SAFE_RULE_CONSTRAINTS
+
+    emitted_by_kct = {
+        "clearance",
+        "edge_clearance",
+        "hole_clearance",
+        "hole_size",
+        "via_diameter",
+        "annular_width",
+        "track_width",
+        "silk_clearance",
+        "physical_hole_clearance",
+        "text_thickness",
+        "text_height",
+    }
+    assert emitted_by_kct <= SAFE_RULE_CONSTRAINTS
+    assert not SAFE_RULE_CONSTRAINTS & {
+        "zone_connection",
+        "thermal_relief_gap",
+        "thermal_spoke_width",
+        "min_resolved_spokes",
+    }
+
+
 @pytest.mark.parametrize("change", ["missing", "coordinate", "layer", "duplicate"])
 def test_native_worker_data_validation_is_fail_visible(change):
     import json
