@@ -2928,8 +2928,9 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_prune.add_argument(
         "--region",
         metavar="x1,y1,x2,y2",
-        help="Only apply a net's plan when every edit lies inside this box (mm); "
-        "plans straddling it are skipped and reported as region_skipped",
+        help="Only apply a net's plan when every edit lies inside this box "
+        "(board-relative mm); plans straddling it are skipped and reported as "
+        "region_skipped",
     )
     pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
     pcb_prune.add_argument(
