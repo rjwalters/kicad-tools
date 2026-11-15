@@ -23,44 +23,34 @@ Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a h
 
 `loom:important`; taken before unlabelled work.
 
-_None._
+- **#8858**: Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849)
+- **#8925**: tht_smd_spacing does not pair a plated hole against an exposed via annulus (JLCDFM counts one)
+- **#8931**: Bump fab DFM parity TABLE_VERSION and document the mask-bridge outer-layer scope in the user guide
 
 ## Ready
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#8844**: Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
 - **#8840**: Sharp trace corner and missing plated through-hole rules; fiducial parity check
-- **#8844**: Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width
-- **#8912**: reinforcement_incomplete [no_wire] location has the board origin added twice
-- **#8914**: mask_to_copper and tht_smd_spacing report fewer findings than JLCDFM on the same board
-- **#8915**: pcb reinforce: default minimum buttress-wire length of 15 mm (--min-wire-length)
-- **#8917**: current-paths-audit: report each resolved path's minimum copper width
-- **#8919**: Router emits two-segment acute fold-backs that sharp_trace_corner now gates
-- **#8924**: coverage.mask_to_copper reports "checked" for an assessment whose coverage is incomplete
+- **#8932**: Pin the same-net track-in-mask-opening case mask_to_copper is asked about most
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#8854**: feat: two-tier silk-to-pad bands and silk_hole_overlap rule
-- **#8923**: feat: default 15 mm minimum buttress-wire length in pcb reinforce ends mode
-- **#8927**: fix: repair acute two-segment trace fold-backs in router cleanup
-- **#8929**: fix: report coverage.mask_to_copper unknown for an incomplete assessment
+- **#8934**: test: pin same-net in-opening conductor as a mask_to_copper error
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#8623**: chore(deps-dev): bump @astrojs/check from 0.9.11 to 0.9.12 in /site
-- **#8920**: fix: emit reinforcement [no_wire]/[skipped] locations board-relative
-- **#8922**: feat: report each resolved current path's minimum copper width
-- **#8926**: fix(check): judge anchor-sized vias in tht_smd_spacing; report mask_to_copper incomplete coverage
 
 ## Proposed
 
@@ -81,12 +71,8 @@ Issues carrying `loom:curated`.
 - **#8844**: Silkscreen DFM parity: silk-to-pad, silk-to-hole, silk line width *(curated)*
 - **#8858**: Verify default-on mask_to_copper on native KiCad 10.0.5 and baseline 543/670 board findings (PR #8849) *(curated)*
 - **#8900**: CI red on main: board 03 gates fail on default-on mask_to_copper (334 errors) *(curated)*
-- **#8912**: reinforcement_incomplete [no_wire] location has the board origin added twice *(curated)*
-- **#8914**: mask_to_copper and tht_smd_spacing report fewer findings than JLCDFM on the same board *(curated)*
-- **#8915**: pcb reinforce: default minimum buttress-wire length of 15 mm (--min-wire-length) *(curated)*
-- **#8917**: current-paths-audit: report each resolved path's minimum copper width *(curated)*
-- **#8919**: Router emits two-segment acute fold-backs that sharp_trace_corner now gates *(curated)*
-- **#8924**: coverage.mask_to_copper reports "checked" for an assessment whose coverage is incomplete *(curated)*
+- **#8916**: pcb reinforce: parallel-copper strategy for short high-current links (--strategy wire|parallel|auto) *(curated)*
+- **#8932**: Pin the same-net track-in-mask-opening case mask_to_copper is asked about most *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -105,12 +91,12 @@ _None._
 |------|-------|
 | Operator merge-risk holds | 1 |
 | Very important | 1 |
-| Important | 0 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 8 |
-| PRs awaiting review | 4 |
-| Approved PRs awaiting merge | 4 |
-| Curated | 21 |
+| Important | 3 |
+| Ready (`loom:issue`) | 1 |
+| In Progress (`loom:building`) | 2 |
+| PRs awaiting review | 1 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 17 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 4 |
 <!-- guide:plan-body:end -->

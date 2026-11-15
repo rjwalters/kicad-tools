@@ -37,6 +37,9 @@ from .rules.zone_fill import IsolatedCopperRule, ZoneFillRule
 from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
+    from .rules.physical_gap import FabGapPolicy
+
+if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
     from pathlib import Path
 
@@ -145,6 +148,7 @@ class DRCChecker:
         physical_copper_gap_mm: float | None = None,
         fab_view: bool = False,
         fab_view_copper_oz: float | None = None,
+        fab_view_gap_policy: FabGapPolicy | None = None,
         authored_min_clearance_mm: float | None = None,
         require_routing_policy: bool = False,
         routing_policy_defer_pair_vias: bool = True,
@@ -328,9 +332,13 @@ class DRCChecker:
         # Issue #8843: net-agnostic "fab view" (JLCDFM-style) passes, enabled
         # by the CLI under ``--mfr jlcpcb``.  ``fab_view_copper_oz`` is the
         # *declared* outer copper weight (None = unknown -> mask-bridge check
-        # fails closed rather than assuming 1 oz).
+        # fails closed rather than assuming 1 oz).  ``fab_view_gap_policy``
+        # (issue #8938) carries the resolved stackup's ``dfm_thresholds`` gap
+        # bands; ``None`` under ``fab_view`` fails closed to an ``info``
+        # ``physical_copper_gap_incomplete`` finding rather than guessing.
         self.fab_view = fab_view
         self.fab_view_copper_oz = fab_view_copper_oz
+        self.fab_view_gap_policy = fab_view_gap_policy
         self.emit_measurements = emit_measurements
         # The skew / continuity rules surface their measured info findings
         # when either the user asked for --verbose OR a caller wants the
@@ -837,7 +845,14 @@ class DRCChecker:
         return results
 
     def check_physical_copper_gap(self) -> DRCResults:
-        """Opt-in net-independent slit preflight on unioned copper geometry."""
+        """Opt-in net-independent slit preflight on unioned copper geometry.
+
+        Issue #8938: under the fab view the severity bands come from the
+        resolved stackup's ``dfm_thresholds`` entry (the CLI resolves it into
+        ``fab_view_gap_policy``); with no resolved policy the pass fails
+        closed to an ``info`` ``physical_copper_gap_incomplete`` finding
+        instead of severity-grading gaps from assumed edges.
+        """
         from .rules import physical_gap
 
         if self.physical_copper_gap_mm is not None:
@@ -847,13 +862,26 @@ class DRCChecker:
             )
         if not self.fab_view:
             return DRCResults()
-        # Issue #8843: JLCDFM-style default. gap < 0.10mm error, [0.10, 0.15) warning,
-        # plus the 2 oz pad mask-bridge check (fails closed on unknown weight).
-        results = physical_gap.check_physical_copper_gap(
-            self.pcb,
-            physical_gap.FAB_VIEW_GAP_WARNING_MM,
-            error_below_mm=physical_gap.FAB_VIEW_GAP_DANGER_MM,
-        )
+        results = DRCResults()
+        if self.fab_view_gap_policy is None:
+            results.add(
+                DRCViolation(
+                    "physical_copper_gap_incomplete",
+                    # Info, mirroring the mask-bridge fail-closed shape: a
+                    # stackup with no DFM entry already drives the verdict to
+                    # incomplete upstream (_apply_dfm_table), so this must not
+                    # invent a blocking finding from an unknown band.
+                    "info",
+                    "Fab-view copper gap check incomplete: no DFM threshold "
+                    "entry for this stackup (gap severity bands unknown)",
+                )
+            )
+        else:
+            results.merge(
+                physical_gap.check_physical_copper_gap_fab_view(self.pcb, self.fab_view_gap_policy)
+            )
+        # Issue #8843: plus the 2 oz pad mask-bridge check (fails closed on
+        # unknown weight), independent of the gap bands.
         results.merge(physical_gap.check_pad_mask_bridge(self.pcb, self.fab_view_copper_oz))
         return self._absolutize(results)
 

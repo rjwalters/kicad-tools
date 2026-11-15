@@ -35,7 +35,10 @@ from typing import Literal
 Status = Literal["covered", "partial", "not_covered"]
 
 #: Version of the table below; bump on any row change.
-TABLE_VERSION = 4
+#: 6: #8938 -- fab-view gap bands come from the resolved stackup's
+#:    ``dfm_thresholds`` entry; same-net sub-danger pad gaps are errors;
+#:    zone-fill (pour) gaps report at info (not fab-judged).
+TABLE_VERSION = 6
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -76,7 +79,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "net-aware `clearance` always; the net-agnostic fab-view pass "
         "(`physical_copper_gap`, #8843) adds same-net copper but runs only when the "
         "effective --mfr is exactly `jlcpcb` -- a `jlcpcb-tier*` profile gets "
-        "`clearance` alone. Observed 2 danger (0.08 mm).",
+        "`clearance` alone. Observed 2 danger (0.08 mm). Since #8938 the pass "
+        "judges gaps with no pad and no zone fill on either side at "
+        "trace_spacing's recorded bands from the resolved stackup's "
+        "dfm_thresholds entry (previously hardcoded 0.10/0.15 mm constants): "
+        "below the danger edge is an error; with no recorded warning_mm there "
+        "is no warning band, and gaps at or above the danger edge are not "
+        "reported (the fab recorded 0 danger / 0 warning for trace_spacing on "
+        "the 4-layer 1 oz #8938 board).",
     ),
     ParityRow(
         "pad_spacing",
@@ -86,7 +96,17 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "as `trace_spacing`, plus the 2 oz pad mask-bridge check inside "
         "`physical_copper_gap`; that check runs on outer layers only (#8913) and "
         "judges a declared 2 oz outer weight only, otherwise reporting "
-        "`physical_copper_gap_incomplete` at info. Observed 8 danger.",
+        "`physical_copper_gap_incomplete` at info. Observed 8 danger. Since "
+        "#8938: gaps with a pad on either side (no zone fill) are judged at "
+        "pad_spacing's recorded bands, and a same-net gap below the danger "
+        "edge is an ERROR -- the fab cannot see nets and flags it regardless "
+        "(the 4-layer 1 oz board's 6 danger are same-net via/track at "
+        "0.065-0.099 mm from a pad edge); the finding is labelled `same_net` "
+        "so the class can be waived deliberately. Zone-fill (pour) gaps are "
+        "kct's own advisory only and report at info, not tiered: JLCDFM does "
+        "not judge pour clearance -- 1,516 pour-to-pad gaps at 0.10-0.13 mm "
+        "went unflagged on the #8938 board -- so kct's warning count for this "
+        "category exceeds the fab's by that population by design.",
     ),
     ParityRow(
         "solder_mask_opening_exposing_trace",
@@ -111,9 +131,12 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "`tht_smd_spacing` (#8843) judges plated through-hole component pads plus, "
         "since #8914, vias whose drill is at least 1.0 mm (the fab classes a hole "
         "by size: the three top-side dangers kct missed on the #8914 board were all "
-        "1.3-1.42 mm wire-anchor vias). Still skipped: same-footprint pad pairs, "
-        "sub-1.0 mm fan-out vias, and the fab's via-to-via pairing (its `smd` side "
-        "also counts a small exposed via pad: #8914 item 5, tracked in #8925). A "
+        "1.3-1.42 mm wire-anchor vias). Since #8925 an anchor via is also "
+        "judged against any exposed (untented) via annulus -- the fab's `smd` side "
+        "counts a small exposed via pad (#8914 item 5); THT component pads are not "
+        "paired with via annuli, and tented annuli are skipped (the fab's exact "
+        "tenting test is unverified). Still skipped: same-footprint pad pairs and "
+        "sub-1.0 mm fan-out vias as the hole side. A "
         "pad shape the rule "
         "cannot measure now reports `tht_smd_spacing_incomplete` at info instead of "
         "vanishing. Fab-view gated -- runs only when the effective --mfr is exactly "
