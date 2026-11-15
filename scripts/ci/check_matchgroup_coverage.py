@@ -644,6 +644,13 @@ def count_errors_via_kct_check(
 # fails the gate; a net whose slits the router stops leaving goes stale and
 # forces its entry out.  The router fix is tracked in #8957; delete entries
 # there as they go stale.
+# Issue #8975: the recipe repair pass now keeps its offset vias out of the
+# same-net slit band (#8957's predicate in ``_via_ok``), which drained the
+# recipe's own d0.25/s0.45 population to zero (93 -> 0 measured on the
+# first post-fix regen; 43 remain, route-side d0.3/s0.6 and pad-vs-trace
+# populations unchanged).  Every identity below still occurs (GND's count
+# dropped 118 -> 25 but its entry stays load-bearing -- allowances are
+# by net, not by producer), so no entry goes stale here.
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "DQS_N"): 8957,
     ("physical_copper_gap", "DQS_P"): 8957,
