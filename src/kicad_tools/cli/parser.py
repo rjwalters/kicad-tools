@@ -1086,6 +1086,22 @@ def _add_check_parser(subparsers) -> None:
             "falls back to jlcpcb. An explicit --mfr always wins."
         ),
     )
+    check_parser.add_argument(
+        "--fab-dfm-result",
+        dest="fab_dfm_result",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a recorded fab DFM tool result (JSON in the shape of "
+            "tests/fixtures/fab_dfm_parity/jlcdfm_*.json, with a 'counts' "
+            "object). Given one, the Fab DFM parity stanza and the "
+            "fab_dfm_parity JSON section print kct's per-category "
+            "error/warning counts beside the recorded fab danger/warning "
+            "counts, and visibly mark categories where the fab reports "
+            "danger but kct reports zero errors (issue #8940). "
+            "JLCPCB-family --mfr only; malformed input is an error."
+        ),
+    )
     check_parser.add_argument("--layers", "-l", type=int, default=2, help="Number of layers")
     # Issue #5810: shared definition with check_cmd.py -- a raw string with a
     # None default, so the keyed form (outer=2,inner=0.5) parses and an

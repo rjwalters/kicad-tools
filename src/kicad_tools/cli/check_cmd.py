@@ -30,7 +30,7 @@ import argparse
 import json
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -516,11 +516,15 @@ def _maybe_emit_via_in_pad_process_advisory(violations: Sequence) -> None:
         )
 
 
-def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
+def _emit_drift_banner(pcb_path: Path, schematic: str | None):
     """Print the advisory schematic/PCB drift banner (non-blocking).
 
     No-op when no schematic can be resolved or the PCB is in sync.  This is
     advisory only and never affects the caller's exit code (issue #3154).
+
+    Returns the ``SyncAnalysis`` the banner was built from, or ``None`` when
+    no schematic could be resolved or the analysis failed, so ``main()`` can
+    record the removed-pad scan's coverage state (Issue #8942).
 
     The banner is routed to stderr so it does not pollute the stdout JSON
     body produced by ``--format json`` consumers (the CI gate at
@@ -533,10 +537,47 @@ def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
 
     analysis, _resolved = analyze_drift(pcb_path, schematic)
     if analysis is None:
-        return
+        return None
     banner = format_drift_banner(analysis, pcb_path)
     if banner:
         print(banner, file=sys.stderr)
+    return analysis
+
+
+def _removed_pad_scan_coverage(coverage: dict, analysis) -> None:
+    """Record the removed-pad scan's coverage state (Issue #8942).
+
+    The scan rides the advisory drift analysis (``_emit_drift_banner``), so
+    its coverage is recorded here rather than as a dispatcher category: it
+    is not selectable with ``--only``/``--skip`` and emits no findings of
+    its own (``CHECK_CATEGORIES`` must not gain it).
+
+    Four states, so a blocking ``unknown`` cannot fire spuriously: no
+    schematic resolvable -> ``skipped`` (a baseline board checked outside
+    its project must never block); schematic resolved but no
+    ``update_footprint`` swaps -> ``skipped`` (nothing to scan); swaps
+    present and every replacement resolved -> ``checked``; swaps present
+    and any replacement unresolvable (or the scratch board unusable) ->
+    ``unknown``, which ``kct readiness`` turns into a named blocker
+    ("unknown is not pass", Issue #5946) while ``kct check``'s exit code
+    stays advisory (issue #3154).
+    """
+    from kicad_tools.validate import coverage as cov
+
+    if analysis is None:
+        coverage["removed_pad_scan"] = cov.skipped("removed_pad_scan", "no_schematic")
+        return
+    swaps = [a for m in analysis.matches for a in m.actions if a.get("type") == "update_footprint"]
+    if not swaps:
+        coverage["removed_pad_scan"] = cov.skipped("removed_pad_scan", "no_footprint_swaps")
+        return
+    if analysis.scan_gaps:
+        detail = "; ".join(f"{g['reference']}: {g['reason']}" for g in analysis.scan_gaps)
+        coverage["removed_pad_scan"] = cov.unknown(
+            "removed_pad_scan", f"unresolvable_replacement ({detail})"
+        )
+        return
+    coverage["removed_pad_scan"] = cov.checked("removed_pad_scan")
 
 
 def run_netlist_sync_gate(
@@ -1355,6 +1396,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Explicit process policy, source-bound escape intent and native runtime JSON (kct.mask-copper-request.v1); engages mask_to_copper",
     )
     parser.add_argument(
+        "--fab-dfm-result",
+        dest="fab_dfm_result",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a recorded fab DFM tool result (JSON with a 'counts' object, "
+            "shape of tests/fixtures/fab_dfm_parity/jlcdfm_*.json). Given one, the "
+            "Fab DFM parity stanza and the fab_dfm_parity JSON section print kct's "
+            "per-category error/warning counts beside the recorded fab "
+            "danger/warning counts and mark fab-danger/kct-0-error categories "
+            "(issue #8940). JLCPCB-family --mfr only; malformed input is an error."
+        ),
+    )
+    parser.add_argument(
         "--physical-copper-gap",
         type=float,
         default=None,
@@ -1991,7 +2046,9 @@ def main(argv: list[str] | None = None) -> int:
     # passed via --schematic) and the component sets have drifted, print a
     # one-line, non-blocking warning before running DRC.  Never affects the
     # exit code on the default run -- the hard gate lives behind --netlist-sync.
-    _emit_drift_banner(pcb_path, getattr(args, "schematic", None))
+    # The analysis is kept for the removed-pad scan's coverage entry (Issue
+    # #8942), recorded on the coverage dict below.
+    drift_analysis = _emit_drift_banner(pcb_path, getattr(args, "schematic", None))
 
     # Issue #3920: resolve the effective manufacturer profile.  A routed
     # ``.kicad_pcb`` carries no embedded fab-tier hint, so bare ``kct check``
@@ -2422,6 +2479,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: invalid mask-to-copper request: {exc}", file=sys.stderr)
             return 1
 
+    # Issue #8940: an explicitly supplied recorded fab DFM result drives the
+    # kct-vs-fab comparison in the Fab DFM parity stanza/JSON.  Malformed or
+    # unreadable input is a clear tool-level error, never a silent fall back
+    # to the uncompared stanza.
+    fab_result_counts = None
+    if getattr(args, "fab_dfm_result", None):
+        from kicad_tools.validate.fab_dfm_parity import RecordedResultError, load_recorded_result
+
+        try:
+            fab_result_counts = load_recorded_result(args.fab_dfm_result)
+        except RecordedResultError as exc:
+            print(f"Error: --fab-dfm-result: {exc}", file=sys.stderr)
+            return 1
+
     if (
         mask_copper_request is None
         and getattr(args, "mfr", None)
@@ -2618,6 +2689,10 @@ def main(argv: list[str] | None = None) -> int:
         drc_only=getattr(args, "drc_only", False),
         opt_in={"model_coverage"} if getattr(args, "models_3d", False) else frozenset(),
     )
+
+    # Issue #8942: the removed-pad scan ran inside the advisory drift
+    # analysis above; record what it could evaluate ("unknown is not pass").
+    _removed_pad_scan_coverage(coverage, drift_analysis)
 
     # Issue #5946: bind every finding to a hash of its local evidence (its
     # geometry, the footprints it names and the membership of its nets).
@@ -2880,6 +2955,7 @@ def main(argv: list[str] | None = None) -> int:
         mask_copper_default=mask_copper_default_applied,
         dfm_incomplete=dfm_incomplete,
         manufacturer=args.mfr,
+        recorded_fab_counts=fab_result_counts,
     )
     fab_dfm_parity = (
         check_verdict.fab_dfm_parity.to_dict() if check_verdict.fab_dfm_parity else None
@@ -3027,6 +3103,7 @@ def evaluate_check_verdict(
     mask_copper_default: bool = False,
     dfm_incomplete: bool = False,
     manufacturer: str | None = None,
+    recorded_fab_counts: Mapping[str, Mapping[str, int]] | None = None,
 ) -> CheckVerdict:
     """Turn DRC results into ``kct check``'s verdict + exit code (Issue #7260).
 
@@ -3056,6 +3133,11 @@ def evaluate_check_verdict(
         manufacturer: Manufacturer id; for the JLCPCB family a danger-capable
             ``not_covered`` fab DFM parity row (Issue #8845) makes an otherwise
             passing verdict ``incomplete``.
+        recorded_fab_counts: Recorded fab DFM result ``counts`` (Issue #8940;
+            ``--fab-dfm-result``).  When given, the parity report carries the
+            per-category kct-vs-fab count comparison (findings are attributed
+            by each row's ``count_rule_ids`` using the same ``is_error`` /
+            ``is_warning`` predicates as *error_count* / *warning_count*).
     """
     counted = list(results.violations) if violations is None else list(violations)
     error_count = sum(1 for v in counted if v.is_error)
@@ -3106,7 +3188,7 @@ def evaluate_check_verdict(
     )
     from kicad_tools.validate.fab_dfm_parity import evaluate_parity
 
-    parity = evaluate_parity(manufacturer)
+    parity = evaluate_parity(manufacturer, findings=counted, recorded_counts=recorded_fab_counts)
     if (dfm_incomplete or (parity is not None and parity.incomplete)) and verdict == "pass":
         from ._gate import gate_exit_code
 

@@ -535,3 +535,78 @@ class TestRuleCategoryTaxonomy:
             assert DRCChecker.category_for_rule(rule_id) == DRCChecker.CATEGORY_ADVISORY
             # ... but NOT advisory for GATING (unchanged behavior).
             assert DRCChecker.is_advisory_rule(rule_id) is False
+
+
+class TestRemovedPadScanCoverage:
+    """Issue #8942: coverage states for the removed-pad scan.
+
+    The scan rides the advisory drift analysis, so its coverage is recorded
+    by ``check_cmd._removed_pad_scan_coverage`` rather than the dispatcher
+    (and must never land in ``CHECK_CATEGORIES`` -- see
+    ``test_categories_list_equals_dispatcher_keys`` above).
+    """
+
+    @staticmethod
+    def _analysis(swaps: list[dict], gaps: list[dict]):
+        from kicad_tools.sync.reconciler import SyncAnalysis, SyncMatch
+
+        matches = [SyncMatch("R1", "R1", "high", "exact", actions=tuple(swaps))] if swaps else []
+        return SyncAnalysis(matches=matches, scan_gaps=gaps)
+
+    @staticmethod
+    def _swap() -> dict:
+        return {
+            "type": "update_footprint",
+            "reference": "R1",
+            "old_value": "OldLib:OldFP",
+            "new_value": "scanlib:ProjFP",
+        }
+
+    def test_no_schematic_is_skipped(self) -> None:
+        coverage: dict = {}
+        check_cmd._removed_pad_scan_coverage(coverage, None)
+        entry = coverage["removed_pad_scan"]
+        assert entry.status == "skipped:no_schematic"
+        assert not entry.is_blocking_unknown
+
+    def test_no_swaps_is_skipped(self) -> None:
+        coverage: dict = {}
+        check_cmd._removed_pad_scan_coverage(coverage, self._analysis([], []))
+        assert coverage["removed_pad_scan"].status == "skipped:no_footprint_swaps"
+
+    def test_resolved_swaps_are_checked_and_blocking(self) -> None:
+        coverage: dict = {}
+        check_cmd._removed_pad_scan_coverage(coverage, self._analysis([self._swap()], []))
+        entry = coverage["removed_pad_scan"]
+        assert entry.status == "checked"
+        assert entry.blocking  # in BLOCKING_CATEGORIES
+
+    def test_unresolvable_replacement_is_blocking_unknown(self) -> None:
+        from kicad_tools.validate.coverage import blocking_unknowns, coverage_to_dict
+
+        coverage: dict = {}
+        analysis = self._analysis(
+            [self._swap()], [{"reference": "R1", "reason": "Footprint 'ProjFP' not found"}]
+        )
+        check_cmd._removed_pad_scan_coverage(coverage, analysis)
+        entry = coverage["removed_pad_scan"]
+        assert entry.state == "unknown"
+        assert entry.blocking
+        assert entry.reason == ("unresolvable_replacement (R1: Footprint 'ProjFP' not found)")
+        assert blocking_unknowns(coverage_to_dict(coverage)) == ["removed_pad_scan"]
+
+    def test_unknown_drives_readiness_blocker(self) -> None:
+        """``kct readiness`` names the category via _blocking_unknown_coverage."""
+        from kicad_tools.cli.readiness_cmd import _blocking_unknown_coverage
+        from kicad_tools.validate.coverage import coverage_to_dict
+
+        coverage: dict = {}
+        analysis = self._analysis(
+            [self._swap()], [{"reference": "*", "reason": "scratch board load failed: bad sexp"}]
+        )
+        check_cmd._removed_pad_scan_coverage(coverage, analysis)
+        report = {"coverage": coverage_to_dict(coverage)}
+        named = _blocking_unknown_coverage(report)
+        assert named == [
+            "removed_pad_scan (unresolvable_replacement (*: scratch board load failed: bad sexp))"
+        ]
