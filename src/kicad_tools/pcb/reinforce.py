@@ -3014,17 +3014,58 @@ def _reinforce_ends(
         while n > 0 and (hi - lo) / (n + 1) < stitch_floor - 1e-9:
             n -= 1
         pitch = (hi - lo) / (n + 1)
+
+        def adoptable_arc(via) -> float | None:
+            """Arc of ``via`` when it may stand in for an interior stitch.
+
+            An unowned same-net through via of the stitching geometry lying
+            on the leg inside the span is an earlier pass's stitch (a
+            record-less re-run, issue #8951): adopting it keeps the re-run
+            idempotent the way ``end_tie`` already keeps the ends so. Any
+            other via -- wrong net, size or drill, off the leg, recorded as
+            someone else's -- is not adopted and stays an obstacle.
+            """
+            if id(via) in owned_vias or via.drill <= 0:
+                return None
+            if via.net_number != target_net_number or via.via_type not in (None, "through"):
+                return None
+            if (
+                abs(via.size - via_size) > _ANCHOR_SIZE_TOL_MM
+                or abs(via.drill - via_drill) > _ANCHOR_SIZE_TOL_MM
+            ):
+                return None
+            t = _arc_of_point(points, cum, via.position)
+            if not lo - 1e-9 <= t <= hi + 1e-9:
+                return None
+            if math.dist(_point_at_arc(points, cum, t), via.position) > _SIDECAR_ANCHOR_TOL_MM:
+                return None
+            return t
+
+        adoptable = sorted(
+            (t, via.position) for via in pcb.vias if (t := adoptable_arc(via)) is not None
+        )
+        #: Stitching positions this pass adopted, not placed: kept out of
+        #: ``planned`` (which becomes the record's ``stitch_vias``), so
+        #: ``--clear`` still cannot remove them (#8945's contract).
+        adopted: list[tuple[float, float]] = []
         for k in range(1, n + 1):
             target = lo + k * pitch
+            take = next(
+                (i for i, (tv, _) in enumerate(adoptable) if abs(tv - target) <= pitch / 2.0),
+                None,
+            )
+            if take is not None:
+                adopted.append(adoptable.pop(take)[1])
+                continue
             first = None
             chosen_p = None
             for t in _nudge_arc_candidates(target, total, pitch):
                 if not lo + stitch_floor - 1e-9 <= t <= hi - stitch_floor + 1e-9:
                     continue
                 p = _point_at_arc(points, cum, t)
-                if _too_close(p, planned, stitch_floor):
+                if _too_close(p, planned + adopted, stitch_floor):
                     continue
-                v = stitch_violation(p, planned)
+                v = stitch_violation(p, planned + adopted)
                 if v is None:
                     chosen_p = p
                     break
@@ -3074,6 +3115,7 @@ def _reinforce_ends(
             via_size_mm=via_size,
             via_drill_mm=via_drill,
             existing_segments=len(foreign),
+            existing_vias=len(adopted),
         )
         for a, b, width in copy.segments:
             if dry_run:
