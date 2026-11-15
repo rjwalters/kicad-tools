@@ -61,9 +61,9 @@ def _via(x, y, net: int = 1) -> str:
     )
 
 
-def _origin_board(tmp_path: Path, copper: str) -> Path:
-    """A board whose Edge.Cuts rect puts ``board_origin`` at ``_ORIGIN``."""
-    ox, oy = _ORIGIN
+def _origin_board(tmp_path: Path, copper: str, origin: tuple[float, float] = _ORIGIN) -> Path:
+    """A board whose Edge.Cuts rect puts ``board_origin`` at ``origin``."""
+    ox, oy = origin
     body = _HEADER
     body += (
         f"  (gr_rect (start {ox} {oy}) (end {ox + 160} {oy + 160}) "
@@ -71,11 +71,11 @@ def _origin_board(tmp_path: Path, copper: str) -> Path:
         '(uuid "edge-1"))\n'
     )
     body += copper + ")\n"
-    p = tmp_path / "origin.kicad_pcb"
+    p = tmp_path / f"origin-{ox}-{oy}.kicad_pcb"
     p.write_text(body)
     # Fixture sanity (the #8879 pattern): without a non-zero origin this file
     # cannot catch a missing or double-applied shift.
-    assert tuple(PCB.load(p).board_origin) == pytest.approx(_ORIGIN)
+    assert tuple(PCB.load(p).board_origin) == pytest.approx(origin)
     return p
 
 
@@ -157,6 +157,60 @@ def test_cli_stubs_are_sheet_absolute_in_all_three_plan_lists(tmp_path, capsys, 
     text = capsys.readouterr().out
     layer, a, b, w = res.accepted[0].stubs[0]
     assert f"stub {layer} [{a[0] + ox}, {a[1] + oy}] -> [{b[0] + ox}, {b[1] + oy}] w={w}" in text
+
+
+def test_cli_region_scope_and_text_echo_both_frames(tmp_path, capsys):
+    """#8969: --region input is board-relative; the report twins the box in the
+    sheet frame instead of leaving the two frames unlabelled."""
+
+    def net_copper(net: int, name: str, dx: float, dy: float) -> str:
+        return (
+            _fp("P" + name, 110 + dx, 90 + dy, net=net, name=name)
+            + _seg((110 + dx, 90 + dy), (114.82 + dx, 90 + dy), net=net)
+            + _via(115 + dx, 90.08 + dy, net=net)
+        )
+
+    copper = net_copper(1, "SIG", 0.0, 0.0) + net_copper(2, "SIG2", 20.0, 20.0)
+    p = _origin_board(tmp_path, copper)
+
+    # The board-relative box still selects SIG, not SIG2 (no input semantics
+    # change), and scope carries the sheet twin beside the verbatim echo.
+    out = _cli_prune(capsys, p, "--region", "5,5,20,20")
+    assert [n["net"] for n in out["nets"]] == ["SIG"]
+    assert out["scope"]["region"] == [5.0, 5.0, 20.0, 20.0]
+    assert out["scope"]["region_sheet"] == [105.0, 85.0, 120.0, 100.0]
+
+    # Without --region both keys are null.
+    out = _cli_prune(capsys, p)
+    assert out["scope"]["region"] is None
+    assert out["scope"]["region_sheet"] is None
+
+    # Zero board_origin: the two keys are equal, the common case unchanged.
+    p0 = _origin_board(tmp_path, copper, origin=(0.0, 0.0))
+    out = _cli_prune(capsys, p0, "--region", "5,5,20,20")
+    assert out["scope"]["region"] == out["scope"]["region_sheet"]
+
+    # A negative board_origin shifts the twin the other way.
+    pn = _origin_board(tmp_path, copper, origin=(-10.0, -8.0))
+    out = _cli_prune(capsys, pn, "--region", "5,5,20,20")
+    assert out["scope"]["region_sheet"] == [-5.0, -3.0, 10.0, 12.0]
+
+    # The text report names both frames, and prints no region line when
+    # --region is absent.
+    from kicad_tools.cli.commands.pcb import _run_prune_command
+    from kicad_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(
+        ["pcb", "prune", str(p), "--dry-run", "--no-drc", "--region", "5,5,20,20"]
+    )
+    assert _run_prune_command(args, p) == 0
+    text = capsys.readouterr().out
+    assert "(5.0, 5.0) to (20.0, 20.0) mm (board-relative)" in text
+    assert "(105.0, 85.0) to (120.0, 100.0) mm sheet-absolute" in text
+
+    args = create_parser().parse_args(["pcb", "prune", str(p), "--dry-run", "--no-drc"])
+    assert _run_prune_command(args, p) == 0
+    assert "Region:" not in capsys.readouterr().out
 
 
 def test_cli_forced_plan_stubs_shift_by_exactly_the_origin(tmp_path, capsys, monkeypatch):

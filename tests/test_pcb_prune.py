@@ -2251,7 +2251,13 @@ def test_cli_nets_and_region_json_scope(tmp_path, capsys):
     assert _cli_prune(p, "--nets", "SIG2", "--region", "95,115,115,125") == 0
     out = json.loads(capsys.readouterr().out)
     assert [n["net"] for n in out["nets"]] == ["SIG2"]
-    assert out["scope"] == {"nets": ["SIG2"], "region": [95.0, 115.0, 115.0, 125.0]}
+    # Zero-origin board, so region_sheet == region (#8969); exact equality
+    # guards that scope.region keeps echoing the argument verbatim.
+    assert out["scope"] == {
+        "nets": ["SIG2"],
+        "region": [95.0, 115.0, 115.0, 125.0],
+        "region_sheet": [95.0, 115.0, 115.0, 125.0],
+    }
     assert out["region_skipped"] == []
 
     assert _cli_prune(p, "--region", "95,95,115,105") == 0
