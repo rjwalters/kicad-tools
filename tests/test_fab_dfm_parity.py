@@ -170,8 +170,8 @@ def test_fixture_findings_attributed_to_exactly_one_row():
     ``covered`` rows with recorded danger, which no recorded board has, so
     its loop body never executed.  What it meant to pin, and what this runs
     for real on every danger fixture board: findings the parity table claims
-    are attributed by ``rule_id`` to exactly one row, using the same key the
-    stanza counts with.
+    are attributed to exactly one row, using the same key the stanza counts
+    with (#8972 made that key band-qualified for ``physical_copper_gap``).
     """
     from kicad_tools.cli.check_cmd import build_check_rule_set, run_check_rule_set
 
@@ -184,7 +184,7 @@ def test_fixture_findings_attributed_to_exactly_one_row():
             continue
         res = run_check_rule_set(build_check_rule_set(FIX / f"{cat}.kicad_pcb"))
         for v in res.violations:
-            owner = claimed.get(v.rule_id)
+            owner = claimed.get(fdp.attribution_key(v))
             if owner is None:
                 continue
             attributed += 1
@@ -225,12 +225,14 @@ def test_partial_does_not_trigger_incomplete():
 # Issue #8940: kct-vs-fab count comparison in the parity stanza.
 # ---------------------------------------------------------------------------
 
-#: The pre-#8940 stanza, captured from ``origin/main`` @ 993d2d2ab before any
-#: edit to ``format_parity_stanza`` (the issue's Test Plan requires the
-#: baseline be captured first; AC 2 makes it the byte-identity contract).
+#: The pre-#8940 stanza shape, captured from ``origin/main`` @ 993d2d2ab
+#: before any edit to ``format_parity_stanza`` (the issue's Test Plan requires
+#: the baseline be captured first; AC 2 makes it the byte-identity contract).
+#: #8972 bumps the table version 6 -> 7 (row attribution change), so only the
+#: header's ``table v7`` digit moved -- rows, order and wording are unchanged.
 EXPECTED_DEFAULT_STANZA = (
     "\n"
-    "Fab DFM parity (JLCDFM, table v6, 2026-11-12): 0 danger-capable categories not covered\n"
+    "Fab DFM parity (JLCDFM, table v7, 2026-11-12): 0 danger-capable categories not covered\n"
     "  partial     trace_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     pad_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     solder_mask_opening_exposing_trace [danger-capable]: mask_to_copper\n"
@@ -275,11 +277,17 @@ def test_count_rule_ids_partition():
 
 
 def test_count_rule_ids_are_emitted():
-    """AC 6 drift guard: every count_rule_ids entry is an id kct can emit."""
+    """AC 6 drift guard: every count_rule_ids entry is an id kct can emit.
+
+    Since #8972 an entry may carry a ``#band`` qualifier (``rule_id#trace`` /
+    ``rule_id#pad`` -- see :func:`kicad_tools.validate.fab_dfm_parity.attribution_key`);
+    the unqualified part must still be an id ``kct check`` can emit.
+    """
     implemented = _implemented_count_ids()
     for r in fdp.PARITY_TABLE:
         for rule in r.count_rule_ids:
-            assert rule in implemented, (r.category, rule)
+            base = rule.split("#", 1)[0]
+            assert base in implemented, (r.category, rule)
 
 
 def test_count_rule_ids_match_status():
@@ -301,14 +309,107 @@ def test_count_rule_ids_split_the_shared_spacing_rules():
 
     ``clearance`` and ``physical_copper_gap`` each cover two rows
     (trace_spacing + pad_spacing); the finer pair-type ids must divide
-    between them so a finding counts toward exactly one.
+    between them so a finding counts toward exactly one.  Since #8972 the
+    fab-band-graded ``physical_copper_gap`` populations divide the same way
+    via the ``#band`` qualified key, while the bare id (the legacy opt-in
+    pass, zone-fill ``info`` findings) stays on ``pad_spacing`` so the
+    partition remains total.
     """
     rows = {r.category: r for r in fdp.PARITY_TABLE}
     trace, pad = rows["trace_spacing"].count_rule_ids, rows["pad_spacing"].count_rule_ids
-    assert set(trace) | set(pad) == _CLEARANCE_PAIR_IDS | {"physical_copper_gap"}
+    assert set(trace) | set(pad) == _CLEARANCE_PAIR_IDS | {
+        "physical_copper_gap",
+        "physical_copper_gap#trace",
+        "physical_copper_gap#pad",
+    }
     assert not (set(trace) & set(pad))
     assert any(rule.startswith("clearance_pad_") for rule in pad)
     assert any(rule.startswith("clearance_segment_") for rule in trace)
+    assert "physical_copper_gap#trace" in trace
+    assert "physical_copper_gap#pad" in pad
+    assert "physical_copper_gap" in pad  # bandless emit sites stay attributed
+
+
+def _policy_2layer_1oz():
+    """The recorded ``2layer_1oz`` fab bands (manufacturers/data/jlcpcb.yaml)."""
+    from kicad_tools.validate.rules.physical_gap import FabGapPolicy, GapBand
+
+    return FabGapPolicy(trace=GapBand(0.127, None), pad=GapBand(0.15, None))
+
+
+def test_trace_band_finding_counts_to_trace_spacing_row():
+    """Issue #8972 regression on the committed fixture.
+
+    The 0.080 mm same-net two-track gap on ``trace_spacing.kicad_pcb`` is
+    trace-band graded (``required_value`` = the trace danger edge 0.127 mm),
+    so it must count toward ``trace_spacing`` -- not ``pad_spacing`` as the
+    flat rule-id key filed it, which left ``trace_spacing`` reading
+    ``kct 0 err`` beside the fab's recorded 2 danger (the spurious
+    ``fab_only_danger`` mark).
+    """
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap_fab_view
+
+    findings = check_physical_copper_gap_fab_view(
+        PCB.load(str(FIX / "trace_spacing.kicad_pcb")), _policy_2layer_1oz()
+    ).violations
+    graded = [v for v in findings if v.severity != "info"]
+    assert len(graded) == 1, "fixture no longer reproduces the measured single gap"
+    assert graded[0].required_value == pytest.approx(0.127)  # trace band, not pad
+    rep = fdp.evaluate_parity("jlcpcb", findings=findings, recorded_counts=RECORDED_8838)
+    by_cat = {c.category: c for c in rep.comparisons}
+    assert (by_cat["trace_spacing"].kct_errors, by_cat["pad_spacing"].kct_errors) == (1, 0)
+    assert by_cat["trace_spacing"].fab_only_danger is False
+
+
+def test_pad_band_and_mask_bridge_findings_count_to_pad_spacing():
+    """The pad populations stay on ``pad_spacing``: a pad-band-graded gap
+    (measured 0.080 mm against the 0.15 mm pad edge) and a
+    ``check_pad_mask_bridge`` error (2 oz) both count there."""
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.physical_gap import (
+        check_pad_mask_bridge,
+        check_physical_copper_gap_fab_view,
+    )
+
+    pcb = PCB.load(str(FIX / "pad_spacing.kicad_pcb"))
+    findings = list(check_physical_copper_gap_fab_view(pcb, _policy_2layer_1oz()).violations)
+    bridge = [v for v in check_pad_mask_bridge(pcb, 2.0).violations if v.severity != "info"]
+    assert bridge, "fixture no longer reproduces a mask-bridge finding"
+    graded = [v for v in findings if v.severity != "info"]
+    assert graded and graded[0].required_value == pytest.approx(0.15)  # pad band
+    rep = fdp.evaluate_parity("jlcpcb", findings=findings + bridge, recorded_counts=RECORDED_8838)
+    by_cat = {c.category: c for c in rep.comparisons}
+    assert by_cat["pad_spacing"].kct_errors == len(graded) + len(bridge)
+    assert by_cat["trace_spacing"].kct_errors == 0
+
+
+def test_bandless_physical_gap_findings_stay_on_pad_spacing():
+    """Edge cases from the issue's Test Plan: a legacy opt-in-pass finding
+    (no band concept) and a zone-fill ``info`` finding keep the bare-id
+    attribution -- the former counts to ``pad_spacing``, the latter to
+    neither tally (info is never an error or warning count)."""
+    findings = [
+        _finding("physical_copper_gap"),  # legacy pass: fab_band unset
+        _finding("physical_copper_gap", "info"),  # zone-fill advisory
+    ]
+    rep = fdp.evaluate_parity("jlcpcb", findings=findings, recorded_counts=RECORDED_8838)
+    by_cat = {c.category: c for c in rep.comparisons}
+    assert (by_cat["pad_spacing"].kct_errors, by_cat["pad_spacing"].kct_warnings) == (1, 0)
+    assert (by_cat["trace_spacing"].kct_errors, by_cat["trace_spacing"].kct_warnings) == (0, 0)
+
+
+def test_physical_copper_gap_rule_id_is_band_stable():
+    """AC: the qualified key is attribution-only.  ``rule_id`` -- and so
+    ``DRCViolation.key`` and every existing ``.kct_waivers.json`` entry
+    naming this rule -- is identical across all band populations."""
+    from kicad_tools.validate.violations import DRCViolation
+
+    trace = DRCViolation("physical_copper_gap", "error", "m", fab_band="trace")
+    pad = DRCViolation("physical_copper_gap", "error", "m", fab_band="pad")
+    legacy = DRCViolation("physical_copper_gap", "error", "m")
+    assert {v.rule_id for v in (trace, pad, legacy)} == {"physical_copper_gap"}
+    assert len({v.key for v in (trace, pad, legacy)}) == 1
 
 
 def _finding(rule_id: str, severity: str = "error", *, waived: bool = False):

@@ -832,6 +832,7 @@ def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
                 closest_locations=((a.x, a.y), (b.x, b.y)),
                 same_net=len(nets) == 1,
             )
+        band_name = "pad" if "pad" in kinds else "trace"
         band = policy.pad if "pad" in kinds else policy.trace
         severity = band.severity_for(distance)
         if severity is None:
@@ -851,6 +852,10 @@ def check_physical_copper_gap_fab_view(pcb, policy: FabGapPolicy) -> DRCResults:
             nets=nets,
             closest_locations=((a.x, a.y), (b.x, b.y)),
             same_net=len(nets) == 1,
+            # Issue #8972: the population this gap was graded against, so
+            # parity attribution can file it under the matching fab category
+            # without splitting the user-visible rule id.
+            fab_band=band_name,
         )
 
     return _scan_copper_gaps(pcb, policy.detection_edge_mm, make_finding)
@@ -944,6 +949,9 @@ def check_pad_mask_bridge(pcb, copper_oz: float | None) -> DRCResults:
                         items=ids,
                         nets=tuple(sorted({pad.net, other.net})),
                         closest_locations=((a.x, a.y), (b.x, b.y)),
+                        # Issue #8972: pad-population finding (the fab's
+                        # pad_spacing), same label the graded branch carries.
+                        fab_band="pad",
                     )
                 )
     return results
