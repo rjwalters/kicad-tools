@@ -6574,6 +6574,12 @@ class PCB:
         if is_back:
             flip_footprint_children_to_back(fp_sexp, rotation)
 
+        # Footprint zones are stored board-absolute, unlike pads and graphics,
+        # so carry the library outline to the placement frame (Issue #8958).
+        transform_footprint_zone_nodes(
+            fp_sexp, (0.0, 0.0, 0.0, is_back), (abs_x, abs_y, rotation, is_back)
+        )
+
         # Rewrite each pad's angle to ABSOLUTE (board-frame) rotation.
         #
         # KiCad stores a pad's ``(at x y ANGLE)`` with the angle expressed in
