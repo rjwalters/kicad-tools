@@ -1,0 +1,28 @@
+(kicad_sch
+	(version 20231120)
+	(generator "kicadtools_test")
+	(uuid "aa894200-1111-2222-3333-444455556666")
+	(paper "A4")
+	(lib_symbols)
+	(symbol
+		(lib_id "scanlib:ProjFP")
+		(at 100 50 0)
+		(unit 1)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "22222222-2222-2222-2222-222222222222")
+		(property "Reference" "R1"
+			(at 102 48 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Value" "ProjFP"
+			(at 102 50 0)
+			(effects (font (size 1.27 1.27)) (justify left))
+		)
+		(property "Footprint" "scanlib:ProjFP"
+			(at 100 50 0)
+			(effects (font (size 1.27 1.27)) hide)
+		)
+	)
+)
