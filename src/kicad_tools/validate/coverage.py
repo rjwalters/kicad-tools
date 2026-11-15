@@ -70,6 +70,7 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "netclass_clearance_copper",
         "netclass_floor",
         "netlist",
+        "removed_pad_scan",
         "routing_policy",
         "solder_mask",
         "mask_to_copper",

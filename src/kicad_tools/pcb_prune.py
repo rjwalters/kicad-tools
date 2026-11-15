@@ -2084,12 +2084,27 @@ def _plan_declared_loops(
                 stuck.discard(v)
                 comp.add(v)
                 work.append(v)
+        ordered = sorted(
+            comp,
+            key=lambda i: f"{model.nodes[i].a}->{model.nodes[i].b} {model.nodes[i].layers[0]}",
+        )
         plan.uncut_loops.append(
             {
-                "segments": sorted(
+                "segments": [
                     f"{model.nodes[i].a}->{model.nodes[i].b} {model.nodes[i].layers[0]}"
-                    for i in comp
-                ),
+                    for i in ordered
+                ],
+                # Structured twins of ``segments`` so the CLI report can quote
+                # sheet positions (#8954). The stored frame stays
+                # board-relative, like every library value.
+                "segment_ends": [
+                    {
+                        "a": list(model.nodes[i].a),
+                        "b": list(model.nodes[i].b),
+                        "layer": model.nodes[i].layers[0],
+                    }
+                    for i in ordered
+                ],
                 "min_width": round(min(_width(model, i) for i in comp), 6),
                 "reason": (
                     f"cutting would leave a branch narrower than the declared "

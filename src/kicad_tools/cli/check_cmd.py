@@ -516,11 +516,15 @@ def _maybe_emit_via_in_pad_process_advisory(violations: Sequence) -> None:
         )
 
 
-def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
+def _emit_drift_banner(pcb_path: Path, schematic: str | None):
     """Print the advisory schematic/PCB drift banner (non-blocking).
 
     No-op when no schematic can be resolved or the PCB is in sync.  This is
     advisory only and never affects the caller's exit code (issue #3154).
+
+    Returns the ``SyncAnalysis`` the banner was built from, or ``None`` when
+    no schematic could be resolved or the analysis failed, so ``main()`` can
+    record the removed-pad scan's coverage state (Issue #8942).
 
     The banner is routed to stderr so it does not pollute the stdout JSON
     body produced by ``--format json`` consumers (the CI gate at
@@ -533,10 +537,47 @@ def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
 
     analysis, _resolved = analyze_drift(pcb_path, schematic)
     if analysis is None:
-        return
+        return None
     banner = format_drift_banner(analysis, pcb_path)
     if banner:
         print(banner, file=sys.stderr)
+    return analysis
+
+
+def _removed_pad_scan_coverage(coverage: dict, analysis) -> None:
+    """Record the removed-pad scan's coverage state (Issue #8942).
+
+    The scan rides the advisory drift analysis (``_emit_drift_banner``), so
+    its coverage is recorded here rather than as a dispatcher category: it
+    is not selectable with ``--only``/``--skip`` and emits no findings of
+    its own (``CHECK_CATEGORIES`` must not gain it).
+
+    Four states, so a blocking ``unknown`` cannot fire spuriously: no
+    schematic resolvable -> ``skipped`` (a baseline board checked outside
+    its project must never block); schematic resolved but no
+    ``update_footprint`` swaps -> ``skipped`` (nothing to scan); swaps
+    present and every replacement resolved -> ``checked``; swaps present
+    and any replacement unresolvable (or the scratch board unusable) ->
+    ``unknown``, which ``kct readiness`` turns into a named blocker
+    ("unknown is not pass", Issue #5946) while ``kct check``'s exit code
+    stays advisory (issue #3154).
+    """
+    from kicad_tools.validate import coverage as cov
+
+    if analysis is None:
+        coverage["removed_pad_scan"] = cov.skipped("removed_pad_scan", "no_schematic")
+        return
+    swaps = [a for m in analysis.matches for a in m.actions if a.get("type") == "update_footprint"]
+    if not swaps:
+        coverage["removed_pad_scan"] = cov.skipped("removed_pad_scan", "no_footprint_swaps")
+        return
+    if analysis.scan_gaps:
+        detail = "; ".join(f"{g['reference']}: {g['reason']}" for g in analysis.scan_gaps)
+        coverage["removed_pad_scan"] = cov.unknown(
+            "removed_pad_scan", f"unresolvable_replacement ({detail})"
+        )
+        return
+    coverage["removed_pad_scan"] = cov.checked("removed_pad_scan")
 
 
 def run_netlist_sync_gate(
@@ -1991,7 +2032,9 @@ def main(argv: list[str] | None = None) -> int:
     # passed via --schematic) and the component sets have drifted, print a
     # one-line, non-blocking warning before running DRC.  Never affects the
     # exit code on the default run -- the hard gate lives behind --netlist-sync.
-    _emit_drift_banner(pcb_path, getattr(args, "schematic", None))
+    # The analysis is kept for the removed-pad scan's coverage entry (Issue
+    # #8942), recorded on the coverage dict below.
+    drift_analysis = _emit_drift_banner(pcb_path, getattr(args, "schematic", None))
 
     # Issue #3920: resolve the effective manufacturer profile.  A routed
     # ``.kicad_pcb`` carries no embedded fab-tier hint, so bare ``kct check``
@@ -2618,6 +2661,10 @@ def main(argv: list[str] | None = None) -> int:
         drc_only=getattr(args, "drc_only", False),
         opt_in={"model_coverage"} if getattr(args, "models_3d", False) else frozenset(),
     )
+
+    # Issue #8942: the removed-pad scan ran inside the advisory drift
+    # analysis above; record what it could evaluate ("unknown is not pass").
+    _removed_pad_scan_coverage(coverage, drift_analysis)
 
     # Issue #5946: bind every finding to a hash of its local evidence (its
     # geometry, the footprints it names and the membership of its nets).
