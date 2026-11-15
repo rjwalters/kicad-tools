@@ -568,6 +568,29 @@ class TestReconcilerAnalyze:
         Path(sch_path).unlink()
         Path(pcb_path).unlink()
 
+    def test_analyze_matches_mounting_hole_with_schematic_symbol(self):
+        """A mounting hole drawn in the schematic matches its PCB footprint."""
+        hole = "MountingHole:MountingHole_4.3mm_M4"
+        bom_items = [self._make_bom_item("P101", "CONN_1", hole)]
+        footprints = [
+            self._make_mock_footprint("P101", "CONN_1", hole),
+            self._make_mock_footprint("H1", "", hole),
+        ]
+
+        reconciler, mock_bom, mock_pcb, sch_path, pcb_path = self._make_reconciler_with_mocks(
+            bom_items, footprints
+        )
+
+        analysis = self._run_analyze(reconciler, mock_bom, mock_pcb)
+
+        assert [m.schematic_ref for m in analysis.matches] == ["P101"]
+        assert analysis.schematic_orphans == []
+        assert analysis.pcb_orphans == []
+        assert analysis.add_footprint_actions == []
+
+        Path(sch_path).unlink()
+        Path(pcb_path).unlink()
+
     def test_analyze_medium_confidence_match(self):
         """Test that value+footprint matching produces medium confidence."""
         bom_items = [
