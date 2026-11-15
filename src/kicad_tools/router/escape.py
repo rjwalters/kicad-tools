@@ -7045,6 +7045,15 @@ class EscapeRouter:
             foreign_pads: Optional list of nearby pads to validate the
                 via against.  Pads whose ``net`` equals ``net`` are
                 skipped automatically when ``net`` is provided.
+                Issue #8957 note: that same-net exclusion is also
+                structural -- like ``point_clear_of_copper`` this
+                predicate has no same-net pad / track parameter, so an
+                escape via's copper annulus is never gap-checked against
+                its own pad the way the stitcher's slit-band guard
+                (``same_net_pad_gap_acceptable``, same issue) now does.
+                Measured impact is small (~3 of the 114 findings on the
+                board 06/07 fixtures); fixing it here is a follow-up
+                issue, deliberately out of #8957's scope.
             foreign_tracks: Optional list of nearby segments to validate
                 against.  Segments whose ``net`` equals ``net`` are
                 skipped automatically.
