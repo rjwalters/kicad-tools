@@ -39,6 +39,53 @@ def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+#: The native per-object worker needs pcbnew only -- unlike the selective
+#: zone-fill probe, it uses neither wx nor the fill API. A candidate whose
+#: KiCad build is unqualified is still rejected later by the
+#: ``QUALIFIED_NATIVE_VERSIONS`` binding, so the weak probe never silently
+#: widens what a report can claim (#8946).
+_PCBNEW_PROBE = "import pcbnew"
+
+
+def _resolve_native_python_command(
+    native_python_command: list[str] | None, stage: Path
+) -> tuple[list[str] | None, str | None]:
+    """Resolve the interpreter argv for the native per-object worker.
+
+    Priority: an explicit ``native_python_command`` wins; then, when the
+    Docker fallback is enabled and docker is available, the pinned image's
+    ``python3`` (which imports pcbnew) with *stage* bind-mounted, so the
+    staged worker, board, request and output are all visible to the
+    container; then host discovery of an interpreter that passes
+    ``_PCBNEW_PROBE``. ``/usr/bin/python3`` is therefore used only when it
+    really imports pcbnew, never as a blind fallback.
+
+    Returns ``(argv, None)`` on success, or ``(None, reason)`` naming what to
+    install or configure.
+    """
+    if native_python_command:
+        return list(native_python_command), None
+    from kicad_tools.cli.kicad_toolchain import (
+        docker_fallback_enabled,
+        docker_kicad_cli_prefix,
+        process_config_home,
+    )
+    from kicad_tools.zones.placement_fill import find_kicad_python
+
+    if docker_fallback_enabled() and shutil.which("docker"):
+        return docker_kicad_cli_prefix([stage], process_config_home(), entrypoint="python3"), None
+    found = find_kicad_python(probe=_PCBNEW_PROBE)
+    if found is not None:
+        return [str(found)], None
+    return None, (
+        "Native per-object geometry unavailable: no Python interpreter with "
+        "pcbnew was found. Install KiCad (its bundled python3 provides "
+        "pcbnew), set KCT_KICAD_DOCKER=1 to run the worker in the pinned "
+        "kicad/kicad image (docker required), or set an explicit "
+        "native_python_command in the kct.mask-copper-request.v1 request."
+    )
+
+
 def inspect_attributed_mask_geometry(
     path,
     *,
@@ -214,7 +261,11 @@ def inspect_attributed_mask_geometry(
         request = stage / "request.json"
         request.write_text(json.dumps({"source_uuids": [f["source_uuid"] for f in inventory]}))
         output = stage / "objects.json"
-        command = list(native_python_command or ["/usr/bin/python3"])
+        command, unavailable = _resolve_native_python_command(native_python_command, stage)
+        if command is None:
+            assert unavailable is not None
+            result.errors.append(unavailable)
+            return result
         process = subprocess.run(
             [*command, str(staged_worker), str(board), str(request), str(output)],
             capture_output=True,
