@@ -1,5 +1,8 @@
 """Source-qualified mask exposure and public coverage controls."""
 
+import re
+from pathlib import Path
+
 import pytest
 
 from kicad_tools.validate.mask_copper import MaskCopperAssessment, MaskCopperPolicy
@@ -339,32 +342,42 @@ def test_sidecar_and_plot_bindings_invalidate_escape_intent(field):
     assert result.measurements[0].disposition == "violation"
 
 
-def test_rule_context_allowlist_admits_full_kct_vocabulary_and_rejects_plot_shaping():
+def _fab_floor_constraint_names() -> set[str]:
+    """Constraint names kct's fab-floor sources emit into managed ``.kicad_dru`` text.
+
+    Sources are exactly the two #8948 measured: ``dru_generator.py`` and the
+    shipped tier files under ``manufacturers/rules/``. Sibling writers that
+    also append to the managed block (``netclass_dru.py``, ``keepout_dru.py``;
+    admission tracked in #8973) are deliberately excluded.
+    """
+    manufacturers = Path(__file__).resolve().parent.parent / "src" / "kicad_tools" / "manufacturers"
+    text = (manufacturers / "dru_generator.py").read_text(encoding="utf-8")
+    names = set(re.findall(r"\(constraint\s+([a-z_]+)", text))
+    for tier in sorted((manufacturers / "rules").glob("*.kicad_dru")):
+        names |= set(re.findall(r"\(constraint\s+([a-z_]+)", tier.read_text(encoding="utf-8")))
+    return names
+
+
+def test_rule_context_allowlist_admits_fab_floor_vocabulary_and_rejects_plot_shaping():
     """Pin the hoisted native rule-context allowlist without a native interpreter.
 
-    The full constraint vocabulary kct emits anywhere -- the managed
-    ``.kicad_dru`` block plus every shipped tier file (#8948) -- must be
-    admitted, so a board carrying only kct's own rules never reports
-    ``Native object rule context unsupported``. The plot-shaping zone-fill
-    constraints must stay outside; a name newly emitted by the generator
-    turns the first assertion red until its geometry-neutrality is argued and
-    parity-tested, which is the friction the allowlist exists to enforce.
+    The fab-floor constraint vocabulary kct emits into the managed
+    ``.kicad_dru`` block and every shipped tier file (#8948) must be
+    admitted, so a board carrying only that block never reports ``Native
+    object rule context unsupported``. The expectation side is derived at
+    test time from the same sources #8948 measured, so a name newly emitted
+    by ``dru_generator.py`` or a tier file turns the first assertion red
+    until its geometry-neutrality is argued and parity-tested, which is the
+    friction the allowlist exists to enforce. Constraints written into the
+    same managed block by sibling modules -- ``netclass_dru.py`` (diff-pair,
+    skew, via-count) and ``keepout_dru.py`` (``disallow``) -- are neither
+    derived here nor admitted; #8973 tracks their admission. The
+    plot-shaping zone-fill constraints must stay outside either way.
     """
     from kicad_tools.validate.mask_copper_geometry import SAFE_RULE_CONSTRAINTS
 
-    emitted_by_kct = {
-        "clearance",
-        "edge_clearance",
-        "hole_clearance",
-        "hole_size",
-        "via_diameter",
-        "annular_width",
-        "track_width",
-        "silk_clearance",
-        "physical_hole_clearance",
-        "text_thickness",
-        "text_height",
-    }
+    emitted_by_kct = _fab_floor_constraint_names()
+    assert emitted_by_kct, "fab-floor derivation found no constraints; did sources move?"
     assert emitted_by_kct <= SAFE_RULE_CONSTRAINTS
     assert not SAFE_RULE_CONSTRAINTS & {
         "zone_connection",
