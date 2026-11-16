@@ -2215,9 +2215,7 @@ class LatticePathfinder:
         # the caller from the board's stackup (see
         # ``DesignRules.same_net_pad_gap_band_edge_mm``).  None/0 keeps the
         # band check off, so an unresolvable stackup changes nothing.
-        band_edge_mm = float(
-            getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
-        )
+        band_edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
         if band_edge_mm > 0:
             from ..via_clearance import same_net_pad_gap_acceptable
         if not self._escape_boundary.segment_clear(point, point, via_radius):

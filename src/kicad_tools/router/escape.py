@@ -7169,9 +7169,7 @@ class EscapeRouter:
             # ``DesignRules.same_net_pad_gap_band_edge_mm`` (None/0 ⇒ guard
             # off), never a literal, so an unresolvable stackup leaves
             # placement exactly as before.
-            band_edge_mm = float(
-                getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
-            )
+            band_edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
             same_net_bboxes: list[tuple[float, float, float, float]] = []
             if foreign_pads:
                 for p in foreign_pads:

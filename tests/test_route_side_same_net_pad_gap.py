@@ -216,7 +216,6 @@ def test_weld_forwards_band_edge_to_run_stitch(monkeypatch, tmp_path):
     """
 
     import kicad_tools.cli.stitch_cmd as stitch_cmd
-    from kicad_tools.router import oracle_completion
 
     seen: dict[str, object] = {}
 

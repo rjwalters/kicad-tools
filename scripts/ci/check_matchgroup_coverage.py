@@ -642,18 +642,26 @@ def count_errors_via_kct_check(
 # which two independent regenerations (the E2E job's and this gate's)
 # reproduced exactly.  A new net starting to carry sub-danger slits still
 # fails the gate; a net whose slits the router stops leaving goes stale and
-# forces its entry out.  The router fix is tracked in #8957; delete entries
-# there as they go stale.
+# forces its entry out.
+# Issue #8974: the route-side d0.3/s0.6 producers (the oracle weld's
+# run_stitch vias, the oracle link router's vias, and the lattice
+# pathfinder's pair vias) now keep their annuli out of the same-net pad
+# slit band, draining DQS_P and DQS_N completely (their 2 + 2 findings were
+# entirely route-side; entries deleted).  Post-fix seed-42 re-route
+# (feature/issue-8974, 2026-11-16): 109 same-net findings, all d0.25/s0.45
+# (GND 95) or no-via -- GND's +2 d0.25/s0.45 drift is the pour-repair
+# rounds placing offset vias for the two weld pads the band guard now
+# drops, still producer 1's (#8975) population, not a new producer.  The
+# surviving entries are re-pointed to #8962, the parent tracker for the
+# remaining producers; #8957's own scope ended at the merged stitcher path.
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "DQS_N"): 8957,
-    ("physical_copper_gap", "DQS_P"): 8957,
-    ("physical_copper_gap", "GND"): 8957,
-    ("physical_copper_gap", "MIPI_CLK_N"): 8957,
-    ("physical_copper_gap", "MIPI_DAT0_N"): 8957,
-    ("physical_copper_gap", "MIPI_DAT1_N"): 8957,
-    ("physical_copper_gap", "TMDS_D0_N"): 8957,
-    ("physical_copper_gap", "TMDS_D1_N"): 8957,
-    ("physical_copper_gap", "TMDS_D2_N"): 8957,
+    ("physical_copper_gap", "GND"): 8962,
+    ("physical_copper_gap", "MIPI_CLK_N"): 8962,
+    ("physical_copper_gap", "MIPI_DAT0_N"): 8962,
+    ("physical_copper_gap", "MIPI_DAT1_N"): 8962,
+    ("physical_copper_gap", "TMDS_D0_N"): 8962,
+    ("physical_copper_gap", "TMDS_D1_N"): 8962,
+    ("physical_copper_gap", "TMDS_D2_N"): 8962,
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key

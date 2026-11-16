@@ -188,16 +188,22 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # NET_IDENTITY_RULES), which two independent regenerations reproduced
 # exactly.  A new net starting to carry sub-danger slits still fails the
 # gate; a net whose slits the router stops leaving goes stale and forces its
-# entry out.  The router fix is tracked in #8957; delete entries there as
-# they go stale.
+# entry out.
+# Issue #8974: the attribution for this board's via-banded population (2
+# vias, 4 findings: PCIE_RX+ 1, USB2_D- 3, re-measured 2026-11-16 at
+# d0.25/s0.6) lands on ``cpp_backend._convert_result_to_route`` -- the C++
+# pathfinder places them, so the fix needs a DesignRules C++ mirror and is
+# split to its own child of #8962 rather than widened into #8974.  Every
+# entry still fires; they are re-pointed to #8962, the parent tracker
+# (#8957's own scope ended at the merged stitcher path).
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "+1V2"): 8957,
-    ("physical_copper_gap", "+1V8"): 8957,
-    ("physical_copper_gap", "+3V3"): 8957,
-    ("physical_copper_gap", "GND"): 8957,
-    ("physical_copper_gap", "MIPI_CLK+"): 8957,
-    ("physical_copper_gap", "PCIE_RX+"): 8957,
-    ("physical_copper_gap", "USB2_D-"): 8957,
+    ("physical_copper_gap", "+1V2"): 8962,
+    ("physical_copper_gap", "+1V8"): 8962,
+    ("physical_copper_gap", "+3V3"): 8962,
+    ("physical_copper_gap", "GND"): 8962,
+    ("physical_copper_gap", "MIPI_CLK+"): 8962,
+    ("physical_copper_gap", "PCIE_RX+"): 8962,
+    ("physical_copper_gap", "USB2_D-"): 8962,
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
