@@ -6164,10 +6164,10 @@ def run_stitch(
             GND pours cover every layer this is the difference between "no
             via site anywhere" and a via the refill simply clears around.
         same_net_pad_gap_mm: Issue #8957 -- with ``avoid_pad_overlap``, the
-            fab-view pad-population error edge (mm) every stitch via's copper
-            annulus must keep to same-net SMD pads: a candidate seated with
-            ``0 < gap < same_net_pad_gap_mm`` (a slit the fab grades as a
-            ``physical_copper_gap`` error regardless of nets) is rejected and
+            fab-view pad-population detection edge (mm) every stitch via's
+            copper annulus must keep to same-net SMD pads: a candidate seated
+            with ``0 < gap < same_net_pad_gap_mm`` (a slit the fab grades as a
+            ``physical_copper_gap`` finding regardless of nets) is rejected and
             the ladder keeps walking; annulus overlapping the pad (a copper
             union) and gaps at/beyond the edge stay acceptable.  The CLI
             resolves it from the ``--mfr`` profile's ``pad_spacing`` dfm
@@ -7984,7 +7984,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
     # Issue #7322: the fab's mask-dam floor, the same value the router reads
     # for ``DesignRules.min_via_pad_edge_gap``; 0 (off) without ``--mfr``.
     pad_edge_gap = 0.0
-    # Issue #8957: the fab-view pad-population error edge, so the stitcher
+    # Issue #8957: the fab-view pad-population detection edge, so the stitcher
     # keeps every via annulus out of the same-net pad slit band; None (off)
     # without ``--mfr`` or when the fab ships no table/entry for the stackup.
     pad_gap_edge: float | None = None
