@@ -533,3 +533,225 @@ def test_uninventoried_native_target_cannot_hide_in_copper_union(
     assert result.coverage == "incomplete", result.to_dict()
     assert not result.passed
     assert any(identity in reason and "uninventoried" in reason for reason in result.reasons)
+
+
+# ---------------------------------------------------------------------------
+# Interpreter resolution and worker-launch wiring (Issue #8946), hermetic:
+# the native export and the worker subprocess are faked, so the command
+# plumbing is exercised on every host without any KiCad installation.
+# ---------------------------------------------------------------------------
+
+_PAD_BODY = """(footprint "P1" (layer "F.Cu")
+      (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0)
+        (layers "*.Cu" "*.Mask")))"""
+
+_QUALIFIED_VERSION = "10.0.6"
+
+
+def _fake_native_launch(monkeypatch, tmp_path, native_version=_QUALIFIED_VERSION):
+    """Fake the export and the worker subprocess; capture the worker argv.
+
+    Returns ``(board, seen)`` where ``seen["cmd"]`` is the argv the native
+    per-object worker was launched with and the output file it was told to
+    write has been filled with a well-formed qualified payload.
+    """
+    import subprocess
+
+    from kicad_tools.validate import mask_copper_geometry as mcg
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+    from tests.test_mask_export_geometry import _board
+
+    board = _board(tmp_path / "board.kicad_pcb", _PAD_BODY)
+    digest = "a" * 64
+    monkeypatch.setattr(
+        mcg,
+        "inspect_exported_mask_geometry",
+        lambda *a, **k: ExportedMaskGeometry(
+            source_sha256=digest,
+            project_sha256=None,
+            rules_sha256=None,
+            native_version=native_version,
+            export_identity={},
+        ),
+    )
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        Path(cmd[-1]).write_text(
+            json.dumps(
+                {
+                    "schema": "kct.native-mask-objects.v1",
+                    "source_sha256": digest,
+                    "native_version": native_version,
+                    "errors": [],
+                    "objects": {},
+                    "max_error_mm": 0.0,
+                }
+            )
+        )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mcg.subprocess, "run", fake_run)
+    return board, seen
+
+
+def _forbid_discovery(monkeypatch):
+    def fail(*a, **k):
+        raise AssertionError("discovery must not run when the command is already resolved")
+
+    monkeypatch.setattr("kicad_tools.zones.placement_fill.find_kicad_python", fail)
+
+
+def test_native_worker_launches_under_explicit_command(monkeypatch, tmp_path):
+    """An explicit native_python_command wins unchanged, and provenance records it."""
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    board, seen = _fake_native_launch(monkeypatch, tmp_path)
+    _forbid_discovery(monkeypatch)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    command = ["/explicit/python3", "-I"]
+    result = inspect_attributed_mask_geometry(
+        board, native_python_command=command, scratch_dir=tmp_path
+    )
+    assert seen["cmd"][:2] == command
+    assert result.provenance["native_python_command"] == command
+
+
+def test_native_worker_launches_in_pinned_container(monkeypatch, tmp_path):
+    """With KCT_KICAD_DOCKER=1 the worker runs as --entrypoint python3 in the image.
+
+    One bind of the stage directory makes the staged worker, board, request
+    and output all visible at their host paths; the config home is the pinned
+    process-shared one.
+    """
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    board, seen = _fake_native_launch(monkeypatch, tmp_path)
+    _forbid_discovery(monkeypatch)
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(
+        "kicad_tools.validate.mask_copper_geometry.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.process_config_home", lambda: cfg)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain._synced_model_dir", lambda: None)
+    result = inspect_attributed_mask_geometry(board, scratch_dir=tmp_path)
+    cmd = seen["cmd"]
+    entry = cmd.index("--entrypoint")
+    assert cmd[entry + 1] == "python3"
+    stage = Path(cmd[-1]).parent
+    assert f"{stage}:{stage}" in cmd
+    assert f"KICAD_CONFIG_HOME={cfg}" in cmd
+    assert result.provenance["native_python_command"] == cmd[:-4]
+    assert [Path(p).parent for p in cmd[-4:]] == [stage] * 4
+
+
+def test_native_worker_discovers_pcbnew_interpreter(monkeypatch, tmp_path):
+    """Without an explicit command or docker, discovery probes a plain pcbnew import."""
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    board, seen = _fake_native_launch(monkeypatch, tmp_path)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: False)
+    probes = []
+
+    def fake_find(probe):
+        probes.append(probe)
+        return Path("/opt/kicad/bin/python3")
+
+    monkeypatch.setattr("kicad_tools.zones.placement_fill.find_kicad_python", fake_find)
+    result = inspect_attributed_mask_geometry(board, scratch_dir=tmp_path)
+    assert seen["cmd"][0] == "/opt/kicad/bin/python3"
+    assert probes == ["import pcbnew"]
+    assert result.provenance["native_python_command"] == ["/opt/kicad/bin/python3"]
+
+
+def test_unqualified_discovered_interpreter_still_fails_version_binding(monkeypatch, tmp_path):
+    """A weak pcbnew-only probe never widens what a report can claim."""
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    board, seen = _fake_native_launch(monkeypatch, tmp_path, native_version="9.0.1")
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: False)
+    monkeypatch.setattr(
+        "kicad_tools.zones.placement_fill.find_kicad_python",
+        lambda probe: Path("/opt/old/bin/python3"),
+    )
+    result = inspect_attributed_mask_geometry(board, scratch_dir=tmp_path)
+    assert any("qualified KiCad plot profile" in e for e in result.errors)
+
+
+def test_resolve_native_python_explicit_wins(monkeypatch, tmp_path):
+    from kicad_tools.validate.mask_copper_geometry import (
+        _resolve_native_python_command,
+    )
+
+    _forbid_discovery(monkeypatch)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    assert _resolve_native_python_command(["/explicit/python3"], tmp_path) == (
+        ["/explicit/python3"],
+        None,
+    )
+
+
+def test_resolve_native_python_container_argv(monkeypatch, tmp_path):
+    from kicad_tools.validate.mask_copper_geometry import (
+        _resolve_native_python_command,
+    )
+
+    _forbid_discovery(monkeypatch)
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(
+        "kicad_tools.validate.mask_copper_geometry.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.process_config_home", lambda: cfg)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain._synced_model_dir", lambda: None)
+    command, reason = _resolve_native_python_command(None, tmp_path / "stage")
+    assert reason is None
+    entry = command.index("--entrypoint")
+    assert command[entry + 1] == "python3"
+    assert f"{tmp_path / 'stage'}:{tmp_path / 'stage'}" in command
+    assert f"KICAD_CONFIG_HOME={cfg}" in command
+
+
+def test_resolve_native_python_container_needs_docker_binary(monkeypatch, tmp_path):
+    """KCT_KICAD_DOCKER=1 without a docker executable falls back to discovery."""
+    import kicad_tools.validate.mask_copper_geometry as mcg
+
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(mcg.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        "kicad_tools.zones.placement_fill.find_kicad_python",
+        lambda probe: Path("/found/python3"),
+    )
+    assert mcg._resolve_native_python_command(None, tmp_path) == (
+        ["/found/python3"],
+        None,
+    )
+
+
+def test_resolve_native_python_unavailable_reason_names_the_fix(monkeypatch, tmp_path):
+    from kicad_tools.validate.mask_copper_geometry import (
+        _resolve_native_python_command,
+    )
+
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: False)
+    monkeypatch.setattr("kicad_tools.zones.placement_fill.find_kicad_python", lambda probe: None)
+    command, reason = _resolve_native_python_command(None, tmp_path)
+    assert command is None
+    assert "ModuleNotFoundError" not in reason
+    assert "native_python_command" in reason
+    assert "KCT_KICAD_DOCKER" in reason
+    assert "Install KiCad" in reason

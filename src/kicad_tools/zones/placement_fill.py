@@ -37,16 +37,29 @@ class NativeFillWorkerError(RuntimeError):
 _PROBE_TIMEOUT_S = 20
 _PROBE_ATTEMPTS = 2
 
+#: The full ``python -c`` expression each candidate must pass. The default is
+#: the selective-fill requirement (wx off Linux plus the fill API, #6213);
+#: callers with other native needs pass their own expression -- e.g. the mask
+#: per-object worker probes a plain ``import pcbnew`` (#8946).
+_SELECTIVE_FILL_PROBE = (
+    "import sys, pcbnew; "
+    "__import__('wx') if sys.platform != 'linux' else None; "
+    "assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')"
+)
+
 
 class MultilayerFillUnsupportedError(RuntimeError):
     """pcbnew is too old to fill multilayer zones; it would yield empty copper."""
 
 
-def find_kicad_python() -> Path | None:
-    """Find an interpreter with the native APIs this selective fill needs.
+def find_kicad_python(probe: str = _SELECTIVE_FILL_PROBE) -> Path | None:
+    """Find an interpreter whose ``python -c probe`` exits zero.
 
-    A probe that times out is retried once (cold-start tolerance) before the
-    candidate is given up on.
+    Candidates are probed in order: ``sys.executable``, KiCad.app's
+    Python.framework on darwin, ``PROGRAMFILES`` KiCad installs on win32,
+    ``/usr/bin/python3``, then ``python3`` from ``PATH``. A probe that times
+    out is retried once (cold-start tolerance) before the candidate is given
+    up on.
     """
     candidates = [Path(sys.executable)]
     if sys.platform == "darwin":
@@ -76,13 +89,7 @@ def find_kicad_python() -> Path | None:
         for _attempt in range(_PROBE_ATTEMPTS):
             try:
                 result = subprocess.run(
-                    [
-                        str(candidate),
-                        "-c",
-                        "import sys, pcbnew; "
-                        "__import__('wx') if sys.platform != 'linux' else None; "
-                        "assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')",
-                    ],
+                    [str(candidate), "-c", probe],
                     capture_output=True,
                     text=True,
                     timeout=_PROBE_TIMEOUT_S,
