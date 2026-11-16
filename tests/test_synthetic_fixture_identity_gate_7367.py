@@ -414,8 +414,7 @@ def test_regenerated_population_passes_and_a_new_net_fails():
     gate = load("check_matchgroup_coverage")
     run_a = [gap_violation(("TMDS_D0_N",)) for _ in range(3)] + [gap_violation(("MIPI_CLK_N",))]
     run_b = [
-        gap_violation(("TMDS_D0_N",), items=("Via@1.1/1.1:F.Cu-B.Cu:d0.3/s0.6",))
-        for _ in range(2)
+        gap_violation(("TMDS_D0_N",), items=("Via@1.1/1.1:F.Cu-B.Cu:d0.3/s0.6",)) for _ in range(2)
     ]
     for run in (run_a, run_b):
         assert gate.unallowed_blocking(BOARD07_KEY, run) == []

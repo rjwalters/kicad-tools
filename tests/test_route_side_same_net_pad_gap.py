@@ -13,9 +13,10 @@ by engaging the SAME merged predicate -- never a second copy:
 
 The band edge is the caller-resolved
 ``DesignRules.same_net_pad_gap_band_edge_mm`` -- the same
-``GapBand.error_edge_mm`` of the stackup's ``pad_spacing`` dfm entry that
-``_resolve_mfr_pad_gap_edge`` reads (0.15 mm on jlcpcb ``4layer_1oz``,
-0.13 mm on ``4layer_2oz``).  ``None``/0 keeps the guard OFF: an unresolvable
+``GapBand.detection_edge_mm`` of the stackup's ``pad_spacing`` dfm entry that
+``_resolve_mfr_pad_gap_edge`` reads (0.15 mm on jlcpcb ``4layer_1oz`` and,
+since #9016, also on ``4layer_2oz``, whose 0.13 mm warning value sits below
+its danger value).  ``None``/0 keeps the guard OFF: an unresolvable
 stackup never guesses an edge (AC 3).
 """
 
@@ -59,7 +60,12 @@ PAD_TOP = PAD_H / 2  # 0.35
 PAD_BBOX = (-PAD_W / 2, -PAD_H / 2, PAD_W / 2, PAD_H / 2)
 
 EDGE_1OZ = 0.15  # jlcpcb 4layer_1oz pad_spacing danger (no warning band)
-EDGE_2OZ = 0.13  # jlcpcb 4layer_2oz recorded warning band
+#: jlcpcb 4layer_2oz resolves to the same 0.15 mm detection edge since #9016
+#: (its recorded 0.13 mm warning value sits below the danger value).
+EDGE_2OZ = 0.15
+#: A narrower caller-resolved edge, used only to show the guard follows the
+#: scalar it is handed rather than a literal.
+EDGE_NARROW = 0.13
 
 
 def _rules(edge: float | None) -> DesignRules:
@@ -151,15 +157,15 @@ def test_guard_off_when_edge_unresolved():
         )
 
 
-def test_two_oz_edge_bites_below_one_oz_edge():
-    # A 0.14 mm gap is an error on 1 oz (rejected) and only a warning on the
-    # 2 oz stackup's 0.13 edge (accepted) -- a hardcoded literal would
-    # betray one of the two stackups.
+def test_narrower_caller_edge_accepts_a_gap_the_wider_edge_rejects():
+    # A 0.14 mm gap is inside a 0.15 mm band (rejected) and outside a
+    # 0.13 mm one (accepted) -- the guard follows the caller-resolved scalar,
+    # so a hardcoded literal would betray one of the two edges.
     y = PAD_TOP + R + 0.14
     assert not _router(EDGE_1OZ)._can_place_via(
         0.0, y, net=1, foreign_pads=[_own_pad()], clearance=0.05
     )
-    assert _router(EDGE_2OZ)._can_place_via(
+    assert _router(EDGE_NARROW)._can_place_via(
         0.0, y, net=1, foreign_pads=[_own_pad()], clearance=0.05
     )
 

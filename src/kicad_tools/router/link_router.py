@@ -87,8 +87,8 @@ class LinkRouteRules:
     foreign_fill_cost: float = 4.0
     max_cells: int = 1_500_000
     #: Issue #8974: the fab-view same-net pad slit-band edge (mm) -- the
-    #: ``GapBand.error_edge_mm`` of the resolved stackup's ``pad_spacing``
-    #: dfm entry, resolved by the caller (``kct route`` threads
+    #: ``GapBand.detection_edge_mm`` (#9016) of the resolved stackup's
+    #: ``pad_spacing`` dfm entry, resolved by the caller (``kct route`` threads
     #: ``DesignRules.same_net_pad_gap_band_edge_mm`` onto the weld's rules).
     #: A link via whose annulus parks inside ``(0, edge)`` beside its own
     #: SMD pad is rejected and the search walks on.  ``0`` (default) keeps

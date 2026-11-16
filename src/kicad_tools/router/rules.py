@@ -160,15 +160,15 @@ class DesignRules:
     mfr_clearance_floor: float | None = None
 
     # The fab-view same-net pad slit-band edge for the board's actual
-    # stackup (Issue #8974): the ``GapBand.error_edge_mm`` of the resolved
-    # ``pad_spacing`` dfm entry -- the same edge
+    # stackup (Issue #8974): the ``GapBand.detection_edge_mm`` of the
+    # resolved ``pad_spacing`` dfm entry (#9016) -- the same edge
     # ``cli.stitch_cmd._resolve_mfr_pad_gap_edge`` reads and ``kct check
     # --mfr`` grades same-net pad copper gaps with.  Like
     # :attr:`mfr_clearance_floor` this is CALLER-RESOLVED (the caller knows
     # the board's layer count and copper weight; ``DesignRules`` has no
     # stackup fields, so an ``__post_init__`` resolution would be
-    # stackup-blind and pick e.g. 0.15 mm on a 2 oz board whose entry says
-    # 0.13 mm).  Consumers: the escape router's ``_can_place_via`` band
+    # stackup-blind: it could not pick the entry for the board's actual
+    # layer count and copper weight).  Consumers: the escape router's ``_can_place_via`` band
     # check and the oracle weld's ``same_net_pad_gap_mm``.  ``None``
     # (default): the stackup is unknown, so the band guard stays off rather
     # than guessing an edge.
