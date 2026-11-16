@@ -228,11 +228,12 @@ def test_partial_does_not_trigger_incomplete():
 #: The pre-#8940 stanza shape, captured from ``origin/main`` @ 993d2d2ab
 #: before any edit to ``format_parity_stanza`` (the issue's Test Plan requires
 #: the baseline be captured first; AC 2 makes it the byte-identity contract).
-#: #8972 bumps the table version 6 -> 7 (row attribution change), so only the
-#: header's ``table v7`` digit moved -- rows, order and wording are unchanged.
+#: #8972 bumped the table version 6 -> 7 and #9034 7 -> 8 (note-only row
+#: change), so only the header's ``table v8`` digit moved -- rows, order and
+#: wording are unchanged.
 EXPECTED_DEFAULT_STANZA = (
     "\n"
-    "Fab DFM parity (JLCDFM, table v7, 2026-11-12): 0 danger-capable categories not covered\n"
+    "Fab DFM parity (JLCDFM, table v8, 2026-11-12): 0 danger-capable categories not covered\n"
     "  partial     trace_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     pad_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     solder_mask_opening_exposing_trace [danger-capable]: mask_to_copper\n"
@@ -396,6 +397,30 @@ def test_bandless_physical_gap_findings_stay_on_pad_spacing():
     rep = fdp.evaluate_parity("jlcpcb", findings=findings, recorded_counts=RECORDED_8838)
     by_cat = {c.category: c for c in rep.comparisons}
     assert (by_cat["pad_spacing"].kct_errors, by_cat["pad_spacing"].kct_warnings) == (1, 0)
+    assert (by_cat["trace_spacing"].kct_errors, by_cat["trace_spacing"].kct_warnings) == (0, 0)
+
+
+def test_pad_spacing_cases_fixture_attributes_errors_to_pad_spacing():
+    """Issue #9034: the committed five-case fixture's three graded findings
+    all sit on the pad band, so they count toward ``pad_spacing`` and
+    ``trace_spacing`` stays clean; the zone-fill advisory counts to neither
+    tally.  The issue-reported ratio (19 kct errors vs the fab's 6 danger +
+    1 warning on one 4-layer board, board not committed) stays
+    *reported-not-reproduced*: this fixture pins the band semantics and the
+    per-pair counting granularity, not that board."""
+    from kicad_tools.schema.pcb import PCB
+    from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap_fab_view
+
+    findings = list(
+        check_physical_copper_gap_fab_view(
+            PCB.load(str(FIX / "pad_spacing_cases.kicad_pcb")), _policy_2layer_1oz()
+        ).violations
+    )
+    graded = [v for v in findings if v.severity != "info"]
+    assert len(graded) == 3 and all(v.fab_band == "pad" for v in graded)
+    rep = fdp.evaluate_parity("jlcpcb", findings=findings, recorded_counts=RECORDED_8838)
+    by_cat = {c.category: c for c in rep.comparisons}
+    assert (by_cat["pad_spacing"].kct_errors, by_cat["pad_spacing"].kct_warnings) == (3, 0)
     assert (by_cat["trace_spacing"].kct_errors, by_cat["trace_spacing"].kct_warnings) == (0, 0)
 
 

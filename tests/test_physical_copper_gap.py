@@ -1053,3 +1053,63 @@ def test_output_tags_same_net_finding_headers(capsys):
     out = capsys.readouterr().out
     assert "physical_copper_gap (same-net)" in out
     assert "1 same-net" in out  # BY RULE relationship breakdown
+
+
+# ---- Issue #9034: pad_spacing band semantics pinned on a committed fixture --
+
+
+def test_pad_spacing_cases_fixture_pins_severities():
+    """Issue #9034: the committed five-case fixture
+    (``pad_spacing_cases.kicad_pcb``) pins each pad-band case's severity
+    against the recorded ``4layer_1oz`` bands (pad danger 0.15 mm, no
+    warning band):
+
+    * pad<->track different-net 0.10 mm -> error (net-blind, pad band);
+    * pad<->track same-net 0.10 mm -> error (deliberate since #8938);
+    * pad<->pad gap exactly at the 0.15 mm danger edge -> not reported
+      (the measured 0.14999999999999858 mm sits in the scan's 0.001 mm
+      tolerance dead-band, and band semantics put the edge itself outside
+      the error tier -- only a gap strictly below the edge errors);
+    * pad<->pad 0.14 mm, just below the edge -> error;
+    * pad+zone mix 0.10 mm -> info (zone-fill is never tiered, #8938);
+    * pad<->pad 0.16 mm, above the detection edge -> not reported.
+
+    Counting granularity, measured on this fixture: kct emits at most one
+    finding per copper-source pair per layer (findings are keyed by
+    (ids, nets) and the closest measurement wins), never one per
+    facing-edge pair -- so a kct-over-fab surplus cannot come from per-edge
+    inflation within a pair.
+    """
+    from pathlib import Path
+
+    pcb = PCB.load(
+        str(Path(__file__).parent / "fixtures" / "fab_dfm_parity" / "pad_spacing_cases.kicad_pcb")
+    )
+    found = _fab(pcb, _one_oz())
+    pin = sorted((v.severity, round(v.actual_value, 3), v.same_net, v.fab_band) for v in found)
+    assert pin == [
+        # Case 1: pad<->track, different nets, 0.10 mm.
+        ("error", 0.1, False, "pad"),
+        # Case 2: pad<->track, same net, 0.10 mm.
+        ("error", 0.1, True, "pad"),
+        # Case 4: pad<->pad 0.14 mm, just below the danger edge.
+        ("error", 0.14, False, "pad"),
+        # Case 5: pad+zone mix 0.10 mm -- advisory, bandless (fab_band None).
+        ("info", 0.1, False, None),
+    ]
+    # Cases 3 (exactly 0.15 mm) and 6 (0.16 mm) produce nothing: the four
+    # pinned findings above are the fixture's complete output.
+
+
+def test_pad_band_edge_severity_boundaries():
+    """Unit pin of the recorded 1 oz pad band edges (issue #9034): strictly
+    below the 0.15 mm danger edge is an error; the edge itself and anything
+    above it is not a fab finding -- 4layer_1oz records no warning band, and
+    an absent warning band is not defaulted to the danger edge."""
+    from kicad_tools.validate.rules.physical_gap import GapBand
+
+    band = GapBand(0.15, None)
+    assert band.severity_for(0.149) == "error"
+    assert band.severity_for(0.15) is None
+    assert band.severity_for(0.151) is None
+    assert band.error_edge_mm == band.detection_edge_mm == pytest.approx(0.15)
