@@ -65,10 +65,9 @@ loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
 # --- Extract the function under test from merge-pr.sh and source it ---
 # From `_check_verdict_label_contradiction() {` up to (not including) the
 # following `_check_verdict_label_contradiction` invocation line — the
-# function is written as a single dense line (file-size-ratchet offset, see
-# merge-pr.sh's own comment above it), so the extraction captures exactly
-# that one line. Extracting from source keeps the test in lockstep with the
-# script instead of re-implementing it.
+# function is written as a single dense line, so the extraction captures
+# exactly that one line. Extracting from source keeps the test in lockstep
+# with the script instead of re-implementing it.
 #
 # Two more lines come with it (#8285): the one-line `_mp_daemon_roll_hint`,
 # which the refusal path calls to name the daemon version floor and the roll

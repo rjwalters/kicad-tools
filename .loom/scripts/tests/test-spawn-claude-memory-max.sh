@@ -4,7 +4,7 @@
 # systemd-run argv. The sizing policy itself (history-gated, env-disable-able)
 # is unit-tested in loom-daemon/src/cli/ram_scope_limit.rs; here the daemon is
 # a stub so only the shell call-site is under test.
-# Split from test-spawn-claude.sh, which is frozen by the file-size ratchet.
+# Split from test-spawn-claude.sh.
 set -uo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

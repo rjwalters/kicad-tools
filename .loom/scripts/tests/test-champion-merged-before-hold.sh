@@ -22,6 +22,7 @@ fi
 CHAMPION_MD="$PROMPT_DIR/champion-pr-merge.md"
 
 source "$TEST_DIR/lib/assert.sh"
+# Local assert_contains kept: uses grep -qF matching; shared helper uses a bash substring match.
 assert_contains() { if grep -qF -- "$2" <<<"$1"; then pass "$3"; else fail "$3 (missing '$2' in: $1)"; fi; }
 assert_lacks() { if grep -qF -- "$2" <<<"$1"; then fail "$3 (unexpected '$2' in: $1)"; else pass "$3"; fi; }
 count_of() { grep -cF -- "$2" <<<"$1"; }

@@ -380,16 +380,17 @@ process). Cron example (probe every 10 minutes):
 
 ### Consumer: Guide's pool-pressure backoff (#6135)
 
-Guide's Document Maintenance phase reads `.loom/tokens/.ranking` directly
-(a plain file read, **never** its own `tokens check --ranking` probe) before
-filing a WORK_LOG/WORK_PLAN docs-maintenance PR, so it can defer to a later
-tick when the pool is under pressure instead of competing with substantive
-Builder/Judge/Doctor work for the fleet's scarcest capacity — the sweep queue
-tends to run dry at exactly the moments the pool is most exhausted, and Guide
-still ticks every 15-30 minutes regardless. `pool_pressure_fraction()`
-reduces the ranking file to "fraction of accounts NOT `available`" and
-compares it against `guide.docsMaintenance.poolPressureThreshold` (default
-`0.70`, config precedence env > `.loom/config.json` > default, same as
+Guide's Document Maintenance phase consults pool pressure (a read of the
+already-refreshed ranking, **never** its own `tokens check --ranking` probe)
+before filing a WORK_LOG/WORK_PLAN docs-maintenance PR, so it can defer to a
+later tick when the pool is under pressure instead of competing with
+substantive Builder/Judge/Doctor work for the fleet's scarcest capacity — the
+sweep queue tends to run dry at exactly the moments the pool is most
+exhausted, and Guide still ticks every 15-30 minutes regardless.
+`pool_pressure_fraction()` reduces the ranking to "fraction of accounts NOT
+`available`" and compares it against
+`guide.docsMaintenance.poolPressureThreshold` (default `0.70`, config
+precedence env > `.loom/config.json` > default, same as
 `buildGate.loadThreshold`); once at/above threshold, filing is deferred until
 either pressure clears or `guide.docsMaintenance.poolPressureMaxDeferSecs`
 (default `14400` = 4h) has elapsed since the last docs-maintenance PR merged
@@ -397,6 +398,39 @@ either pressure clears or `guide.docsMaintenance.poolPressureMaxDeferSecs`
 data fails open (proceeds as if there is no pressure). Full mechanism:
 `defaults/.claude/commands/loom/guide.md` → "Step 4b: Check Token-Pool
 Pressure".
+
+#### It goes through `loom-daemon tokens pressure`, not a file read (#13839)
+
+`pool_pressure_fraction()` shells out to:
+
+```bash
+loom-daemon tokens pressure [--workspace <repo root>]   # prints 0-1, exits 0
+```
+
+It used to read `<repo>/.loom/tokens/.ranking` itself, which was wrong twice
+over. The role-tool-policy hook (#8256) counts `.loom/tokens` as a credential
+store and `guide` declares no `credential-store` capability, so a Bash call
+naming that path is **denied at the harness** — and the denial takes the whole
+call with it, not just the one read. Independently, the hardcoded repo-local
+path is not where the pool usually lives: on a shared-pool host
+(`~/.loom/tokens`, `$LOOM_SHARED_TOKENS_DIR` — see "Shared machine-level
+pool" above) that file does not exist, so the check reported "no pressure"
+unconditionally even where the hook never fired.
+
+The verb fixes both. It resolves the pool directory through
+`capacity::read_ranking`, the same resolution the ranking writer uses, and it
+emits a single number — no account names, statuses, utilizations, or token
+material — so a role with an empty capability allowlist can call it.
+`defaults/roles/guide.json` is unchanged.
+
+**One deliberate behaviour difference.** The verb's count is
+`capacity::read_ranking`'s, not the old `awk`'s. It additionally downgrades an
+`available` row that has a live `.bad_tokens` entry (#7522), and it counts an
+unrecognised status word as unhealthy, where the shell version compared only
+against the literal `available` and treated an empty status field as
+available. The verb's reading is therefore slightly *more* pessimistic, and
+closer to what the spawn-time selector will actually hand out — which is the
+number this backoff wants.
 
 ## Token rotation setup (per-task spawn)
 

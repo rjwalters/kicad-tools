@@ -2,9 +2,8 @@
 # test-resync-installed-dogfood-symlink.sh - NEW-FILE dogfood symlink install
 # for the docs surface in resync-installed.sh (#8841)
 #
-# Split out as its own file rather than grown into test-resync-installed.sh
-# (frozen by the file-size ratchet, .loom/docs/file-size-policy.md) — same
-# pattern as test-resync-installed-local-fix-guard.sh and
+# Split out as its own file rather than grown into test-resync-installed.sh —
+# same pattern as test-resync-installed-local-fix-guard.sh and
 # test-resync-installed-agent-skills-guard.sh.
 #
 # What regressed (#8841): in the Loom source repo every `.loom/docs/*.md` is a

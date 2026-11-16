@@ -8,7 +8,7 @@
 # mktemp -d, LOOM_SYSTEMD_FORCE=1 (lib/systemd-user.sh's test-only seam) to
 # drive the enforced path on any OS, and an explicit caller credential
 # (LOOM_SPAWN_NO_EXPORT) so no real loom-daemon or token pool is needed.
-# Split from test-spawn-claude.sh, which is frozen by the file-size ratchet.
+# Split from test-spawn-claude.sh.
 set -uo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

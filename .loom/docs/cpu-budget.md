@@ -73,12 +73,12 @@ core count is the operator's job: the only admission cap is
 1. `LOOM_SWEEP_INFLIGHT_SWEEPS` — explicit override (a test hook, and the
    escape hatch for a host running concurrent agents the local daemon does
    not track).
-2. `loom-daemon status --json` → `in_flight` + `unregistered_locked`
+2. `loom-daemon status --json --section in_flight,unregistered_locked` → `in_flight` + `unregistered_locked`
    (`unregistered_locked` entries are #4214's "demonstrably alive but the
    registry lost track of it" sweeps — they burn CPU like any other). This is
    the daemon's union across **every** managed root, so it is a host-wide
    count and not a per-repo one. The probe is hard-bounded by
-   `LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS` (default 10s).
+   `LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS` (default 60s, a hang guard above the CLI's own root-scaled budget).
 3. `1` — the fail-safe. No `jq`, no daemon binary, no running daemon, an
    unparseable payload, or a probe timeout all land here, and a divisor of 1
    reproduces pre-#5979 behavior exactly. **A host without a daemon behaves
@@ -158,7 +158,7 @@ default that could kill a legitimate long build.
 | `LOOM_SWEEP_RESERVED_CORES` | `autonomous.spawnReservedCores` | `2` | Cores subtracted from the host total before computing the budget. |
 | `LOOM_SWEEP_SHARED_CPU_BUDGET` | `autonomous.spawnSharedCpuBudget` | `1` (enabled) | `0`/`false` skips the #5979 host-wide division, so each sweep independently claims the whole `total - reserved` (pre-#5979 behavior). |
 | `LOOM_SWEEP_INFLIGHT_SWEEPS` | — | *(auto)* | Override the concurrent-sweep divisor instead of asking the local daemon for it. |
-| `LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS` | — | `10` | Hard bound on the `loom-daemon status --json` probe. On timeout the divisor falls back to `1`. |
+| `LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS` | — | `60` | Hang-guard bound on the `loom-daemon status --json --section in_flight,unregistered_locked` probe (the CLI's own root-scaled budget, max 45s, is the real bound; keep this above it). On timeout the divisor falls back to `1`. |
 | `LOOM_SWEEP_WALLCLOCK_CEILING_SECS` | `autonomous.spawnWallClockCeilingSecs` | `0` (disabled) | Adds `RuntimeMaxSec=<secs>` to the systemd scope when non-zero. |
 | `LOOM_SWEEP_MEMORY_MAX` | `autonomous.agentMemoryMax` | `auto` | Per-scope `MemoryMax` (#11094). `auto` (or unset) = derive from the daemon's observed per-repo peak (`~/.loom/ram-peaks.json`): `max(LOOM_SWEEP_MEMORY_MAX_MIN_MB, high-water * LOOM_SWEEP_MEMORY_MAX_PCT/100)`, and **no limit at all without history** for that repo. `off` (or `0`) disables; a positive integer is an explicit MiB limit. The config keys (#12246) are read on every spawn and include the daemon workspace's host-local tier, so the fleet can set them per host without a restart; see `daemon-reference.md` §"Per-agent scope MemoryMax". Paired with `OOMPolicy=continue`, an over-budget build is killed inside its own cgroup instead of by the kernel's global OOM killer. `MemoryMax` rather than `MemoryHigh`: `MemoryHigh` only throttles, so a runaway build on a no-swap host would stall rather than fail. Skipped when the limit would be >= host RAM or systemd rejects it (memory controller not delegated). Computed by `loom-daemon ram-scope-limit`; a binary without that subcommand means no limit. |
 | `LOOM_SWEEP_MEMORY_MAX_PCT` / `_MIN_MB` | `autonomous.agentMemoryMaxPct` / `autonomous.agentMemoryMaxMinMb` | `200` / `4096` | Multiple of the observed peak, and floor in MiB, for the derived limit. |

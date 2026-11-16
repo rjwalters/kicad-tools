@@ -2,9 +2,8 @@
 # test-token-model-class.sh — per-model-class token selection and bad-marking
 # (issue #8058).
 #
-# Split out of test-spawn-claude.sh rather than appended to it: that file is
-# over scripts/check-file-size-budget.sh's threshold and therefore frozen at its
-# current size, and #8058 is a self-contained behaviour with its own fixtures.
+# Split out of test-spawn-claude.sh rather than appended to it: #8058 is a
+# self-contained behaviour with its own fixtures.
 #
 # Style matches test-spawn-claude.sh — plain bash, hand-rolled assertions.
 # Bats is NOT used in this repository.
@@ -41,6 +40,7 @@ export LOOM_SWEEP_INFLIGHT_SWEEPS=1
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 
+# Local assert_contains kept: takes (needle, haystack, msg); shared helper is (haystack, needle, msg).
 assert_contains() {
     local needle="$1" haystack="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))
@@ -55,6 +55,7 @@ assert_contains() {
     fi
 }
 
+# Local assert_not_contains kept: takes (needle, haystack, msg); shared helper is (haystack, needle, msg).
 assert_not_contains() {
     local needle="$1" haystack="$2" msg="$3"
     TESTS_RUN=$((TESTS_RUN + 1))

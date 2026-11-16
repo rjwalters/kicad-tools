@@ -2373,7 +2373,7 @@ the issue required. Enumerated from `mcp-loom/src/tools/` (30 MCP tools),
 | Sweep lifecycle | `status`, `dispatch`, `cancel`, `watch` | `list_sweeps`, `get_sweep_status`, `tail_sweep_log` (all readable via `status`/prose Q&A only) |
 | Watches | `watch` (register) | `list_watches`, `remove_watch` — **the sharpest gap**: a room-registered watch cannot be room-listed or room-removed |
 | Events | — | `subscribe_to_events`, `publish_event`, `tail_event_bus` |
-| Terminals | — | `create_terminal`, `configure_terminal`, `delete_terminal`, `restart_terminal`, `list_terminals`, `get_terminal_output`, `send_terminal_input`, `set_primary_terminal`, `get_selected_terminal` |
+| Terminals | — | `create_terminal`, `configure_terminal`, `delete_terminal`, `restart_terminal`, `list_terminals`, `get_terminal_output`, `send_terminal_input` (`set_primary_terminal`, `get_selected_terminal` since removed) |
 | Engine control | `dispatch`/`cancel`/`unblock` cover the sweep engine | `start_autonomous_mode`, `stop_autonomous_mode`, `stop_engine`, `launch_interval`, `trigger_start`, `trigger_force_start`, `trigger_force_factory_reset` (all since removed) |
 | Observability | — | `get_ui_state`, `get_agent_metrics`, `get_heartbeat` |
 | Destructive confirm | `confirm <nonce>` (human-typed only) | — (by design; the persona can never relay it) |
