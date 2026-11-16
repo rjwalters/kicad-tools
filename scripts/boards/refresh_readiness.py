@@ -835,6 +835,13 @@ def repin_staged(
     for p in (staged / "output").iterdir():
         if p.is_file() and p.name.endswith("net_class_map.json"):
             report["inputs"].setdefault(p.relative_to(staged).as_posix(), "")
+    # Issue #9006: the waivers sidecar the check gate auto-loads is bound the
+    # same way (receipts issued before the binding omit it).
+    from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
+
+    sidecar = discover_waivers_sidecar(staged / cfg.routed_pcb)
+    if sidecar is not None and sidecar.is_relative_to(staged):
+        report["inputs"].setdefault(sidecar.relative_to(staged).as_posix(), "")
     # Renders are presentation artifacts, not evidence (Issue #7678).
     from kicad_tools.cli.board_readiness import readiness_input_hash
     from kicad_tools.cli.readiness_cmd import _is_render_artifact

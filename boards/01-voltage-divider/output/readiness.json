@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "checked_at": "2026-11-10T21:00:00+00:00",
+  "checked_at": "2026-11-16T11:51:49Z",
   "mode": "assembly",
   "status": "ready",
   "blockers": [],
@@ -143,7 +143,8 @@
     "output/voltage_divider_routed.kicad_dru": "fb319dd178277fa061b752ab982a13fb5bbdff5f764dad28c55847222b916b8c",
     "output/voltage_divider_routed.kicad_pcb": "2cfdd726d373f6aac2cf2835fc7c183310763ccfe37f4c098e65b9b82df8a63d",
     "output/voltage_divider_routed.kicad_pro": "ed1b123046a7d2ee89193a0cd0b8ab62575a4b9eca35e555e42f530b1c73f092",
-    "project.kct": "b4aad17d636f37da049fdc9c0939a40f091a8d61a9b6f75c624ba62cee8486c4"
+    "project.kct": "b4aad17d636f37da049fdc9c0939a40f091a8d61a9b6f75c624ba62cee8486c4",
+    "output/voltage_divider_routed.kct-waivers.json": "ed048e75c9728dcc0011cac7f8ea06b61e10716482a99f0f301610d07c9c69b2"
   },
   "report_sources": {
     "output/readiness/native-drc.json": "6ec90fa18d1b454b885e440664bb2072a0078fbe3d70a634c4b3b25ebb1e552a",
