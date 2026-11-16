@@ -14,8 +14,47 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-16
+
+- **PR #9036**: fix: omit empty-reason placeholder for complete mask-to-copper stanza
+- **Issue #8991** (closed): kct check prints a spurious 'no reason reported' line under a complete mask-to-copper assessment
+- **PR #9026**: build(deps-dev): bump @types/node from 26.6.5 to 26.6.6 in /site in the npm-minor-patch group across 1 directory
+- **PR #9021**: fix(stitch): use pad-gap detection edge to match kct check on 2oz stackups
+- **Issue #9016** (closed): Stitcher passes error_edge_mm to the same-net pad-gap predicate whose contract now says detection_edge_mm
+- **PR #9024**: test: pin first-pass far-end tie clearance on cornered SMD legs
+- **PR #9022**: fix(readiness): bind the waivers sidecar into evidence inputs
+- **Issue #9006** (closed): readiness evidence does not record waiver-cleared errors, nor hash the waivers sidecar
+- **Issue #8996** (closed): Cornered SMD-ended legs: assert the far-end tie clears the far pad (and note the first-pass fix in changelog.d/8970)
+- **PR #9012**: refactor: generalise the same-net slit-band predicate to pad-vs-trace segments
+- **PR #9010**: fix: admit kct's conditional managed .kicad_dru constraints to native mask attribution
+- **PR #9004**: docs: add WeaveEngine topology-first evaluation note and registry entry
+- **PR #8989**: fix: keep recipe pour-repair via annuli out of the same-net pad slit band
+- **PR #8986**: fix: adopt SMD end-tie vias at the tie arc on record-less parallel re-runs
+- **PR #8980**: fix(validate): expand KiCad 10's %AMRoundRect aperture macro in the Gerber reader
+- **PR #8978**: fix: discover a pcbnew-capable interpreter for the native mask worker
+- **PR #8955**: fix(dru): restore authored zone clearances the fab-floor rule replaced at refill
+- **Issue #8993** (closed): Evaluate c28ba/WeaveEngine (topology-first autorouter) for router ideas
+- **Issue #8976** (closed): Same-net pad-vs-trace copper slits on boards 06/07: attribute the population, then fix or document
+- **Issue #8975** (closed): Recipe repair-pass same-net pad slits: explain the skew-tuner/pour-refill coupling before a band fix
+- **Issue #8973** (closed): mask_to_copper still rejects kct's conditional managed .kicad_dru blocks
+- **Issue #8970** (closed): Record-less parallel re-run still accretes the two end-tie vias on an SMD-ended leg
+- **Issue #8959** (closed): Gerber reader rejects KiCad 10's %AMRoundRect aperture macro
+- **Issue #8946** (closed): mask_to_copper native helper runs under a python3 with no pcbnew
+- **Issue #8937** (closed): Managed .kicad_dru fab-floor clearance rule overrides larger zone and net-class clearances
+- **PR #8977**: fix: kct check verdict reads INCOMPLETE when a blocking category cannot run, with collapsed reasons and a remediation line
+- **PR #8967**: feat: size parallel-copy tie rows from declared current and judge width-swap vias
+- **Issue #8950** (closed): pcb reinforce parallel: tie-via arrays at SMD ends, and path_ampacity judging a width-swap via between doubled stretches
+- **Issue #8949** (closed): kct check prints Overall: PASSED above BLOCKING UNKNOWN and exits 2: an incomplete blocking category must report INCOMPLETE, with collapsed reasons and a remediation line
+
 ### 2026-11-15
 
+- **PR #8966**: fix: reject zero-size Gerber apertures on use, repair self-touching region contours
+- **PR #8987**: fix: attribute fab-band physical_copper_gap findings to their parity rows
+- **PR #8985**: fix: name the frame of 'kct pcb prune --region' and echo it in both frames
+- **PR #8968**: fix: admit physical_hole_clearance, text_thickness and text_height to the native rule-context allowlist
+- **Issue #8972** (closed): Fab DFM parity: trace-band physical_copper_gap findings are attributed to pad_spacing
+- **Issue #8969** (closed): kct pcb prune: report is sheet-absolute but --region input is board-relative, and its help does not say so
+- **Issue #8947** (closed): Gerber reader rejects KiCad 10's own output: zero-size region aperture and self-touching zone-fill contours abort whole layers
 - **PR #8963**: fix: keep stitch via annuli out of the same-net pad slit band
 - **PR #8965**: feat: print kct-vs-fab counts in the Fab DFM parity stanza
 - **PR #8961**: fix(pcb): quote prune's report coordinates at their sheet position
@@ -3230,55 +3269,6 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - **Issue #5522** (closed): [Epic #5511] Declared swap groups + crossing-minimising pin assignment (report-only)
 - **Issue #5519** (closed): [Epic #5510] router: emit RoutingPlan sidecar from the existing two-phase global pass (report-only, byte-identical copper)
 - **Issue #5516** (closed): [Epic #5508] Phase 1a: `router/pad_access.py` access-set computation + 4-pad Kelvin/competing-net fixture
-
-### 2026-09-16
-
-- **PR #5512**: ci: pin routed job containers to the kicad slots' sibling-pair cores (6-31,38-63)
-- **PR #5503**: ci: attribute native Test workloads before selecting an OOM policy
-- **PR #5500**: perf(router): avoid sqrt in hole-to-hole clearance hot loop
-- **PR #5499**: feat(manufacturers): enable reviewed JLC Gerber upload transport
-- **PR #5498**: fix(router): check tuning across physical via barrel spans
-- **PR #5497**: fix(router): clear avoidance costs after each connection
-- **Issue #5496** (closed): router: validate tuning against physical via barrel spans
-- **Issue #5495** (closed): router: clear native avoidance penalties after each pad connection
-- **PR #5494**: test(router): preserve native import state across diagnostic reloads
-- **Issue #5493** (closed): tests: restore native backend import state after diagnostic reloads
-- **PR #5492**: docs: check coverage overhead before suspecting a hang in slow single-test runs
-- **PR #5491**: docs: record pinned-main softstart qualification
-- **Issue #5490** (closed): test_board02_real_hardware.py::test_generated_real_schematic_and_pcb_agree does not terminate quickly — verify actual failure mode
-- **PR #5489**: perf(lvs): resolve every schematic pin against one connectivity graph
-- **PR #5488**: perf(board06): spatially prune the pour-connectivity audit's pairwise scan
-- **PR #5487**: docs: record current softstart residual attribution
-- **PR #5486**: fix(router): preserve static partner-pad clearance in native search
-- **PR #5485**: fix: handle equal-potential pairs at zero HV threshold
-- **Issue #5484** (closed): Zero HV threshold crashes on equal-potential net pairs
-- **PR #5483**: fix(router): retain physical targets for repeated pad numbers
-- **Issue #5482** (closed): router: preserve static partner-pad clearance during native differential search
-- **Issue #5481** (closed): loom-daemon: loom:blocked stripped/re-dispatched within ~2 minutes on #5333 (105+ lease claims/16h, 3 hosts)
-- **Issue #5480** (closed): router: retain disconnected same-number pad lands as physical routing targets
-- **PR #5479**: fix(router): retain escape and two-phase routing checkpoints
-- **Issue #5478** (closed): router: retain checkpoints through escape and two-phase routing
-- **PR #5477**: fix(router): keep Kelvin destination escape copper reachable
-- **PR #5476**: perf(router): prune distant match-group clearance comparisons
-- **Issue #5475** (closed): router: keep destination escape copper reachable during Kelvin branch isolation
-- **PR #5474**: fix(board04): avoid unsupported route failure diagnoses
-- **PR #5473**: perf(router): AABB pre-filter for diff-pair length-tuning clearance check
-- **Issue #5472** (closed): board04: do not attribute every partial route to timeout
-- **Issue #5471** (closed): perf(router): AABB pre-filter for match-group post-insertion clearance checks
-- **PR #5470**: perf(router): keep scalar congestion arithmetic in Python floats
-- **Issue #5469** (closed): perf(router): use Python floats for scalar congestion arithmetic
-- **PR #5468**: perf(router): reuse congestion cost within neighbor batches
-- **Issue #5467** (closed): perf(router): reuse coarse congestion cost within neighbor batches
-- **Issue #5464** (closed): loom-daemon repeatedly redispatches issue #5240 despite an open non-closing 'Part of #5240' PR under review
-- **Issue #5455** (closed): router: diversify final bounded relief probe direction for two-terminal nets
-- **Issue #5435** (closed): router: reject negotiated trace crossings of foreign via copper during native search
-- **PR #5425**: fix(router): preserve physical clearances and complete bounded native searches
-- **Issue #5405** (closed): router: extract budget-exhaustion precedence fix from held Board07 draft
-- **Issue #5351** (closed): ci: containerd snapshots fill runner root disk despite mostly empty cache volume
-- **Issue #5145** (closed): JLC handoff: resumable exact-byte Gerber upload intents and bound receipts
-- **Issue #5056** (closed): Feature: Python JLCPCB submission preparation with verified handoff, live stock, review receipts and resumable upload
-- **Issue #5000** (closed): board03: qualify USB firmware identity and suspend behavior before factory flashing
-- **Issue #4956** (closed): Champion: Merge-Risk Hold Digest
 
 ### 2026-07-20 (evening)
 

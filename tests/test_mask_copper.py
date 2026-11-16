@@ -342,48 +342,74 @@ def test_sidecar_and_plot_bindings_invalidate_escape_intent(field):
     assert result.measurements[0].disposition == "violation"
 
 
-def _fab_floor_constraint_names() -> set[str]:
-    """Constraint names kct's fab-floor sources emit into managed ``.kicad_dru`` text.
+def _managed_constraint_names() -> set[str]:
+    """Constraint names kct's writers emit into managed ``.kicad_dru`` text.
 
-    Sources are exactly the two #8948 measured: ``dru_generator.py`` and the
-    shipped tier files under ``manufacturers/rules/``. Sibling writers that
-    also append to the managed block (``netclass_dru.py``, ``keepout_dru.py``;
-    admission tracked in #8973) are deliberately excluded.
+    Sources are the four writers that build a board's managed ``.kicad_dru``:
+    ``dru_generator.py`` and the shipped tier files under
+    ``manufacturers/rules/`` (#8948), the router diff-pair block (#6443) and
+    the keepout block (#6039) -- the latter two derived by rendering the
+    same functions the writers call, in both pair shapes kct emits
+    (KiCad-recognised and router-recorded, #6429).
     """
     manufacturers = Path(__file__).resolve().parent.parent / "src" / "kicad_tools" / "manufacturers"
     text = (manufacturers / "dru_generator.py").read_text(encoding="utf-8")
     names = set(re.findall(r"\(constraint\s+([a-z_]+)", text))
     for tier in sorted((manufacturers / "rules").glob("*.kicad_dru")):
         names |= set(re.findall(r"\(constraint\s+([a-z_]+)", tier.read_text(encoding="utf-8")))
+    from kicad_tools.manufacturers.keepout_dru import KeepoutDruRule
+    from kicad_tools.manufacturers.netclass_dru import (
+        PairLimits,
+        render_pair_gap_rule,
+        render_pair_limit_rules,
+    )
+
+    rendered = [render_pair_gap_rule("A_P", "A_N", 0.2)]
+    rendered += render_pair_limit_rules(
+        PairLimits(p="A_P", n="A_N", uncoupled_mm=5.0, skew_mm=0.5, max_vias=4)
+    )
+    rendered += render_pair_limit_rules(PairLimits(p="X_POS", n="X_NEG", skew_mm=1.0, max_vias=6))
+    rendered.append(
+        KeepoutDruRule(
+            name="kct keepout all",
+            reference="u",
+            disallow=("track", "via", "pad", "zone", "footprint"),
+        ).render()
+    )
+    for chunk in rendered:
+        names |= set(re.findall(r"\(constraint\s+([a-z_]+)", chunk))
     return names
 
 
-def test_rule_context_allowlist_admits_fab_floor_vocabulary_and_rejects_plot_shaping():
+def test_rule_context_allowlist_admits_managed_vocabulary_and_rejects_plot_shaping():
     """Pin the hoisted native rule-context allowlist without a native interpreter.
 
-    The fab-floor constraint vocabulary kct emits into the managed
-    ``.kicad_dru`` block and every shipped tier file (#8948) must be
-    admitted, so a board carrying only that block never reports ``Native
-    object rule context unsupported``. The expectation side is derived at
-    test time from the same sources #8948 measured, so a name newly emitted
-    by ``dru_generator.py`` or a tier file turns the first assertion red
-    until its geometry-neutrality is argued and parity-tested, which is the
-    friction the allowlist exists to enforce. Constraints written into the
-    same managed block by sibling modules -- ``netclass_dru.py`` (diff-pair,
-    skew, via-count) and ``keepout_dru.py`` (``disallow``) -- are neither
-    derived here nor admitted; #8973 tracks their admission. The
-    plot-shaping zone-fill constraints must stay outside either way.
+    The whole constraint vocabulary kct writes into a managed ``.kicad_dru``
+    -- fab floors and tier files (#8948), diff-pair gap and pair limits
+    (#6443) and keepout ``disallow`` rules (#6039) -- must be admitted, so a
+    board carrying only kct's own output never reports ``Native object rule
+    context unsupported``. The expectation side is derived at test time from
+    the same writers, so a name newly emitted by any of them turns the first
+    assertion red until its geometry-neutrality is argued and parity-tested,
+    which is the friction the allowlist exists to enforce. The plot-shaping
+    zone-fill constraints and the mask/paste-shaping names must stay outside
+    either way.
     """
     from kicad_tools.validate.mask_copper_geometry import SAFE_RULE_CONSTRAINTS
 
-    emitted_by_kct = _fab_floor_constraint_names()
-    assert emitted_by_kct, "fab-floor derivation found no constraints; did sources move?"
+    emitted_by_kct = _managed_constraint_names()
+    assert emitted_by_kct, "managed derivation found no constraints; did sources move?"
     assert emitted_by_kct <= SAFE_RULE_CONSTRAINTS
     assert not SAFE_RULE_CONSTRAINTS & {
         "zone_connection",
         "thermal_relief_gap",
         "thermal_spoke_width",
         "min_resolved_spokes",
+        "bridged_mask",
+        "solder_mask_expansion",
+        "solder_mask_sliver",
+        "solder_paste_abs_margin",
+        "solder_paste_rel_margin",
     }
 
 
@@ -947,6 +973,23 @@ def test_stdout_collapses_repeated_reasons_and_shows_distinct_causes(tmp_path, c
     # Distinct causes up to the bound are visible, the remainder counted.
     assert "cause 0" in stanza and "cause 7" not in stanza
     assert "(+2 more)" in stanza
+
+
+def test_stdout_complete_assessment_has_no_placeholder_line(tmp_path, capsys, monkeypatch):
+    """Issue #8991: ``complete`` + no reasons prints only the header line."""
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    _patch_assessment(monkeypatch, coverage="complete", reasons=[])
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    main([str(board), "--drc-only", "--mfr", "jlcpcb"])
+    lines = capsys.readouterr().out.splitlines()
+    idx = next(i for i, ln in enumerate(lines) if ln.startswith("Mask-to-copper: complete"))
+    following = lines[idx + 1] if idx + 1 < len(lines) else ""
+    assert "no reason reported" not in following
+    assert "Remediation:" not in following
+    assert not any("no reason reported" in ln for ln in lines)
 
 
 def test_stdout_single_and_empty_reason_lists_stay_clean(tmp_path, capsys, monkeypatch):

@@ -86,6 +86,14 @@ class LinkRouteRules:
     via_cost: float = 2.0
     foreign_fill_cost: float = 4.0
     max_cells: int = 1_500_000
+    #: Issue #8974: the fab-view same-net pad slit-band edge (mm) -- the
+    #: ``GapBand.detection_edge_mm`` (#9016) of the resolved stackup's
+    #: ``pad_spacing`` dfm entry, resolved by the caller (``kct route`` threads
+    #: ``DesignRules.same_net_pad_gap_band_edge_mm`` onto the weld's rules).
+    #: A link via whose annulus parks inside ``(0, edge)`` beside its own
+    #: SMD pad is rejected and the search walks on.  ``0`` (default) keeps
+    #: the guard off.
+    same_net_pad_gap_mm: float = 0.0
     #: Issue #6374: per-neighbour-net clearance (net number -> mm), the
     #: ``max(class(link net), class(neighbour))`` rule the grid router applies
     #: (``io._get_pair_clearance``).  ``clearance`` stays the floor: a net
@@ -244,6 +252,7 @@ class _Item:
     net: int
     layers: dict[str, Any]
     is_pad: bool = False
+    drill: float = 0.0
 
 
 @dataclass
@@ -276,11 +285,17 @@ def _build_model(pcb: PCB) -> _BoardModel:
             if not layers:
                 continue
             geom = _pad_geometry(fp, pad)
+            pad_drill = float(getattr(pad, "drill", 0.0) or 0.0)
             pad_geoms.append(geom)
             items.append(
-                _Item(int(getattr(pad, "net_number", 0) or 0), dict.fromkeys(layers, geom), True)
+                _Item(
+                    int(getattr(pad, "net_number", 0) or 0),
+                    dict.fromkeys(layers, geom),
+                    True,
+                    pad_drill,
+                )
             )
-            drill = float(getattr(pad, "drill", 0.0) or 0.0)
+            drill = pad_drill
             if drill > 0:
                 c = geom.centroid
                 drills.append((c.x, c.y, drill))
@@ -582,6 +597,31 @@ def route_link(
     pads_here = [p for p in model.pad_geoms if p.intersects(window)]
     if pads_here:
         via_bad |= mask_of(unary_union(pads_here).buffer(rules.via_size / 2 + 0.05))
+    # Issue #8974: the fab-view same-net slit band.  The all-pads mask above
+    # bans via-in-pad on every net; what it does not constrain is the
+    # annulus of a via seated JUST outside its own SMD pad -- two wedges of
+    # air beside the connecting stub that ``physical_copper_gap`` grades as
+    # errors even same-net (#8938).  The banned ring is the region form of
+    # the shared ``same_net_pad_gap_acceptable`` predicate
+    # (``same_net_pad_gap_band_ring``, per-pad bbox rings) -- one band
+    # definition feeds both this mask and the point re-checks (#8974
+    # review: no second band copy).  The A* walks on to the next node
+    # exactly as any other illegal seat.
+    band_edge_mm = float(getattr(rules, "same_net_pad_gap_mm", 0.0) or 0.0)
+    if band_edge_mm > 0:
+        from .via_clearance import same_net_pad_gap_band_ring
+
+        own_pad_boxes = [
+            next(iter(it.layers.values())).bounds
+            for it in model.items
+            if it.is_pad and it.net == net_number and it.drill <= 0
+            if next(iter(it.layers.values())).intersects(window)
+        ]
+        if own_pad_boxes:
+            band_ring = unary_union(
+                [same_net_pad_gap_band_ring(b, rules.via_size, band_edge_mm) for b in own_pad_boxes]
+            )
+            via_bad |= mask_of(band_ring)
     drill_disks = [
         # Issue #6671: + the slack the board writer's 0.01 mm rounding can eat.
         Point(dx, dy).buffer(
@@ -785,6 +825,27 @@ def _via_site_blocker(
     for geom in model.pad_geoms:
         if p.distance(geom) < rules.via_size / 2 + 0.05 - 1e-4:
             return "via site is inside or against a pad (no via-in-pad)"
+    # Issue #8974: the same-net slit band route_link's mask enforces -- a
+    # seat whose annulus parks inside ``(0, band_edge_mm)`` beside its own
+    # SMD pad is a fab-view ``physical_copper_gap`` error even same-net.
+    # The shared point predicate decides (bboxes, one band definition with
+    # the mask's ring and every other producer); seats with a smaller gap
+    # are already rejected by the no-via-in-pad loop above, which fires
+    # first (#8974 review: no second band copy).
+    band_edge_mm = float(getattr(rules, "same_net_pad_gap_mm", 0.0) or 0.0)
+    if band_edge_mm > 0:
+        from .via_clearance import same_net_pad_gap_acceptable
+
+        own_pad_boxes = [
+            next(iter(it.layers.values())).bounds
+            for it in model.items
+            if it.is_pad and it.net == net_number and it.drill <= 0
+        ]
+        if not same_net_pad_gap_acceptable(p.x, p.y, rules.via_size, own_pad_boxes, band_edge_mm):
+            return (
+                f"via site annulus sits inside the {band_edge_mm:.2f} mm "
+                f"fab-view slit band beside its own SMD pad (#8974)"
+            )
     for dx, dy, dd in model.drills:
         need = dd / 2 + rules.via_drill / 2 + rules.hole_to_hole + COORD_WRITE_GUARD_MM
         if p.distance(Point(dx, dy)) < need - 1e-4:

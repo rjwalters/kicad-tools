@@ -169,16 +169,20 @@ def _resolve_mfr_min_hole_to_hole(mfr: str, layers: int, copper: float = 1.0) ->
 
 
 def _resolve_mfr_pad_gap_edge(mfr: str, layers: int, copper: float = 1.0) -> float | None:
-    """Fab-view pad-population error edge (mm) for the stackup, or ``None``.
+    """Fab-view pad-population detection edge (mm) for the stackup, or ``None``.
 
-    Issue #8957: the same edge ``kct check --mfr`` grades same-net pad copper
-    gaps with -- ``GapBand.error_edge_mm`` of the resolved stackup's
-    ``pad_spacing`` dfm entry (e.g. 0.15 mm on jlcpcb ``4layer_1oz``; 0.13 mm
-    on ``4layer_2oz``, whose recorded warning band sits below the danger
-    value).  Resolved from the profile table, never a literal, so the
-    stitcher's acceptance band matches the checker by construction.
-    ``None`` when the fab ships no table or the stackup has no entry: the
-    band guard then stays off rather than guessing an edge.
+    Issue #8957, corrected by #9016: the edge ``kct check --mfr`` starts
+    grading same-net pad copper gaps at -- ``GapBand.detection_edge_mm`` of
+    the resolved stackup's ``pad_spacing`` dfm entry (the looser of the danger
+    and warning values: 0.15 mm on jlcpcb ``4layer_1oz``, and also 0.15 mm on
+    ``4layer_2oz`` whose recorded warning band, 0.13 mm, sits below the danger
+    value).  This is the contract of ``same_net_pad_gap_acceptable()``
+    (#8976): a gap in ``[error_edge, detection_edge)`` is a
+    ``physical_copper_gap`` warning, so passing the error edge would let the
+    stitcher seat vias the checker flags.  Resolved from the profile table,
+    never a literal, so the stitcher's acceptance band matches the checker by
+    construction.  ``None`` when the fab ships no table or the stackup has no
+    entry: the band guard then stays off rather than guessing an edge.
     """
     from kicad_tools.manufacturers.base import load_dfm_thresholds
     from kicad_tools.validate.rules.physical_gap import GapBand
@@ -203,7 +207,7 @@ def _resolve_mfr_pad_gap_edge(mfr: str, layers: int, copper: float = 1.0) -> flo
     if entry is None:
         return None
     pad = entry.thresholds["pad_spacing"]
-    return float(GapBand(pad.danger_mm, pad.warning_mm).error_edge_mm)
+    return float(GapBand(pad.danger_mm, pad.warning_mm).detection_edge_mm)
 
 
 def _resolve_mfr_via_dimensions(
@@ -6160,14 +6164,14 @@ def run_stitch(
             GND pours cover every layer this is the difference between "no
             via site anywhere" and a via the refill simply clears around.
         same_net_pad_gap_mm: Issue #8957 -- with ``avoid_pad_overlap``, the
-            fab-view pad-population error edge (mm) every stitch via's copper
-            annulus must keep to same-net SMD pads: a candidate seated with
-            ``0 < gap < same_net_pad_gap_mm`` (a slit the fab grades as a
-            ``physical_copper_gap`` error regardless of nets) is rejected and
+            fab-view pad-population detection edge (mm) every stitch via's
+            copper annulus must keep to same-net SMD pads: a candidate seated
+            with ``0 < gap < same_net_pad_gap_mm`` (a slit the fab grades as a
+            ``physical_copper_gap`` finding regardless of nets) is rejected and
             the ladder keeps walking; annulus overlapping the pad (a copper
             union) and gaps at/beyond the edge stay acceptable.  The CLI
             resolves it from the ``--mfr`` profile's ``pad_spacing`` dfm
-            entry (``GapBand.error_edge_mm``); ``0.0`` (default) disables
+            entry (``GapBand.detection_edge_mm``); ``0.0`` (default) disables
             the guard.  A placement no acceptable strategy can seat is
             dropped with an explicit ``same_net_pad_gap`` skip reason and
             counted in ``StitchResult.same_net_pad_gap_filtered``.
@@ -7980,7 +7984,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
     # Issue #7322: the fab's mask-dam floor, the same value the router reads
     # for ``DesignRules.min_via_pad_edge_gap``; 0 (off) without ``--mfr``.
     pad_edge_gap = 0.0
-    # Issue #8957: the fab-view pad-population error edge, so the stitcher
+    # Issue #8957: the fab-view pad-population detection edge, so the stitcher
     # keeps every via annulus out of the same-net pad slit band; None (off)
     # without ``--mfr`` or when the fab ships no table/entry for the stackup.
     pad_gap_edge: float | None = None

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -541,3 +542,255 @@ def test_regenerating_committed_board_never_loosens(project, tmp_path):
         init_project(str(init_copy), manufacturer, layers=layers, design_type="mixed_signal") == 0
     )
     assert rule_loosenings(original, _read(init_copy), allow=writer_allow) == []
+
+
+# ---------------------------------------------------------------------------
+# The .kicad_dru shape (Issue #8937): a rewrite that lowers a *resolved*
+# clearance -- track/track, pad/zone, via/zone -- fails closed
+# ---------------------------------------------------------------------------
+
+from kicad_tools.manufacturers.dru_generator import (  # noqa: E402
+    DRU_FLOORS_BLOCK_BEGIN,
+    DRU_FLOORS_BLOCK_END,
+    dru_clearance_rules,
+    merge_dru_floors,
+)
+
+
+def _dru_state(text: str | None, *, managed=(), authored=None) -> dict:
+    from kicad_tools.core.rule_loosening import DRU_SHAPE_KEY
+
+    state = {DRU_SHAPE_KEY: dru_clearance_rules(text), "managed_names": set(managed)}
+    if authored is not None:
+        state["authored"] = authored
+    return state
+
+
+_FLOOR_ONLY = """(version 1)
+(rule "Clearance - jlcpcb"
+  (constraint clearance (min 0.1016mm)))
+"""
+
+_REVIEWED = """(rule "Reviewed clearance - Default"
+  (condition "A.NetClass == 'Default' || B.NetClass == 'Default'")
+  (constraint clearance (min 0.2mm)))
+"""
+
+_ZONE = """(rule "Zone clearance - GND (F.Cu)"
+  (layer "F.Cu")
+  (condition "(A.Type == 'Zone' && A.NetName == 'GND') || (B.Type == 'Zone' && B.NetName == 'GND')")
+  (constraint clearance (min 0.3mm)))
+"""
+
+_FIXED_BLOCK = _FLOOR_ONLY + "\n" + _REVIEWED + "\n" + _ZONE
+_AUTHORED = {
+    "netclasses": {"Default": 0.2},
+    "zones": [["F.Cu", "GND", 0.3]],
+}
+_MANAGED = {"Clearance - jlcpcb", "Reviewed clearance - Default", "Zone clearance - GND (F.Cu)"}
+
+
+def _floors_file(body: str) -> str:
+    """``body`` as a previously-written file: inside the floors sentinels."""
+    return f"(version 1)\n\n{DRU_FLOORS_BLOCK_BEGIN}\n{body.strip()}\n{DRU_FLOORS_BLOCK_END}\n"
+
+
+def test_dru_floor_only_block_refused_against_authored_zone():
+    """The #8937 teeth: a first emission that would undercut the design."""
+    with pytest.raises(RuleLooseningError) as excinfo:
+        merge_dru_floors(None, _FLOOR_ONLY, authored=_AUTHORED)
+    paths = {item.path for item in excinfo.value.loosenings}
+    assert paths == {
+        "dru.resolved.track_track",
+        "dru.resolved.pad_zone.F.Cu.GND",
+        "dru.resolved.via_zone.F.Cu.GND",
+    }
+
+
+def test_dru_layer_scopes_match_real_layer_names():
+    """Inner layers are ``In1.Cu``, ``In2.Cu``, ... -- never ``In.Cu`` --
+    so an ``(layer inner)`` floor must match them and an ``(layer outer)``
+    floor must not (Issue #8937 review: the dotted prefix matched nothing,
+    which applied the outer floor to every inner layer)."""
+    from kicad_tools.core.rule_loosening import _rule_matches_layer
+
+    outer = {"layer": "outer"}
+    inner = {"layer": "inner"}
+    assert _rule_matches_layer(outer, "F.Cu")
+    assert _rule_matches_layer(outer, "B.Cu")
+    assert not _rule_matches_layer(outer, "In1.Cu")
+    assert not _rule_matches_layer(outer, "In22.Cu")
+    assert _rule_matches_layer(inner, "In1.Cu")
+    assert _rule_matches_layer(inner, "In22.Cu")
+    assert not _rule_matches_layer(inner, "F.Cu")
+    assert not _rule_matches_layer(inner, "B.Cu")
+
+
+_SPLIT_FLOOR = """(version 1)
+(rule "Clearance (outer)"
+  (layer outer)
+  (constraint clearance (min 0.15mm)))
+(rule "Clearance (inner)"
+  (layer inner)
+  (constraint clearance (min 0.1016mm)))
+"""
+
+_INNER_AUTHORED = {
+    "netclasses": {"Default": 0.15},
+    "zones": [["In1.Cu", "GND", 0.12]],
+}
+
+
+def test_dru_split_floor_refused_against_an_inner_zone_between_the_floors():
+    """The shipped 4-layer 2 oz shape (Issue #8836): outer floor 0.15,
+    inner 0.1016.  A zone authored between the two on ``In1.Cu`` must be
+    guarded -- the inner floor governs its layer, not the outer one (the
+    review's measured false-negative: the inverted matcher resolved
+    In1.Cu at 0.15 and the gate passed a 0.1016 refill of a 0.12 pour)."""
+    with pytest.raises(RuleLooseningError) as excinfo:
+        merge_dru_floors(None, _SPLIT_FLOOR, authored=_INNER_AUTHORED)
+    paths = {item.path for item in excinfo.value.loosenings}
+    assert {
+        "dru.resolved.track_track",
+        "dru.resolved.pad_zone.In1.Cu.GND",
+        "dru.resolved.via_zone.In1.Cu.GND",
+    } <= paths
+
+
+def test_dru_fixed_block_passes_and_passthrough_is_byte_identical():
+    merged = merge_dru_floors(None, _FIXED_BLOCK, authored=_AUTHORED)
+    assert "Zone clearance - GND (F.Cu)" in merged
+    # Re-merging the identical content over the merged file: no loosening,
+    # byte-identical output (the drift-prevention contract).
+    again = merge_dru_floors(merged, _FIXED_BLOCK, authored=_AUTHORED)
+    assert again == merged
+
+
+def test_dru_rewrite_dropping_the_zone_arm_refuses():
+    """A rewrite that reverts to the floor-only block lowers pad/zone."""
+    with pytest.raises(RuleLooseningError) as excinfo:
+        merge_dru_floors(
+            _floors_file(_FIXED_BLOCK),
+            _FLOOR_ONLY + "\n" + _REVIEWED,
+            authored=_AUTHORED,
+        )
+    paths = {item.path for item in excinfo.value.loosenings}
+    assert paths == {"dru.resolved.pad_zone.F.Cu.GND", "dru.resolved.via_zone.F.Cu.GND"}
+
+
+def test_dru_hand_rule_lowered_or_removed_refuses():
+    """The name-keyed guard, for callers of the shared entry point."""
+    hand = '(rule "User HV"\n  (condition "A.NetName == \'/HV\'")\n  (constraint clearance (min 2.5mm)))\n'
+    lowered = hand.replace("2.5mm", "0.2mm")
+    assert [item.path for item in rule_loosenings(_dru_state(hand), _dru_state(lowered))] == [
+        "dru.User HV.clearance"
+    ]
+    assert [item.path for item in rule_loosenings(_dru_state(hand), _dru_state(None))] == [
+        "dru.User HV"
+    ]
+    # A hand rule survives a floors merge untouched: the block is inserted
+    # above it and the rule keeps governing its scoped pairs.
+    merged = merge_dru_floors(hand, _FLOOR_ONLY, path=Path("board.kicad_dru"))
+    assert rule_loosenings(_dru_state(hand), _dru_state(merged)) == []
+
+
+def test_dru_hand_rules_survive_an_append_without_being_overridden():
+    """The floors block is inserted ABOVE foreign content (#8937): KiCad's
+    last-match precedence must let the hand rule keep governing, not the
+    appended fab floor."""
+    hand = '(rule "User HV"\n  (condition "A.NetName == \'/HV\'")\n  (constraint clearance (min 2.5mm)))\n'
+    merged = merge_dru_floors(hand, _FIXED_BLOCK, path=Path("board.kicad_dru"))
+    assert merged.index("kct fab floors") < merged.index('(rule "User HV"')
+    # The name-keyed guard alone is not enough here: re-emitting over the
+    # merged file must not lower the /HV pair's 2.5 mm resolution either.
+    again = merge_dru_floors(merged, _FIXED_BLOCK, path=Path("board.kicad_dru"), authored=_AUTHORED)
+    assert again == merged
+
+
+def test_dru_managed_slot_moves_with_the_profile():
+    """kct's own floor rules may follow an explicit profile change; the
+    managed names are excluded from the pre-rewrite comparison, so a
+    manufacturer switch (jlcpcb 0.127 -> pcbway 0.1016) re-emits freely."""
+    before = _FIXED_BLOCK.replace("jlcpcb", "jlcpcb").replace("0.1016mm", "0.127mm")
+    after = _FIXED_BLOCK.replace("jlcpcb", "pcbway")
+    merged = merge_dru_floors(before, after)
+    assert "pcbway" in merged
+
+
+def test_dru_mode_off_allows_the_explicit_overwrite():
+    merged = merge_dru_floors(
+        _floors_file(_FIXED_BLOCK), _FLOOR_ONLY, authored=_AUTHORED, allow=("*",)
+    )
+    assert "Zone clearance" not in merged
+
+
+def test_dru_shape_dispatch_shares_the_entry_point():
+    """``rule_loosenings`` itself understands the dru shape (not just the
+    merge wrapper), so a net_class_map.json-style caller can slot in."""
+    before = _dru_state(_FIXED_BLOCK, managed=_MANAGED)
+    after = _dru_state(_FLOOR_ONLY, managed={"Clearance - jlcpcb"}, authored=_AUTHORED)
+    assert {item.path for item in rule_loosenings(before, after)} == {
+        "dru.resolved.track_track",
+        "dru.resolved.pad_zone.F.Cu.GND",
+        "dru.resolved.via_zone.F.Cu.GND",
+    }
+    assert rule_loosenings(before, before) == []
+
+
+# ---------------------------------------------------------------------------
+# Guard: re-emitting every committed board's .kicad_dru never loosens it
+# ---------------------------------------------------------------------------
+
+_BOARD_DRUS = sorted(
+    p
+    for p in (REPO_ROOT / "boards").glob("**/*.kicad_dru")
+    if ".loom" not in p.relative_to(REPO_ROOT).parts
+    and p.with_suffix(".kicad_pcb").exists()
+    and p.with_suffix(".kicad_pro").exists()
+    and "readiness" not in p.relative_to(REPO_ROOT).parts
+    and "regression-fixture" not in p.relative_to(REPO_ROOT).parts
+)
+
+
+def test_committed_board_drus_found():
+    assert len(_BOARD_DRUS) >= 6
+
+
+@pytest.mark.parametrize("dru", _BOARD_DRUS, ids=lambda p: str(p.relative_to(REPO_ROOT)))
+def test_regenerating_committed_board_dru_never_loosens(dru, tmp_path):
+    from kicad_tools.manufacturers import write_drc_constraints
+
+    def _kct_managed_names(text: str) -> set[str]:
+        """Rule names inside every ``# BEGIN kct ... # END kct`` block.
+
+        Each block is one kct writer's own output (fab floors, router net
+        classes, pair gaps, attach zones, keepouts, creepage) with its own
+        tested invariants; the guard pins what is NOT kct's.
+        """
+        names: set[str] = set()
+        for span in re.findall(r"(?ms)^# BEGIN kct.*?^# END kct[^\n]*", text):
+            names |= {record["name"] for record in dru_clearance_rules(span)}
+        return names
+
+    pcb = dru.with_suffix(".kicad_pcb")
+    data = json.loads(dru.with_suffix(".kicad_pro").read_text())
+    manufacturer, layers = _board_profile(data)
+    profile = get_profile(manufacturer)
+    rules = profile.get_design_rules(layers=layers, copper_oz=1.0)
+    stage = tmp_path / pcb.name
+    shutil.copy(pcb, stage)
+    shutil.copy(dru, stage.with_suffix(".kicad_dru"))
+    shutil.copy(dru.with_suffix(".kicad_pro"), stage.with_suffix(".kicad_pro"))
+    sidecar = pcb.parent / "net_class_map.json"
+    if sidecar.is_file():
+        shutil.copy(sidecar, stage.parent / "net_class_map.json")
+
+    original = dru.read_text(encoding="utf-8")
+    managed = _kct_managed_names(original)
+    before = _dru_state(original, managed=managed)
+    # ``write_drc_constraints`` runs the same gate in-process: a regression
+    # that would undercut an authored clearance raises instead of writing.
+    write_drc_constraints(stage, rules, manufacturer_id=manufacturer, layers=layers)
+    written = stage.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    managed |= _kct_managed_names(written)
+    assert rule_loosenings(before, _dru_state(written, managed=managed)) == []

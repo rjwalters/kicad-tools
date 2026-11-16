@@ -460,6 +460,46 @@ def test_manifest_covers_every_bundle_file_including_late_drawings(tmp_path):
     assert manifest["warning_counts_by_rule"] == {}
 
 
+def test_waivers_sidecar_is_hash_bound_in_report_inputs(tmp_path):
+    board = make_board(tmp_path)
+    sidecar = board / "output" / "demo_routed.kct-waivers.json"
+    sidecar.write_text(json.dumps({"version": 1, "waivers": []}))
+
+    code, report = run(board, FakeEngines(board))
+
+    assert code == 0
+    assert (
+        report["inputs"]["output/demo_routed.kct-waivers.json"]
+        == hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    )
+
+
+def test_shared_waivers_sidecar_spelling_is_hash_bound_in_report_inputs(tmp_path):
+    board = make_board(tmp_path)
+    sidecar = board / "output" / ".kct_waivers.json"
+    sidecar.write_text(json.dumps({"version": 1, "waivers": []}))
+
+    code, report = run(board, FakeEngines(board))
+
+    assert code == 0
+    assert (
+        report["inputs"]["output/.kct_waivers.json"]
+        == hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    )
+
+
+def test_waivers_sidecar_for_a_different_pcb_name_is_not_bound(tmp_path):
+    board = make_board(tmp_path)
+    (board / "output" / "demo.kct-waivers.json").write_text(
+        json.dumps({"version": 1, "waivers": []})
+    )
+
+    code, report = run(board, FakeEngines(board))
+
+    assert code == 0
+    assert not any(k.endswith("kct-waivers.json") for k in report["inputs"])
+
+
 # ---------------------------------------------------------------------------
 # Ordering: refill+save happens before BOTH the native check and the export
 # ---------------------------------------------------------------------------

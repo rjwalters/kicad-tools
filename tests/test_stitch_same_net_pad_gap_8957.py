@@ -108,19 +108,18 @@ def test_disabled_when_edge_zero_or_no_pads():
     assert same_net_pad_gap_acceptable(0.0, y, VIA, None, EDGE_1OZ)
 
 
-def test_two_oz_edge_bites_below_one_oz_edge():
-    # jlcpcb 4layer_2oz pad_spacing: danger 0.15, warning 0.13 -> the error
-    # band shrinks to (0, 0.13) and 0.13-0.15 downgrades to a warning.  A
-    # seat at gap 0.14 is an error on 1 oz (rejected) and only a warning on
-    # 2 oz (accepted) -- a hardcoded 0.15 edge would over-reject 2 oz
-    # boards, a hardcoded 0.13 would under-reject 1 oz boards.
-    y = PAD_TOP + R + 0.14
-    assert not same_net_pad_gap_acceptable(0.0, y, VIA, [PAD_BBOX], EDGE_1OZ)
-    assert same_net_pad_gap_acceptable(0.0, y, VIA, [PAD_BBOX], 0.13)
-    # Below the 2oz warning band both stackups reject.
-    y2 = PAD_TOP + R + 0.12
-    assert not same_net_pad_gap_acceptable(0.0, y2, VIA, [PAD_BBOX], EDGE_1OZ)
-    assert not same_net_pad_gap_acceptable(0.0, y2, VIA, [PAD_BBOX], 0.13)
+def test_two_oz_gap_between_error_and_detection_edge_is_rejected():
+    # jlcpcb 4layer_2oz pad_spacing: danger 0.15, warning 0.13 -> error edge
+    # 0.13, detection edge 0.15.  A gap in [0.13, 0.15) is graded a
+    # physical_copper_gap warning by ``kct check``, so the stitcher (which
+    # uses the detection edge, #9016) must reject it too.
+    edge = _resolve_mfr_pad_gap_edge("jlcpcb", 4, 2.0)
+    for gap in (0.13, 0.14, 0.12):
+        y = PAD_TOP + R + gap
+        assert not same_net_pad_gap_acceptable(0.0, y, VIA, [PAD_BBOX], edge)
+    # At and beyond the detection edge the seat is acceptable.
+    y = PAD_TOP + R + 0.15
+    assert same_net_pad_gap_acceptable(0.0, y, VIA, [PAD_BBOX], edge)
 
 
 # -- the edge comes from the profile table, never a literal ------------------
@@ -128,15 +127,15 @@ def test_two_oz_edge_bites_below_one_oz_edge():
 
 def test_pad_gap_edge_resolves_from_jlcpcb_table_1oz():
     # 4layer_1oz pad_spacing records danger 0.15 and NO warning band, so the
-    # error edge is the danger value itself.
+    # detection edge is the danger value itself.
     assert _resolve_mfr_pad_gap_edge("jlcpcb", 4, 1.0) == pytest.approx(EDGE_1OZ)
 
 
 def test_pad_gap_edge_resolves_from_jlcpcb_table_2oz():
-    # 4layer_2oz pad_spacing records danger 0.15 AND warning 0.13; the error
-    # edge is the tighter of the two -- a hardcoded 0.15 would silently
-    # under-constrain this stackup.
-    assert _resolve_mfr_pad_gap_edge("jlcpcb", 4, 2.0) == pytest.approx(0.13)
+    # 4layer_2oz pad_spacing records danger 0.15 AND warning 0.13; the
+    # detection edge is the looser of the two (#9016) -- the error edge
+    # (0.13) would let the stitcher seat gaps the checker warns about.
+    assert _resolve_mfr_pad_gap_edge("jlcpcb", 4, 2.0) == pytest.approx(0.15)
 
 
 def test_pad_gap_edge_is_none_without_a_table():

@@ -110,12 +110,13 @@ def test_board06_impedance_allowance_is_keyed_by_net_with_issue():
         for (r, _), i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items()
         if r not in ("diffpair_length_skew", "physical_copper_gap")
     } == set()
-    # The only non-skew entries are the #8957 fab-view gap nets (net-keyed).
+    # The only non-skew entries are the fab-view gap nets (net-keyed),
+    # re-pointed to the #8962 parent tracker by #8974.
     assert {
         i
         for (r, _), i in gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS.items()
         if r == "physical_copper_gap"
-    } == {8957}
+    } == {8962}
 
 
 def test_board06_listed_impedance_findings_pass():

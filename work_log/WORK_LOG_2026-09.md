@@ -2,6 +2,55 @@
 
 Sections moved byte-for-byte from [WORK_LOG.md](../WORK_LOG.md) by `loom-daemon work-docs archive`.
 
+### 2026-09-16
+
+- **PR #5512**: ci: pin routed job containers to the kicad slots' sibling-pair cores (6-31,38-63)
+- **PR #5503**: ci: attribute native Test workloads before selecting an OOM policy
+- **PR #5500**: perf(router): avoid sqrt in hole-to-hole clearance hot loop
+- **PR #5499**: feat(manufacturers): enable reviewed JLC Gerber upload transport
+- **PR #5498**: fix(router): check tuning across physical via barrel spans
+- **PR #5497**: fix(router): clear avoidance costs after each connection
+- **Issue #5496** (closed): router: validate tuning against physical via barrel spans
+- **Issue #5495** (closed): router: clear native avoidance penalties after each pad connection
+- **PR #5494**: test(router): preserve native import state across diagnostic reloads
+- **Issue #5493** (closed): tests: restore native backend import state after diagnostic reloads
+- **PR #5492**: docs: check coverage overhead before suspecting a hang in slow single-test runs
+- **PR #5491**: docs: record pinned-main softstart qualification
+- **Issue #5490** (closed): test_board02_real_hardware.py::test_generated_real_schematic_and_pcb_agree does not terminate quickly — verify actual failure mode
+- **PR #5489**: perf(lvs): resolve every schematic pin against one connectivity graph
+- **PR #5488**: perf(board06): spatially prune the pour-connectivity audit's pairwise scan
+- **PR #5487**: docs: record current softstart residual attribution
+- **PR #5486**: fix(router): preserve static partner-pad clearance in native search
+- **PR #5485**: fix: handle equal-potential pairs at zero HV threshold
+- **Issue #5484** (closed): Zero HV threshold crashes on equal-potential net pairs
+- **PR #5483**: fix(router): retain physical targets for repeated pad numbers
+- **Issue #5482** (closed): router: preserve static partner-pad clearance during native differential search
+- **Issue #5481** (closed): loom-daemon: loom:blocked stripped/re-dispatched within ~2 minutes on #5333 (105+ lease claims/16h, 3 hosts)
+- **Issue #5480** (closed): router: retain disconnected same-number pad lands as physical routing targets
+- **PR #5479**: fix(router): retain escape and two-phase routing checkpoints
+- **Issue #5478** (closed): router: retain checkpoints through escape and two-phase routing
+- **PR #5477**: fix(router): keep Kelvin destination escape copper reachable
+- **PR #5476**: perf(router): prune distant match-group clearance comparisons
+- **Issue #5475** (closed): router: keep destination escape copper reachable during Kelvin branch isolation
+- **PR #5474**: fix(board04): avoid unsupported route failure diagnoses
+- **PR #5473**: perf(router): AABB pre-filter for diff-pair length-tuning clearance check
+- **Issue #5472** (closed): board04: do not attribute every partial route to timeout
+- **Issue #5471** (closed): perf(router): AABB pre-filter for match-group post-insertion clearance checks
+- **PR #5470**: perf(router): keep scalar congestion arithmetic in Python floats
+- **Issue #5469** (closed): perf(router): use Python floats for scalar congestion arithmetic
+- **PR #5468**: perf(router): reuse congestion cost within neighbor batches
+- **Issue #5467** (closed): perf(router): reuse coarse congestion cost within neighbor batches
+- **Issue #5464** (closed): loom-daemon repeatedly redispatches issue #5240 despite an open non-closing 'Part of #5240' PR under review
+- **Issue #5455** (closed): router: diversify final bounded relief probe direction for two-terminal nets
+- **Issue #5435** (closed): router: reject negotiated trace crossings of foreign via copper during native search
+- **PR #5425**: fix(router): preserve physical clearances and complete bounded native searches
+- **Issue #5405** (closed): router: extract budget-exhaustion precedence fix from held Board07 draft
+- **Issue #5351** (closed): ci: containerd snapshots fill runner root disk despite mostly empty cache volume
+- **Issue #5145** (closed): JLC handoff: resumable exact-byte Gerber upload intents and bound receipts
+- **Issue #5056** (closed): Feature: Python JLCPCB submission preparation with verified handoff, live stock, review receipts and resumable upload
+- **Issue #5000** (closed): board03: qualify USB firmware identity and suspend behavior before factory flashing
+- **Issue #4956** (closed): Champion: Merge-Risk Hold Digest
+
 ### 2026-09-15
 
 - **PR #5466**: perf(router): avoid cell-view allocation in zone lookup

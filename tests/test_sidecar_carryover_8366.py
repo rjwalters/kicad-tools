@@ -87,4 +87,11 @@ def test_route_sidecars_keep_custom_rules(tmp_path):
         pytest.skip(f"route sidecar writer unavailable: {e}")
     dru = out.with_suffix(".kicad_dru").read_text()
     assert "HV mains clearance" in dru
-    assert CUSTOM_DRU.strip() in dru
+    # Issue #8937 anchoring: the merged file leads with the version form,
+    # the managed block sits above the user's rules, whose bytes survive.
+    assert dru.startswith("(version 1)\n")
+    assert dru.count("(version 1)") == 1
+    assert (
+        '(rule "HV mains clearance"\n  (condition "A.NetClass == \'HV\'")\n  (constraint clearance (min 3.0mm)))'
+        in dru
+    )

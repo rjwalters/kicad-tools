@@ -642,25 +642,47 @@ def count_errors_via_kct_check(
 # which two independent regenerations (the E2E job's and this gate's)
 # reproduced exactly.  A new net starting to carry sub-danger slits still
 # fails the gate; a net whose slits the router stops leaving goes stale and
-# forces its entry out.  The router fix is tracked in #8957; delete entries
-# there as they go stale.
+# forces its entry out.
 # Issue #8975: the recipe repair pass now keeps its offset vias out of the
 # same-net slit band (#8957's predicate in ``_via_ok``), which drained the
 # recipe's own d0.25/s0.45 population to zero (93 -> 0 measured on the
-# first post-fix regen; 43 remain, route-side d0.3/s0.6 and pad-vs-trace
-# populations unchanged).  Every identity below still occurs (GND's count
-# dropped 118 -> 25 but its entry stays load-bearing -- allowances are
-# by net, not by producer), so no entry goes stale here.
+# first post-fix regen; GND's count dropped 118 -> 25 but its entry stays
+# load-bearing -- allowances are by net, not by producer).
+#
+# The +1V2 entry (PR #8955): #8937's zone arm restores the authored zone
+# ``connect_pads`` clearance (0.3 mm on this board's three pour zones) that
+# the unconditional fab-floor rule (0.1016 mm here) used to replace at
+# refill, so the pour pipeline's stitch/repair rounds place a different
+# via population.  CI run 43688361347 measured the total at 129 (GND
+# 118 -> 110; every other net's count unchanged) and one NEW identity:
+# +1V2, one same-net finding -- a +1V2 via annulus (Via@118.99/60.12,
+# F.Cu-B.Cu) 0.0585 mm from its own +1V2 pad on F.Cu, ``same_net`` true in
+# the violation record.  Reproduced from the run's E2E artifact and
+# identical in both failing jobs; the same fab-view class as the entries
+# above (the fab cannot see nets), so it joins the fab-gap allowance rather
+# than reverting the restored authored clearance.
+#
+# Issue #8974: the route-side d0.3/s0.6 producers (the oracle weld's
+# run_stitch vias, the oracle link router's vias, and the lattice
+# pathfinder's pair vias) now keep their annuli out of the same-net pad
+# slit band.  Measured on the tree merged with main (#8975's recipe fix
+# and #8937's zone arm both present; seed 42, 31/31 reach): 14 findings,
+# all same-net ``physical_copper_gap`` -- TMDS_D0_N and TMDS_D2_N 3 each,
+# MIPI_CLK_N, MIPI_DAT0_N, MIPI_DAT1_N and TMDS_D1_N 2 each.  CI run
+# 43809852277 (this branch before the #8937 merge) measured the same 14
+# total.  No DQS_P, DQS_N, GND or +1V2 finding recurs, so those four
+# entries are deleted (the gate's staleness arm flags each one otherwise);
+# the six surviving nets keep exactly their #8957-era counts.
+# The surviving entries are re-pointed to #8962, the parent tracker for
+# the remaining producers; #8957's own scope ended at the merged stitcher
+# path.
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "DQS_N"): 8957,
-    ("physical_copper_gap", "DQS_P"): 8957,
-    ("physical_copper_gap", "GND"): 8957,
-    ("physical_copper_gap", "MIPI_CLK_N"): 8957,
-    ("physical_copper_gap", "MIPI_DAT0_N"): 8957,
-    ("physical_copper_gap", "MIPI_DAT1_N"): 8957,
-    ("physical_copper_gap", "TMDS_D0_N"): 8957,
-    ("physical_copper_gap", "TMDS_D1_N"): 8957,
-    ("physical_copper_gap", "TMDS_D2_N"): 8957,
+    ("physical_copper_gap", "MIPI_CLK_N"): 8962,
+    ("physical_copper_gap", "MIPI_DAT0_N"): 8962,
+    ("physical_copper_gap", "MIPI_DAT1_N"): 8962,
+    ("physical_copper_gap", "TMDS_D0_N"): 8962,
+    ("physical_copper_gap", "TMDS_D1_N"): 8962,
+    ("physical_copper_gap", "TMDS_D2_N"): 8962,
 }
 
 #: Every board key that carries an identity allowance (Issue #7367).  A key
