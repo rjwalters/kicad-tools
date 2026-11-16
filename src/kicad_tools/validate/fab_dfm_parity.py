@@ -16,20 +16,23 @@ Rules for editing the table:
   ``rule_id`` s whose findings count toward that row's kct error/warning
   counts in the parity comparison.  It must be a *partition* -- no rule id
   may appear in two rows -- and every entry must be an id ``kct check``
-  actually emits; tests enforce both.  ``kct_rules`` is coverage *provenance*
+  actually emits; tests enforce both.  An entry may carry a ``#band``
+  qualifier (``physical_copper_gap#trace`` / ``#pad``, issue #8972): it
+  matches only findings graded against that fab band (see
+  :func:`attribution_key`), which is how one rule id spanning the trace and
+  pad fab bands (issue #8938) divides across the ``trace_spacing`` /
+  ``pad_spacing`` rows; the bare id still matches the bandless emit sites
+  (the legacy opt-in pass, zone-fill ``info`` findings), which stay on
+  ``pad_spacing``.  ``kct_rules`` is coverage *provenance*
   at mixed granularity (mostly category ids) and is deliberately NOT the
   attribution key.  Ids deliberately unattributed: ``*_incomplete`` run-state
   infos, ``clearance_net0_bridge`` and the zone-clearance ids (the fab does
   not judge zone-fill clearance), and the kct-only silk advisories
   (``silk_over_mask_opening``, ``silk_edge_clearance``, ``silk_overlap``,
-  ``silk_ref_obscured``, ``silkscreen_text_height``).  ``physical_copper_gap``
-  is one id for both the trace and the pad fab bands; it is attributed to
-  ``pad_spacing`` because its severity-graded findings on both recorded
-  boards are pad-adjacent (same-net pad-band errors and pad mask-bridge
-  errors) -- an imprecision the partition forces, disclosed here.
-  ``count_rule_ids`` adds no parity *claim*, so it does not bump
-  :data:`TABLE_VERSION` (a bump would change the stanza header and break the
-  byte-identical no-result contract, issue #8940 AC 2).
+  ``silk_ref_obscured``, ``silkscreen_text_height``).
+  ``count_rule_ids`` adds no parity *claim*; re-keying an existing row's
+  attribution (as #8972 did) does bump :data:`TABLE_VERSION`, which moves
+  the stanza header's version with it.
 * Every rule named in ``kct_rules`` of a ``covered`` / ``partial`` row must be
   something ``kct check`` can actually emit -- a real category
   (``cli/check_categories.py``) or a finer rule id registered in
@@ -59,7 +62,10 @@ Status = Literal["covered", "partial", "not_covered"]
 #: 6: #8938 -- fab-view gap bands come from the resolved stackup's
 #:    ``dfm_thresholds`` entry; same-net sub-danger pad gaps are errors;
 #:    zone-fill (pour) gaps report at info (not fab-judged).
-TABLE_VERSION = 6
+#: 7: #8972 -- trace-band vs pad-band ``physical_copper_gap`` findings are
+#:    attributed to their own rows (``trace_spacing`` / ``pad_spacing``) via
+#:    the ``rule_id#fab_band`` qualified key; the rule id itself is unchanged.
+TABLE_VERSION = 7
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -103,8 +109,15 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "partial",
         True,
         # Non-pad copper spacing: the pair-type clearance ids with no pad on
-        # either side (segment/via gaps -- the fab's trace_spacing population).
-        ("clearance_segment_segment", "clearance_segment_via", "clearance_via_via"),
+        # either side (segment/via gaps -- the fab's trace_spacing
+        # population), plus the trace-band-graded fab-view findings
+        # (``#trace`` qualified key, issue #8972).
+        (
+            "clearance_segment_segment",
+            "clearance_segment_via",
+            "clearance_via_via",
+            "physical_copper_gap#trace",
+        ),
         "net-aware `clearance` always; the net-agnostic fab-view pass "
         "(`physical_copper_gap`, #8843) adds same-net copper but runs only when the "
         "effective --mfr is exactly `jlcpcb` -- a `jlcpcb-tier*` profile gets "
@@ -115,17 +128,26 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "below the danger edge is an error; with no recorded warning_mm there "
         "is no warning band, and gaps at or above the danger edge are not "
         "reported (the fab recorded 0 danger / 0 warning for trace_spacing on "
-        "the 4-layer 1 oz #8938 board).",
+        "the 4-layer 1 oz #8938 board). Since #8972 those trace-band findings "
+        "count toward this row, not `pad_spacing`.",
     ),
     ParityRow(
         "pad_spacing",
         ("clearance", "physical_copper_gap"),
         "partial",
         True,
-        # Pad-involving clearance ids plus the whole physical pass: one rule
-        # id covers both fab bands (see module docstring), and its graded
-        # findings on both recorded boards are pad-adjacent.
-        ("clearance_pad_pad", "clearance_pad_segment", "clearance_pad_via", "physical_copper_gap"),
+        # Pad-involving clearance ids plus the pad populations of the
+        # physical pass: pad-band-graded and mask-bridge findings via the
+        # ``#pad`` qualified key, and the bare id for the bandless emit
+        # sites (the legacy opt-in pass, zone-fill `info` findings) so the
+        # partition stays total (issue #8972).
+        (
+            "clearance_pad_pad",
+            "clearance_pad_segment",
+            "clearance_pad_via",
+            "physical_copper_gap",
+            "physical_copper_gap#pad",
+        ),
         "as `trace_spacing`, plus the 2 oz pad mask-bridge check inside "
         "`physical_copper_gap`; that check runs on outer layers only (#8913) and "
         "judges a declared 2 oz outer weight only, otherwise reporting "
@@ -394,6 +416,19 @@ def applies_to(manufacturer: str | None) -> bool:
     return m == _MFR_FAMILY or m.startswith(_MFR_FAMILY + "-")
 
 
+def attribution_key(v: DRCViolation) -> str:
+    """The finding-attribution key a ``count_rule_ids`` entry matches against.
+
+    ``rule_id#fab_band`` for a fab-band-graded finding (issue #8972:
+    ``physical_copper_gap`` is one rule id spanning the trace and pad fab
+    bands of issue #8938, and the band it was graded against is carried on
+    :attr:`DRCViolation.fab_band`), the bare ``rule_id`` otherwise.  The
+    qualifier is attribution-only -- the rule id, and so
+    ``DRCViolation.key`` / every ``.kct_waivers.json`` entry, is unchanged.
+    """
+    return f"{v.rule_id}#{v.fab_band}" if v.fab_band else v.rule_id
+
+
 def evaluate_parity(
     manufacturer: str | None,
     table: tuple[ParityRow, ...] = PARITY_TABLE,
@@ -427,8 +462,10 @@ def evaluate_parity(
             kct_warnings: int | None
             if r.count_rule_ids:
                 ids = frozenset(r.count_rule_ids)
-                kct_errors = sum(1 for v in findings if v.rule_id in ids and v.is_error)
-                kct_warnings = sum(1 for v in findings if v.rule_id in ids and v.is_warning)
+                kct_errors = sum(1 for v in findings if attribution_key(v) in ids and v.is_error)
+                kct_warnings = sum(
+                    1 for v in findings if attribution_key(v) in ids and v.is_warning
+                )
             else:
                 kct_errors = None
                 kct_warnings = None

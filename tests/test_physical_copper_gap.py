@@ -896,6 +896,43 @@ def test_fab_view_trace_gap_below_danger_edge_is_error():
     assert found[0].same_net is False
 
 
+def test_fab_view_sets_fab_band_per_population():
+    """Issue #8972: the band a finding was graded against is carried on the
+    finding (``DRCViolation.fab_band``) so parity attribution can tell the
+    trace and pad populations apart without splitting the rule id.
+
+    ``"trace"`` for no-pad/no-zone gaps, ``"pad"`` for pad-adjacent and
+    mask-bridge gaps, ``None`` for the bandless emit sites (the zone-fill
+    ``info`` branch and the legacy opt-in pass).
+    """
+    from kicad_tools.validate.rules.physical_gap import (
+        check_pad_mask_bridge,
+        check_physical_copper_gap,
+    )
+
+    trace = _fab(
+        board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2)), _one_oz()
+    )
+    assert [v.fab_band for v in trace] == ["trace"]
+    pad = _fab(board(_pad("U1", 0, 0, "p1"), _via(0.88, 0, "v1", net=1)), _one_oz())
+    assert [v.fab_band for v in pad] == ["pad"]
+    pour = _fab(board(_zone("z1"), _pad("U1", 2, 2.62, "p1")), _one_oz())
+    assert [v.severity for v in pour] == ["info"]
+    assert [v.fab_band for v in pour] == [None]
+    bridge = [
+        v
+        for v in check_pad_mask_bridge(
+            board(_pad("U1", 0, 0, "p0"), _pad("U2", 1.18, 0, "p1", net=2)), 2.0
+        ).violations
+        if v.severity != "info"
+    ]
+    assert bridge and [v.fab_band for v in bridge] == ["pad"]
+    legacy = check_physical_copper_gap(
+        board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2)), 0.1016
+    ).violations
+    assert legacy and [v.fab_band for v in legacy] == [None]
+
+
 def _two_oz_pad_policy():
     from kicad_tools.validate.rules.physical_gap import FabGapPolicy, GapBand
 
