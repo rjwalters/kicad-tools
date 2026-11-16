@@ -35,30 +35,6 @@ SCRIPT="$HELPERS_DIR/check-stale-blocked.sh"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_contains() { # <haystack> <needle> <msg>
-    if [[ "$1" == *"$2"* ]]; then pass "$3"; else
-        fail "$3"
-        echo "    expected to contain: '$2'"
-        echo "    actual: $(printf '%s' "$1" | head -40)"
-    fi
-}
-
-assert_not_contains() { # <haystack> <needle> <msg>
-    if [[ "$1" != *"$2"* ]]; then pass "$3"; else
-        fail "$3"
-        echo "    expected NOT to contain: '$2'"
-        echo "    actual: $(printf '%s' "$1" | head -40)"
-    fi
-}
-
-assert_eq() { # <expected> <actual> <msg>
-    if [[ "$1" == "$2" ]]; then pass "$3"; else
-        fail "$3"
-        echo "    expected: '$1'"
-        echo "    actual:   '$2'"
-    fi
-}
-
 [[ -x "$SCRIPT" ]] || {
     echo -e "${RED}FATAL${NC}: $SCRIPT missing or not executable"
     exit 2

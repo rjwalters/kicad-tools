@@ -438,6 +438,266 @@ def point_clear_of_copper(
 
 
 # ---------------------------------------------------------------------------
+# Same-net pad slit-band predicate (Issue #8957)
+# ---------------------------------------------------------------------------
+
+
+def same_net_segment_pad_gap_acceptable(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    half_width: float,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
+    min_gap_mm: float,
+) -> bool:
+    """True iff a trace segment from ``a`` to ``b`` keeps the fab-view copper
+    gap to every same-net SMD pad out of the slit band.
+
+    Issue #8976 (generalising #8957's :func:`same_net_pad_gap_acceptable` to
+    the pad-vs-trace population): a pad's own escape trace may skirt its pad
+    only in the same two acceptable regions the via annulus is held to --
+    the constraint is two acceptable regions, not one floor:
+
+    * ``gap <= 0`` -- the trace copper touches or overlaps the pad, so the
+      two are one copper union and there is no slit;
+    * ``gap >= min_gap_mm`` -- the fab's *detection* edge for the pad
+      population, read from the resolved stackup (the ``pad_spacing`` dfm
+      entry's ``GapBand.detection_edge_mm``; 0.15 mm on the jlcpcb entries
+      these fixtures resolve).  Pass the detection edge, not
+      ``error_edge_mm``: on stackups where the fab's warning tier sits below
+      the danger tier the two differ, and enforcing the error edge would
+      leave ``[error_edge, detection_edge)`` gaps graded as warnings
+      (issue #8976, ``## Verified corrections``).
+
+    and the band ``(0, min_gap_mm)`` in between is rejected.
+
+    The gap is exact segment-vs-rectangle geometry: the copper-to-pad air
+    gap is ``max(0, centerline-to-rect distance - half_width)``, computed
+    without growing the rectangle (a grown rectangle squares off what the
+    round sweep rounds off, and would under-report a diagonal skirt's gap
+    at a pad corner).  A degenerate segment (``a == b``) measures the same
+    point-vs-box gap the via annulus form uses, so a via can reuse this
+    predicate with ``via_size / 2`` as ``half_width``.
+
+    Args:
+        a, b: Segment endpoints (mm, world coordinates).  A zero-length
+            segment (``a == b``) degenerates to the annulus form.
+        half_width: The trace's half width (mm); the annulus radius for a
+            degenerate via seat.
+        same_net_pad_bboxes: Axis-aligned SMD pad bounding boxes on the
+            segment's own net AND OWN LAYER, as ``(min_x, min_y, max_x,
+            max_y)`` (extra trailing tuple elements, as in
+            ``find_all_pad_bboxes`` output, are ignored).  Same-net pads on
+            other layers share no copper with the segment, so the caller
+            must not include them; ``None`` or empty disables the test.
+        min_gap_mm: The fab-view pad-population detection edge in mm.
+            ``<= 0`` disables the test (every position acceptable).
+
+    Returns:
+        True when the segment's gap is acceptable for every pad (union or
+        beyond the edge), False when any pad sees a gap inside the band.
+    """
+    if min_gap_mm <= 0 or not same_net_pad_bboxes:
+        return True
+    ax, ay = a
+    bx, by = b
+    for bbox in same_net_pad_bboxes:
+        if ax == bx and ay == by:
+            # Point primitive: the annulus form's arithmetic exactly.
+            dx = max(0.0, bbox[0] - ax, ax - bbox[2])
+            dy = max(0.0, bbox[1] - ay, ay - bbox[3])
+            gap = math.hypot(dx, dy) - half_width
+        else:
+            gap = _segment_box_gap_mm(ax, ay, bx, by, half_width, bbox)
+        # The two acceptable regions: unioned with the pad, or clear of the
+        # fab detection edge.  The 1e-9 slack mirrors _pad_conflict's
+        # float-noise tolerance for a gap computed as exactly ``min_gap_mm``.
+        if 1e-9 < gap < min_gap_mm - 1e-9:
+            return False
+    return True
+
+
+def _segment_box_gap_mm(
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+    half_width: float,
+    bbox: tuple[float, ...],
+) -> float:
+    """Exact air gap between a swept segment and one axis-aligned box.
+
+    For convex sets the sweep identity ``dist(A (+) disk_r, C) =
+    max(0, dist(A, C) - r)`` gives the copper-to-pad gap directly from the
+    centerline's distance to the (square-cornered) pad rectangle -- growing
+    the rectangle instead would square off what the round sweep rounds off
+    at the corners and under-report a diagonal skirt's gap there.  The
+    centerline-to-rectangle distance itself is exact for these convex sets:
+    0 when the centerline reaches the rectangle (Liang-Barsky slab test),
+    otherwise the minimum over the four rectangle corners' distances to the
+    segment and the two endpoints' distances to the rectangle -- the
+    closest pair of two disjoint convex sets always has a vertex/endpoint
+    on at least one side.
+    """
+    min_x, min_y, max_x, max_y = bbox[0], bbox[1], bbox[2], bbox[3]
+    # Slab clip (Liang-Barsky): does the centerline reach the rectangle?
+    t0, t1 = 0.0, 1.0
+    parallel_outside = False
+    for delta, origin, lo, hi in (
+        (bx - ax, ax, min_x, max_x),
+        (by - ay, ay, min_y, max_y),
+    ):
+        if abs(delta) < 1e-12:
+            # Parallel to this slab: it constrains nothing when the segment
+            # sits inside it; when outside, the segment can never reach the
+            # rectangle and the disjoint-set minimum below is exact.
+            if origin < lo or origin > hi:
+                parallel_outside = True
+        else:
+            ta = (lo - origin) / delta
+            tb = (hi - origin) / delta
+            if ta > tb:
+                ta, tb = tb, ta
+            t0 = max(t0, ta)
+            t1 = min(t1, tb)
+            if t0 > t1:
+                parallel_outside = True
+                break
+    if not parallel_outside:
+        return 0.0
+    best = min(
+        _point_box_distance_mm(ax, ay, min_x, min_y, max_x, max_y),
+        _point_box_distance_mm(bx, by, min_x, min_y, max_x, max_y),
+    )
+    for cx, cy in ((min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)):
+        d = point_to_segment_distance(cx, cy, ax, ay, bx, by)
+        if d < best:
+            best = d
+    return max(0.0, best - half_width)
+
+
+def _point_box_distance_mm(
+    x: float,
+    y: float,
+    min_x: float,
+    min_y: float,
+    max_x: float,
+    max_y: float,
+) -> float:
+    """Euclidean distance from a point to an axis-aligned box (0 inside)."""
+    dx = max(min_x - x, 0.0, x - max_x)
+    dy = max(min_y - y, 0.0, y - max_y)
+    return math.hypot(dx, dy)
+
+
+def same_net_pad_gap_acceptable(
+    x: float,
+    y: float,
+    via_size: float,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None,
+    min_gap_mm: float,
+) -> bool:
+    """True iff a via annulus at (x, y) keeps the fab-view copper gap to every
+    same-net SMD pad out of the slit band.
+
+    Issue #8957: ``stitch --avoid-pad-overlap`` keeps a via's DRILL out of
+    same-net SMD pads (#3271) but nothing constrained the via's copper
+    ANNULUS gap to the pad it escapes.  A via seated just outside its own
+    pad leaves two wedge-shaped notches of air on either side of the
+    connecting stub -- in fab view a ``physical_copper_gap`` error regardless
+    of nets (#8938): a fab sees copper, not nets.
+
+    The constraint is two acceptable regions, not one floor:
+
+    * ``gap <= 0`` -- the annulus touches or overlaps its own pad, so the
+      copper is one union and there is no slit (the drill must still clear
+      the pad bbox, which is what ``--avoid-pad-overlap`` enforces);
+    * ``gap >= min_gap_mm`` -- the fab's detection edge for the pad
+      population, read from the resolved stackup (the ``pad_spacing`` dfm
+      entry's ``GapBand.detection_edge_mm``; e.g. 0.15 mm on the jlcpcb
+      ``4layer_1oz`` and ``6layer_1oz`` entries boards 06/07 resolve).
+      Issue #8976: on a stackup whose recorded warning tier sits below the
+      danger tier (``4layer_2oz``: warning 0.13 below danger 0.15) the
+      detection edge is the *wider* of the two, and enforcing the tighter
+      ``error_edge_mm`` here would leave ``[error_edge, detection_edge)``
+      gaps graded as warnings by the fab-view checker.
+
+    and the band ``(0, min_gap_mm)`` in between is rejected -- the caller's
+    placement ladder goes on trying candidates.
+
+    Args:
+        x, y: Proposed via center (mm, world coordinates).
+        via_size: Via pad (annulus) diameter in mm.
+        same_net_pad_bboxes: Axis-aligned SMD pad bounding boxes on the
+            via's own net AND LAYER, as ``(min_x, min_y, max_x, max_y)``
+            (extra trailing tuple elements, as in ``find_all_pad_bboxes``
+            output, are ignored).  ``None`` or empty disables the test.
+        min_gap_mm: The fab-view pad-population detection edge in mm --
+            the ``pad_spacing`` dfm entry's ``GapBand.detection_edge_mm``
+            of the resolved stackup (e.g. 0.15 mm on jlcpcb ``4layer_1oz``).
+            Issue #8976: pass the detection edge, not ``error_edge_mm``, so
+            a stackup whose warning tier sits below the danger tier cannot
+            leave ``[error_edge, detection_edge)`` gaps behind as warnings.
+            ``<= 0`` disables the test (every position acceptable).
+
+    Returns:
+        True when the annulus gap is acceptable for every pad (union or
+        beyond the edge), False when any pad sees a gap inside the band.
+    """
+    if min_gap_mm <= 0 or not same_net_pad_bboxes:
+        return True
+    # Degenerate segment (a == b): the shared core's point branch computes
+    # exactly the per-bbox ``hypot - radius`` gap this function always used.
+    return same_net_segment_pad_gap_acceptable(
+        (x, y),
+        (x, y),
+        via_size / 2,
+        same_net_pad_bboxes,
+        min_gap_mm,
+    )
+
+
+def same_net_pad_gap_band_ring(
+    bbox: tuple[float, float, float, float],
+    via_size: float,
+    min_gap_mm: float,
+) -> Any:
+    """The region of via seats :func:`same_net_pad_gap_acceptable` rejects.
+
+    Issue #8974: the region form of the slit-band predicate, for rasterised
+    legality masks (:func:`kicad_tools.router.link_router.route_link`'s
+    via mask) that pre-ban the band instead of testing seats one point at
+    a time.  ``gap`` is measured to ``bbox`` exactly as the point predicate
+    measures it -- axis-aligned, ``hypot(dx, dy) - radius`` -- so ONE band
+    definition feeds both forms: a seat this ring covers is exactly a seat
+    the predicate rejects.  The predicate's 1e-9 float-noise epsilon is
+    finer than any rasteriser's cell, so the geometric boundary is the
+    shared band ``(0, min_gap_mm)``.
+
+    Args:
+        bbox: Same-net SMD pad bounding box ``(min_x, min_y, max_x, max_y)``.
+        via_size: Via pad (annulus) diameter in mm.
+        min_gap_mm: The fab-view pad-population error edge in mm.
+            ``<= 0`` yields an empty geometry (guard off).
+
+    Returns:
+        The shapely geometry of the rejected seat region.
+    """
+    from shapely.geometry import Polygon, box  # type: ignore[import-untyped]
+
+    if min_gap_mm <= 0:
+        return Polygon()
+    radius = via_size / 2
+    pad = box(*bbox)
+    # ``quad_segs=64`` keeps GEOS's arc approximation ~1e-5 mm inside the
+    # true disk, so the ring agrees with the point predicate finer than any
+    # rasterised mask can resolve (the default 8 segments sag ~1.5e-3 mm at
+    # the corners, which IS visible at mask resolution).
+    return pad.buffer(radius + min_gap_mm, quad_segs=64).difference(
+        pad.buffer(radius, quad_segs=64)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Shared segment-vs-foreign-via predicate (Issue #2998 / #3002)
 # ---------------------------------------------------------------------------
 

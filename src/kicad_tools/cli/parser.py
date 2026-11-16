@@ -1086,6 +1086,22 @@ def _add_check_parser(subparsers) -> None:
             "falls back to jlcpcb. An explicit --mfr always wins."
         ),
     )
+    check_parser.add_argument(
+        "--fab-dfm-result",
+        dest="fab_dfm_result",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a recorded fab DFM tool result (JSON in the shape of "
+            "tests/fixtures/fab_dfm_parity/jlcdfm_*.json, with a 'counts' "
+            "object). Given one, the Fab DFM parity stanza and the "
+            "fab_dfm_parity JSON section print kct's per-category "
+            "error/warning counts beside the recorded fab danger/warning "
+            "counts, and visibly mark categories where the fab reports "
+            "danger but kct reports zero errors (issue #8940). "
+            "JLCPCB-family --mfr only; malformed input is an error."
+        ),
+    )
     check_parser.add_argument("--layers", "-l", type=int, default=2, help="Number of layers")
     # Issue #5810: shared definition with check_cmd.py -- a raw string with a
     # None default, so the keyed form (outer=2,inner=0.5) parses and an
@@ -2619,6 +2635,29 @@ def _add_pcb_parser(subparsers) -> None:
         "--spacing mm along the run.",
     )
     pcb_reinforce.add_argument(
+        "--strategy",
+        dest="strategy",
+        choices=["wire", "parallel", "auto"],
+        default="wire",
+        help="How each leg is reinforced (Issue #8916). wire (default): the "
+        "buttress wire -- two end anchors and a mask opening. parallel: a "
+        "same-net, same-width copy of the leg on the opposite outer layer "
+        "(F.Cu <-> B.Cu), tied to it at both ends (the through-hole pad or "
+        "through via the leg ends on, else a stitching via) and by stitching "
+        "vias about every 5 mm (the board's default via, never closer than "
+        "kct stitch's same-net spacing); no anchors, no mask opening. Every "
+        "copy track and via passes the same clearance checks as an anchor "
+        "(class floors, .kicad_dru rules, --voltage-map creepage, "
+        "hole-to-hole); a copy that does not fit whole is refused and "
+        "reported, never written in part. The minimum wire length does not "
+        "filter parallel legs. auto: parallel for a leg shorter than the "
+        "minimum wire length (--min-wire-length, default 15 mm; 0 makes "
+        "every leg a wire), wire for the rest. parallel and auto need "
+        "--anchor-mode ends: with --anchor-mode spaced they exit with an "
+        "error (spaced mode has no per-leg layout, and no default minimum "
+        "for auto to compare against).",
+    )
+    pcb_reinforce.add_argument(
         "--end-offset",
         dest="end_offset",
         type=float,
@@ -2683,12 +2722,29 @@ def _add_pcb_parser(subparsers) -> None:
         "mode every eligible leg is anchored regardless.",
     )
     pcb_reinforce.add_argument(
+        "--min-wire-length",
+        dest="min_wire_length",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Minimum buttress-wire length in mm (ends mode default: 15.0). A "
+        "wire needs a through-hole at each end, and each hole needs both outer "
+        "layers and the inner planes clear, so the two rarely fit on a shorter "
+        "link -- a leg below this is reported and gets no wire and no mask "
+        "opening, and no entry in the .reinforcement.json wire list. Pass 0 for "
+        "no minimum (the pre-#8915 behaviour). --anchor-mode spaced has no "
+        "default minimum; a value given here still applies to it.",
+    )
+    pcb_reinforce.add_argument(
         "--min-run-length",
         dest="min_run_length",
         type=float,
         default=None,
-        help="Only anchor runs (ends mode: legs) at least this long, in mm. "
-        "Shorter ones are reported but not anchored. Composes with --all-runs.",
+        metavar="MM",
+        help="Alias for --min-wire-length, kept for existing invocations. Only "
+        "anchor runs (ends mode: legs) at least this long, in mm; shorter ones "
+        "are reported but not anchored. Composes with --all-runs. If both flags "
+        "are given, the larger wins.",
     )
     pcb_reinforce.add_argument(
         "--current-paths",
@@ -2872,8 +2928,9 @@ def _add_pcb_parser(subparsers) -> None:
     pcb_prune.add_argument(
         "--region",
         metavar="x1,y1,x2,y2",
-        help="Only apply a net's plan when every edit lies inside this box (mm); "
-        "plans straddling it are skipped and reported as region_skipped",
+        help="Only apply a net's plan when every edit lies inside this box "
+        "(board-relative mm); plans straddling it are skipped and reported as "
+        "region_skipped",
     )
     pcb_prune.add_argument("--no-drc", action="store_true", help="Skip kicad-cli DRC verification")
     pcb_prune.add_argument(

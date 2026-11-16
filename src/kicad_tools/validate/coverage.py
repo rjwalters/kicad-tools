@@ -30,6 +30,7 @@ unchanged: coverage is reported, and sign-off decides.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -69,6 +70,7 @@ BLOCKING_CATEGORIES: frozenset[str] = frozenset(
         "netclass_clearance_copper",
         "netclass_floor",
         "netlist",
+        "removed_pad_scan",
         "routing_policy",
         "solder_mask",
         "mask_to_copper",
@@ -136,6 +138,54 @@ def ampacity_pour_unknown(unmeasured: dict[str, str]) -> Coverage:
     """
     detail = "; ".join(f"{net}: {why}" for net, why in sorted(unmeasured.items()))
     return unknown("ampacity", f"pour not measurable ({detail})")
+
+
+def collapse_reasons(reasons: Sequence[str], limit: int) -> str:
+    """De-duplicate reason strings (first-occurrence order) and truncate.
+
+    The one shared collapse rule behind every human-readable rendering of
+    mask-copper incompleteness (issue #8949): the live case carries reason
+    lists where 13 of 19 strings are the same
+    ``"F.Mask: unattributed native mask region"`` line, which buries the
+    distinct causes.  ``mask_copper_unknown`` composes this into its
+    coverage-row detail; ``kct check``'s stdout stanza composes it with a
+    wider bound.  An empty list renders the ``"no reason reported"``
+    placeholder, never a spurious ``(+0 more)``.
+    """
+    distinct = list(dict.fromkeys(reason for reason in reasons if reason))
+    shown = distinct[:limit]
+    detail = "; ".join(shown) if shown else "no reason reported"
+    if len(distinct) > len(shown):
+        detail += f" (+{len(distinct) - len(shown)} more)"
+    return detail
+
+
+def mask_copper_unknown(coverage: str, reasons: Sequence[str], *, limit: int = 3) -> Coverage:
+    """``mask_to_copper`` coverage when the assessment could not evaluate the board.
+
+    ``MaskCopperAssessment.coverage`` is the assessment's own verdict on
+    whether it saw the whole board: ``complete``, ``incomplete`` (it ran but
+    could not evaluate -- an unsupported native rule context, an unqualified
+    KiCad plot profile, unusable region geometry) or ``not_run`` (requested
+    via ``--only`` with no process policy, so it never evaluated anything).
+    Anything but ``complete`` means zero findings is **not** a pass, so the
+    row is ``unknown`` rather than ``checked`` (Issue #8924).
+
+    Keyed on ``coverage`` alone, never on ``MaskCopperAssessment.passed``:
+    ``passed`` is strictly stronger -- it also requires empty ``reasons``, a
+    policy and binding, and no ``violation``/``uncertain`` measurement.  A
+    board whose mask check ran fine and *found real violations* is a
+    ``checked`` row carrying error findings; reporting ``unknown`` there would
+    invert the row's meaning.  ``summarize_verdict`` keys on ``passed``, which
+    is correct for a *verdict* but not for this row.
+
+    The reason detail is de-duplicated (first-occurrence order) and truncated
+    via :func:`collapse_reasons` -- the shared collapse rule the CLI's
+    stdout stanza uses too (issue #8949).  This string lands verbatim in
+    every committed report, so its ``limit`` stays tight.
+    """
+    detail = collapse_reasons(reasons, limit=limit)
+    return unknown("mask_to_copper", f"assessment {coverage} ({detail})")
 
 
 def _unfilled_pour_zones(checker: DRCChecker) -> int:

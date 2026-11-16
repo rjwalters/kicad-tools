@@ -34,6 +34,7 @@ plus the polygon-geometry fix from issue #5811:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 from pathlib import Path
@@ -2222,6 +2223,9 @@ def test_kct_poly_silk_floor_matches_measured_contract(
     """
     rules = _factory_rules()
     assert rules.min_silk_to_pad_clearance_mm == _SILK_PAD_FLOOR_MM
+    # This pins the single-tier native-DRC floor; the two-tier JLCDFM bands
+    # (Issue #8844) are covered in test_silk_pad_clearance_bands_8844.py.
+    rules = dataclasses.replace(rules, silk_to_pad_danger_mm=None, silk_to_pad_warning_mm=None)
 
     pcb = PCB.load(
         _write_poly_floor_probe(

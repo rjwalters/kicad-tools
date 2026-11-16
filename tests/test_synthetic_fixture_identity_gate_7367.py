@@ -117,12 +117,32 @@ def with_board07_synthetic(gate):
     return gate
 
 
-def test_board07_committed_allowance_is_empty():
-    """Issue #5333: the ``--differential-pairs`` re-route fires none of the
-    former entries, so board 07 allows no blocking finding at all."""
+BOARD07_GAP_NETS = (
+    "MIPI_CLK_N",
+    "MIPI_DAT0_N",
+    "MIPI_DAT1_N",
+    "TMDS_D0_N",
+    "TMDS_D1_N",
+    "TMDS_D2_N",
+)
+
+BOARD06_GAP_NETS = ("GND", "MIPI_CLK+", "PCIE_RX+", "USB2_D-")
+
+
+def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
+    # #8974: DQS_P/DQS_N/GND/+1V2 drained (route-side slit-band fix) and every
+    # survivor re-pointed from #8957 to the #8962 parent tracker.
+    return {("physical_copper_gap", net): 8962 for net in nets}
+
+
+def test_board07_committed_allowance():
+    """Issues #5333/#6448 emptied the pair/group/skew entries: board 07's
+    allowance holds only the #8957 fab-view ``physical_copper_gap`` nets
+    (net-signature keyed -- the board is regenerated each CI run, so
+    geometry-keyed identities are ephemeral)."""
     gate = load("check_matchgroup_coverage")
-    assert gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS == {}
-    assert gate.board_allowance(BOARD07_KEY) == {}
+    assert fab_gap_allowance(BOARD07_GAP_NETS) == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
+    assert gate.board_allowance(BOARD07_KEY) == gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
 
 
 class TestBoard07:
@@ -257,13 +277,15 @@ def with_board06_synthetic(gate):
     return gate
 
 
-def test_board06_committed_allowance_is_empty():
-    """Issue #7548: the seed-42 re-route measures every declared pair within
-    its ``max_skew_mm``, so board 06 allows no blocking finding at all."""
+def test_board06_committed_allowance():
+    """Issue #7548 emptied the skew entry: board 06's allowance holds only
+    the #8957 fab-view ``physical_copper_gap`` nets (net-signature keyed --
+    the board is regenerated each CI run, so geometry-keyed identities are
+    ephemeral)."""
     gate = load("check_diffpair_coverage")
-    assert gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS == {}
+    assert fab_gap_allowance(BOARD06_GAP_NETS) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
     assert not hasattr(gate, "DIFFPAIR_SKEW_TRACKER")
-    assert gate.DIFFPAIR_ALLOWANCES.get(BOARD06_KEY, {}) == {}
+    assert gate.DIFFPAIR_ALLOWANCES.get(BOARD06_KEY) == gate.DIFFPAIR_FIXTURE_ALLOWED_FINDINGS
 
 
 class TestBoard06:
@@ -359,6 +381,50 @@ def test_unallowed_findings_counts_records_and_skips_warnings():
 
 
 # ---------------------------------------------------------------------------
+# Issue #8957: physical_copper_gap identity is the net signature, because the
+# synthetic boards are regenerated from scratch each CI run (geometry-keyed
+# items -- footprint UUIDs, via coordinates -- differ run to run).
+# ---------------------------------------------------------------------------
+
+
+def gap_violation(nets, items=("Trace@F.Cu:w0.2:1/1~2/2",)):
+    return {
+        "rule_id": "physical_copper_gap",
+        "severity": "error",
+        "nets": list(nets),
+        "items": list(items),
+    }
+
+
+def test_physical_gap_identity_is_the_net_signature():
+    identity = load("identity_allowance")
+    one = gap_violation(("GND",))
+    other = gap_violation(("GND",), items=("Via@9.9/9.9:F.Cu-B.Cu:d0.25/s0.45",))
+    assert identity.violation_identity(one) == "GND"
+    # A fresh regeneration mints different geometry refs for the same
+    # population; the identity (and so the allowance slot) is unchanged.
+    assert identity.violation_identity(one) == identity.violation_identity(other)
+    assert identity.violation_identity(gap_violation(("A", "B"))) == "A/B"
+
+
+def test_regenerated_population_passes_and_a_new_net_fails():
+    """Two runs with disjoint geometry but identical net signatures both
+    match the #8962-re-pointed fab-gap allowance; a NEW net's slits are
+    unallowed, and a net that stops carrying slits goes stale."""
+    gate = load("check_matchgroup_coverage")
+    run_a = [gap_violation(("TMDS_D0_N",)) for _ in range(3)] + [gap_violation(("MIPI_CLK_N",))]
+    run_b = [
+        gap_violation(("TMDS_D0_N",), items=("Via@1.1/1.1:F.Cu-B.Cu:d0.3/s0.6",)) for _ in range(2)
+    ]
+    for run in (run_a, run_b):
+        assert gate.unallowed_blocking(BOARD07_KEY, run) == []
+    regressed = run_a + [gap_violation(("ADDR_BUS",))]
+    assert gate.unallowed_blocking(BOARD07_KEY, regressed) == [("physical_copper_gap", "ADDR_BUS")]
+    stale = gate.stale_allowances(BOARD07_KEY, load("identity_allowance").error_identities(run_b))
+    assert ("physical_copper_gap", "MIPI_CLK_N", 8962) in stale
+
+
+# ---------------------------------------------------------------------------
 # End to end through check_board (subprocesses stubbed): the exit code
 # ---------------------------------------------------------------------------
 
@@ -397,9 +463,13 @@ def _stub_matchgroup(
 class TestBoard07CheckBoard:
     def test_clean_reroute_passes_on_the_committed_allowance(self, monkeypatch, tmp_path, capsys):
         """Issue #5333: the measured ``--differential-pairs`` re-route has no
-        blocking finding, and the empty committed allowance has nothing stale."""
+        blocking finding beyond the #8957 fab-gap nets, and every committed
+        allowance entry fires, so nothing is stale."""
         gate = load("check_matchgroup_coverage")
-        found = [violation("connectivity", "TMDS_D0_N")]
+        found = [
+            violation("physical_copper_gap", net)
+            for _rule, net in sorted(gate.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS)
+        ] + [violation("connectivity", "TMDS_D0_N")]
         groups = set(gate.MATCHGROUP_ALLOWED_GROUPS[BOARD07_KEY])
         gate, board = _stub_matchgroup(monkeypatch, tmp_path, found, groups, synthetic=False)
         assert gate.check_board(board, gate.load_allowlist(TOLERANCE), 42, skip_route=False) == 0

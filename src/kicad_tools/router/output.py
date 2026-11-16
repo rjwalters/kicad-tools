@@ -203,7 +203,14 @@ def show_routing_summary(
             )
             if oob_items:
                 parts.append(f"{oob_items} out-of-bounds segment/via(s)")
-            print(f"  Cleanup: removed {', '.join(parts)}")
+            # Issue #8919: ``total_removed`` sums EVERY cleanup counter,
+            # including ones this sentence does not enumerate (repairs,
+            # restorations, single-layer vias -- each of which prints its own
+            # line from ``cleanup_artifacts``).  Without this guard a run whose
+            # only cleanup was e.g. an acute fold-back repair printed a bare
+            # "Cleanup: removed " with nothing after it.
+            if parts:
+                print(f"  Cleanup: removed {', '.join(parts)}")
 
     print(f"{'=' * 60}")
 

@@ -37,6 +37,9 @@ from .rules.zone_fill import IsolatedCopperRule, ZoneFillRule
 from .violations import DRCResults, DRCViolation
 
 if TYPE_CHECKING:
+    from .rules.physical_gap import FabGapPolicy
+
+if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
     from pathlib import Path
 
@@ -44,7 +47,7 @@ if TYPE_CHECKING:
     from kicad_tools.router.rules import NetClassRouting
     from kicad_tools.schema.pcb import PCB
     from kicad_tools.validate.filters import ViolationFilter
-    from kicad_tools.validate.mask_copper import MaskCopperRequest
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment, MaskCopperRequest
     from kicad_tools.validate.rules.courtyard_waivers import CourtyardWaivers
 
 
@@ -145,6 +148,7 @@ class DRCChecker:
         physical_copper_gap_mm: float | None = None,
         fab_view: bool = False,
         fab_view_copper_oz: float | None = None,
+        fab_view_gap_policy: FabGapPolicy | None = None,
         authored_min_clearance_mm: float | None = None,
         require_routing_policy: bool = False,
         routing_policy_defer_pair_vias: bool = True,
@@ -284,6 +288,11 @@ class DRCChecker:
         # Issue #7206 (F3): declared nets whose copper pour could not be
         # rated by ``check_ampacity`` -- ``{net: reason}`` for coverage.
         self.ampacity_unmeasured_nets: dict[str, str] = {}
+        # Issue #8924: set by :meth:`check_mask_to_copper`; read by ``kct
+        # check`` coverage so the ``mask_to_copper`` row can report the
+        # assessment's own ``coverage`` instead of an unconditional
+        # ``checked``.  ``None`` until the check runs.
+        self.mask_copper_assessment: MaskCopperAssessment | None = None
         # Issue #6044: ``routing_policy`` options.  ``require_routing_policy``
         # makes a sensitive net class with no declared policy an error
         # (``kct check --require-routing-policy``).  With
@@ -323,9 +332,13 @@ class DRCChecker:
         # Issue #8843: net-agnostic "fab view" (JLCDFM-style) passes, enabled
         # by the CLI under ``--mfr jlcpcb``.  ``fab_view_copper_oz`` is the
         # *declared* outer copper weight (None = unknown -> mask-bridge check
-        # fails closed rather than assuming 1 oz).
+        # fails closed rather than assuming 1 oz).  ``fab_view_gap_policy``
+        # (issue #8938) carries the resolved stackup's ``dfm_thresholds`` gap
+        # bands; ``None`` under ``fab_view`` fails closed to an ``info``
+        # ``physical_copper_gap_incomplete`` finding rather than guessing.
         self.fab_view = fab_view
         self.fab_view_copper_oz = fab_view_copper_oz
+        self.fab_view_gap_policy = fab_view_gap_policy
         self.emit_measurements = emit_measurements
         # The skew / continuity rules surface their measured info findings
         # when either the user asked for --verbose OR a caller wants the
@@ -599,6 +612,7 @@ class DRCChecker:
         "missing_plated_hole": CATEGORY_ADVISORY,
         "board_id_missing": CATEGORY_ADVISORY,
         "silk_over_copper": CATEGORY_ADVISORY,
+        "silk_hole_overlap": CATEGORY_ADVISORY,
         # Silk inside a graphic mask opening (#8861): an error, fab-blocking.
         "silk_over_mask_opening": CATEGORY_MANUFACTURING,
         "silk_edge_clearance": CATEGORY_ADVISORY,
@@ -836,7 +850,14 @@ class DRCChecker:
         return results
 
     def check_physical_copper_gap(self) -> DRCResults:
-        """Opt-in net-independent slit preflight on unioned copper geometry."""
+        """Opt-in net-independent slit preflight on unioned copper geometry.
+
+        Issue #8938: under the fab view the severity bands come from the
+        resolved stackup's ``dfm_thresholds`` entry (the CLI resolves it into
+        ``fab_view_gap_policy``); with no resolved policy the pass fails
+        closed to an ``info`` ``physical_copper_gap_incomplete`` finding
+        instead of severity-grading gaps from assumed edges.
+        """
         from .rules import physical_gap
 
         if self.physical_copper_gap_mm is not None:
@@ -846,23 +867,49 @@ class DRCChecker:
             )
         if not self.fab_view:
             return DRCResults()
-        # Issue #8843: JLCDFM-style default. gap < 0.10mm error, [0.10, 0.15) warning,
-        # plus the 2 oz pad mask-bridge check (fails closed on unknown weight).
-        results = physical_gap.check_physical_copper_gap(
-            self.pcb,
-            physical_gap.FAB_VIEW_GAP_WARNING_MM,
-            error_below_mm=physical_gap.FAB_VIEW_GAP_DANGER_MM,
-        )
+        results = DRCResults()
+        if self.fab_view_gap_policy is None:
+            results.add(
+                DRCViolation(
+                    "physical_copper_gap_incomplete",
+                    # Info, mirroring the mask-bridge fail-closed shape: a
+                    # stackup with no DFM entry already drives the verdict to
+                    # incomplete upstream (_apply_dfm_table), so this must not
+                    # invent a blocking finding from an unknown band.
+                    "info",
+                    "Fab-view copper gap check incomplete: no DFM threshold "
+                    "entry for this stackup (gap severity bands unknown)",
+                )
+            )
+        else:
+            results.merge(
+                physical_gap.check_physical_copper_gap_fab_view(self.pcb, self.fab_view_gap_policy)
+            )
+        # Issue #8843: plus the 2 oz pad mask-bridge check (fails closed on
+        # unknown weight), independent of the gap bands.
         results.merge(physical_gap.check_pad_mask_bridge(self.pcb, self.fab_view_copper_oz))
         return self._absolutize(results)
 
-    def check_tht_smd_spacing(self) -> DRCResults:
-        """THT pad / via to SMD pad spacing (Issue #8843); fab-view (jlcpcb) only."""
+    def check_tht_smd_spacing(self, via_drill_mm: float | None = None) -> DRCResults:
+        """THT pad / anchor via to SMD pad spacing (Issue #8843); fab-view (jlcpcb) only.
+
+        ``via_drill_mm`` overrides the drill diameter at which a via starts
+        being judged like a THT component pad; ``None`` uses the rule's
+        calibrated :data:`~.rules.tht_smd_spacing.ANCHOR_DRILL_MM` default.
+        Before Issue #8914 this method called the rule with no arguments at
+        all, which pinned the old ``include_vias=False`` default on every
+        ``kct check`` run and made the via arm unreachable.
+        """
         if not self.fab_view:
             return DRCResults()
-        from .rules.tht_smd_spacing import check_tht_smd_spacing
+        from .rules.tht_smd_spacing import ANCHOR_DRILL_MM, check_tht_smd_spacing
 
-        return self._absolutize(check_tht_smd_spacing(self.pcb))
+        return self._absolutize(
+            check_tht_smd_spacing(
+                self.pcb,
+                via_drill_mm=ANCHOR_DRILL_MM if via_drill_mm is None else via_drill_mm,
+            )
+        )
 
     def check_clearances(self) -> DRCResults:
         """Check clearance rules (trace-to-trace, trace-to-pad, etc.).
@@ -1745,6 +1792,13 @@ class DRCChecker:
                         assessment.reasons.append("Source changed after checker object validation")
         except (OSError, ValueError) as exc:
             assessment = MaskCopperAssessment(coverage="incomplete", reasons=[str(exc)])
+        # Issue #8924: the assessment's own ``coverage`` is only knowable after
+        # the run, and ``assessment_results`` flattens it into findings.  Stash
+        # it so ``kct check``'s coverage loop can downgrade the row (the same
+        # post-hoc pattern as ``impedance_unmeasured_pairs`` / #7293 and
+        # ``ampacity_unmeasured_nets`` / #7206 F3).  Every path above assigns
+        # ``assessment``, so this is never stale when the method ran.
+        self.mask_copper_assessment = assessment
         return assessment_results(assessment)
 
     def check_solder_mask_pads(self) -> DRCResults:

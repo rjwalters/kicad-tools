@@ -30,7 +30,7 @@ import argparse
 import json
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -72,7 +72,7 @@ from kicad_tools.router.current_paths import (
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
-from kicad_tools.validate.coverage import coverage_to_dict
+from kicad_tools.validate.coverage import collapse_reasons, coverage_to_dict
 from kicad_tools.validate.rules.reinforcement_incomplete import reinforcement_waived_nets
 from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
 
@@ -145,8 +145,28 @@ _NET_RELATIONSHIP_RULE_IDS: frozenset[str] = frozenset(
         "clearance_segment_segment",
         "clearance_via_via",
         "clearance_pad_via",
+        # Issue #8938: physical_copper_gap findings carry the structured
+        # ``same_net`` flag (a same-net slit is one net, so the two-name
+        # classifier below sees nothing to compare).
+        "physical_copper_gap",
     }
 )
+
+
+def _finding_relationship(v: DRCViolation) -> str | None:
+    """Net-relationship tag for a finding header / BY RULE tally (#4102, #8938).
+
+    Rules carrying the structured :attr:`DRCViolation.same_net` flag (#8938)
+    are classified from it directly -- a same-net physical gap has a single
+    net, which the two-name :func:`_net_relationship` cannot compare.
+    """
+    if v.rule_id == "physical_copper_gap":
+        if v.same_net is None:
+            return None
+        return "same-net" if v.same_net else "different-net"
+    if v.rule_id in _NET_RELATIONSHIP_RULE_IDS:
+        return _net_relationship(v.nets)
+    return None
 
 
 def _authored_min_clearance_mm(pcb_path: str | Path) -> float | None:
@@ -249,19 +269,36 @@ class MetaCheckResult:
     # a machine-detectable JSON field so a skipped gate is never mistaken for a
     # clean one.
     schematic_missing: bool = False
+    # Issue #8949: True when a blocking coverage category (mask_to_copper,
+    # the DFM threshold table, fab DFM parity) could not complete its
+    # assessment.  ``compute_overall`` consults this so ``overall``, the
+    # printed ``Overall:`` line and the exit-code decision all read one
+    # source of truth, instead of two notions of "incomplete" that can
+    # drift.  Set from the same incompleteness the exit code already
+    # honours; never widened (an explicitly requested check that cannot run
+    # stays FAILED).
+    coverage_incomplete: bool = False
+    # The blocking categories whose incompleteness set ``coverage_incomplete``
+    # (e.g. ``("mask_to_copper",)``); names them on the ``Overall:`` line.
+    # Not serialized in ``to_dict``: machine consumers already receive
+    # ``verdict`` and ``exit_code``, and the report's schema is pinned.
+    incomplete_categories: tuple[str, ...] = ()
 
     def _subs(self) -> tuple[SubCheckResult, ...]:
         return (self.drc, self.erc, self.lvs, self.manifest)
 
     def compute_overall(self) -> None:
-        """Roll up the four sub-statuses into ``self.overall``.
+        """Roll up the four sub-statuses (+ coverage incompleteness) into ``overall``.
 
-        Rules (per issue #3750 acceptance criterion #3):
+        Rules (per issue #3750 acceptance criterion #3, extended by #8949):
 
-        * ``FAILED`` if any sub-check is ``FAILED``.
+        * ``FAILED`` if any sub-check is ``FAILED`` -- a real failure is
+          never masked by an incomplete category.
         * ``INCOMPLETE`` if any sub-check is ``NOT RUN`` (and none is
-          ``FAILED``).
-        * ``PASSED`` only when every sub-check is ``PASSED``.
+          ``FAILED``), or when ``coverage_incomplete`` is set (a blocking
+          category could not complete its assessment).
+        * ``PASSED`` only when every sub-check is ``PASSED`` and no
+          blocking category was incomplete.
 
         The rollup intentionally reports the truthful aggregate state and
         does not collapse ``INCOMPLETE`` into ``FAILED`` under ``--strict``
@@ -273,7 +310,7 @@ class MetaCheckResult:
         subs = self._subs()
         if any(s.status == "FAILED" for s in subs):
             self.overall = "FAILED"
-        elif any(s.status == "NOT RUN" for s in subs):
+        elif any(s.status == "NOT RUN" for s in subs) or self.coverage_incomplete:
             self.overall = "INCOMPLETE"
         else:
             self.overall = "PASSED"
@@ -287,6 +324,14 @@ class MetaCheckResult:
             "overall": self.overall,
             "schematic_missing": self.schematic_missing,
         }
+
+
+# Issue #8949: stdout bound for distinct mask-to-copper reasons in the
+# human-readable stanza.  Wider than the coverage row's ``limit=3`` (whose
+# string lands verbatim in committed reports): the reporter's run carried
+# four distinct real causes among the repeats, and the stanza must be able
+# to show all of them plus headroom, while staying bounded.
+_MASK_STDOUT_REASON_LIMIT = 8
 
 
 # Available check categories
@@ -496,11 +541,15 @@ def _maybe_emit_via_in_pad_process_advisory(violations: Sequence) -> None:
         )
 
 
-def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
+def _emit_drift_banner(pcb_path: Path, schematic: str | None):
     """Print the advisory schematic/PCB drift banner (non-blocking).
 
     No-op when no schematic can be resolved or the PCB is in sync.  This is
     advisory only and never affects the caller's exit code (issue #3154).
+
+    Returns the ``SyncAnalysis`` the banner was built from, or ``None`` when
+    no schematic could be resolved or the analysis failed, so ``main()`` can
+    record the removed-pad scan's coverage state (Issue #8942).
 
     The banner is routed to stderr so it does not pollute the stdout JSON
     body produced by ``--format json`` consumers (the CI gate at
@@ -513,10 +562,47 @@ def _emit_drift_banner(pcb_path: Path, schematic: str | None) -> None:
 
     analysis, _resolved = analyze_drift(pcb_path, schematic)
     if analysis is None:
-        return
+        return None
     banner = format_drift_banner(analysis, pcb_path)
     if banner:
         print(banner, file=sys.stderr)
+    return analysis
+
+
+def _removed_pad_scan_coverage(coverage: dict, analysis) -> None:
+    """Record the removed-pad scan's coverage state (Issue #8942).
+
+    The scan rides the advisory drift analysis (``_emit_drift_banner``), so
+    its coverage is recorded here rather than as a dispatcher category: it
+    is not selectable with ``--only``/``--skip`` and emits no findings of
+    its own (``CHECK_CATEGORIES`` must not gain it).
+
+    Four states, so a blocking ``unknown`` cannot fire spuriously: no
+    schematic resolvable -> ``skipped`` (a baseline board checked outside
+    its project must never block); schematic resolved but no
+    ``update_footprint`` swaps -> ``skipped`` (nothing to scan); swaps
+    present and every replacement resolved -> ``checked``; swaps present
+    and any replacement unresolvable (or the scratch board unusable) ->
+    ``unknown``, which ``kct readiness`` turns into a named blocker
+    ("unknown is not pass", Issue #5946) while ``kct check``'s exit code
+    stays advisory (issue #3154).
+    """
+    from kicad_tools.validate import coverage as cov
+
+    if analysis is None:
+        coverage["removed_pad_scan"] = cov.skipped("removed_pad_scan", "no_schematic")
+        return
+    swaps = [a for m in analysis.matches for a in m.actions if a.get("type") == "update_footprint"]
+    if not swaps:
+        coverage["removed_pad_scan"] = cov.skipped("removed_pad_scan", "no_footprint_swaps")
+        return
+    if analysis.scan_gaps:
+        detail = "; ".join(f"{g['reference']}: {g['reason']}" for g in analysis.scan_gaps)
+        coverage["removed_pad_scan"] = cov.unknown(
+            "removed_pad_scan", f"unresolvable_replacement ({detail})"
+        )
+        return
+    coverage["removed_pad_scan"] = cov.checked("removed_pad_scan")
 
 
 def run_netlist_sync_gate(
@@ -985,6 +1071,8 @@ def run_meta_checks(
     drc_status: SubCheckResult,
     schematic: str | None = None,
     strict: bool = False,
+    coverage_incomplete: bool = False,
+    incomplete_categories: tuple[str, ...] = (),
 ) -> MetaCheckResult:
     """Run the four meta sub-checks (DRC + ERC + LVS + Manifest).
 
@@ -1007,6 +1095,13 @@ def run_meta_checks(
             the exit-code policy in :func:`main` controls whether
             ``INCOMPLETE`` exits non-zero (the new default) or 0 (with
             ``--allow-incomplete``).
+        coverage_incomplete: A blocking coverage category (mask_to_copper,
+            DFM table, fab DFM parity) could not complete its assessment
+            (issue #8949).  Threaded in -- not set on the returned object
+            -- because this helper calls ``compute_overall`` itself, so a
+            flag assigned afterwards would be a no-op.
+        incomplete_categories: Names of the categories behind
+            ``coverage_incomplete``; rendered on the ``Overall:`` line.
     """
     resolved_sch = _resolve_check_schematic(schematic, pcb_path)
 
@@ -1034,6 +1129,8 @@ def run_meta_checks(
         lvs=lvs,
         manifest=manifest,
         schematic_missing=schematic_missing,
+        coverage_incomplete=coverage_incomplete,
+        incomplete_categories=incomplete_categories,
     )
     result.compute_overall()
     return result
@@ -1092,7 +1189,12 @@ def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> N
 
     Output goes to stdout in a stable column layout so humans can
     diff it across runs.  The ``Overall:`` line is the rollup that
-    matches the exit-code decision.
+    matches the exit-code decision -- an invariant #8949 makes true by
+    construction, because every incompleteness the exit code honours is
+    folded into ``compute_overall`` via ``coverage_incomplete``.  When a
+    blocking category is the cause, the line names it
+    (``Overall:   INCOMPLETE (mask_to_copper)``); sub-check ``NOT RUN``
+    causes are named by their own status rows above.
 
     ``verbose`` (issue #4616) expands the ``LVS:`` row into the complete,
     uncapped mismatch list from both comparator legs.  The status lines
@@ -1107,7 +1209,10 @@ def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> N
     if verbose:
         _print_lvs_verbose_expansion(result.lvs)
     print(_format_meta_status_line("Manifest", result.manifest))
-    print(f"{'Overall:':10} {result.overall}")
+    if result.overall == "INCOMPLETE" and result.incomplete_categories:
+        print(f"{'Overall:':10} {result.overall} ({', '.join(result.incomplete_categories)})")
+    else:
+        print(f"{'Overall:':10} {result.overall}")
 
 
 def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
@@ -1333,6 +1438,20 @@ def main(argv: list[str] | None = None) -> int:
         "--mask-copper-config",
         type=Path,
         help="Explicit process policy, source-bound escape intent and native runtime JSON (kct.mask-copper-request.v1); engages mask_to_copper",
+    )
+    parser.add_argument(
+        "--fab-dfm-result",
+        dest="fab_dfm_result",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a recorded fab DFM tool result (JSON with a 'counts' object, "
+            "shape of tests/fixtures/fab_dfm_parity/jlcdfm_*.json). Given one, the "
+            "Fab DFM parity stanza and the fab_dfm_parity JSON section print kct's "
+            "per-category error/warning counts beside the recorded fab "
+            "danger/warning counts and mark fab-danger/kct-0-error categories "
+            "(issue #8940). JLCPCB-family --mfr only; malformed input is an error."
+        ),
     )
     parser.add_argument(
         "--physical-copper-gap",
@@ -1971,7 +2090,9 @@ def main(argv: list[str] | None = None) -> int:
     # passed via --schematic) and the component sets have drifted, print a
     # one-line, non-blocking warning before running DRC.  Never affects the
     # exit code on the default run -- the hard gate lives behind --netlist-sync.
-    _emit_drift_banner(pcb_path, getattr(args, "schematic", None))
+    # The analysis is kept for the removed-pad scan's coverage entry (Issue
+    # #8942), recorded on the coverage dict below.
+    drift_analysis = _emit_drift_banner(pcb_path, getattr(args, "schematic", None))
 
     # Issue #3920: resolve the effective manufacturer profile.  A routed
     # ``.kicad_pcb`` carries no embedded fab-tier hint, so bare ``kct check``
@@ -2402,6 +2523,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Error: invalid mask-to-copper request: {exc}", file=sys.stderr)
             return 1
 
+    # Issue #8940: an explicitly supplied recorded fab DFM result drives the
+    # kct-vs-fab comparison in the Fab DFM parity stanza/JSON.  Malformed or
+    # unreadable input is a clear tool-level error, never a silent fall back
+    # to the uncompared stanza.
+    fab_result_counts = None
+    if getattr(args, "fab_dfm_result", None):
+        from kicad_tools.validate.fab_dfm_parity import RecordedResultError, load_recorded_result
+
+        try:
+            fab_result_counts = load_recorded_result(args.fab_dfm_result)
+        except RecordedResultError as exc:
+            print(f"Error: --fab-dfm-result: {exc}", file=sys.stderr)
+            return 1
+
     if (
         mask_copper_request is None
         and getattr(args, "mfr", None)
@@ -2445,6 +2580,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # Create checker with manufacturer rules
     try:
+        # Issue #8938: resolve the stackup's fab-view gap bands (same DFM-table
+        # lookup path as _apply_dfm_table below) for the net-agnostic copper
+        # gap pass.  None (no table / no entry) fails closed in the checker.
+        fab_view_gap_policy = None
+        if effective_mfr == "jlcpcb":
+            fab_view_gap_policy = _resolve_fab_gap_policy(
+                effective_mfr,
+                layers,
+                resolved_copper_outer,
+                resolved_copper_inner,
+                preset_copper_oz,
+                len(pcb.copper_layers),
+            )
         checker = DRCChecker(
             pcb,
             manufacturer=effective_mfr,
@@ -2470,6 +2618,7 @@ def main(argv: list[str] | None = None) -> int:
             # Issue #8843: net-agnostic fab view is default-on under jlcpcb.
             fab_view=effective_mfr == "jlcpcb",
             fab_view_copper_oz=resolved_copper_outer,
+            fab_view_gap_policy=fab_view_gap_policy,
             courtyard_waivers=courtyard_waivers,
             # Issue #4673: strict (real-geometry) connectivity is the
             # default; --legacy-connectivity is the explicit opt-out and
@@ -2584,6 +2733,10 @@ def main(argv: list[str] | None = None) -> int:
         drc_only=getattr(args, "drc_only", False),
         opt_in={"model_coverage"} if getattr(args, "models_3d", False) else frozenset(),
     )
+
+    # Issue #8942: the removed-pad scan ran inside the advisory drift
+    # analysis above; record what it could evaluate ("unknown is not pass").
+    _removed_pad_scan_coverage(coverage, drift_analysis)
 
     # Issue #5946: bind every finding to a hash of its local evidence (its
     # geometry, the footprints it names and the membership of its nets).
@@ -2846,6 +2999,7 @@ def main(argv: list[str] | None = None) -> int:
         mask_copper_default=mask_copper_default_applied,
         dfm_incomplete=dfm_incomplete,
         manufacturer=args.mfr,
+        recorded_fab_counts=fab_result_counts,
     )
     fab_dfm_parity = (
         check_verdict.fab_dfm_parity.to_dict() if check_verdict.fab_dfm_parity else None
@@ -2861,10 +3015,22 @@ def main(argv: list[str] | None = None) -> int:
     fabrication_process_dict = describe_selection(checker.design_rules)
     machine_output = args.format in ("json", "sarif")
     if results.mask_copper_assessments and not machine_output:
+        # Issue #8949: collapse the repeated reason lines (the live
+        # incomplete case repeats one line hundreds of times, burying the
+        # distinct causes) with the same shared rule the coverage row uses,
+        # at a wider stdout bound -- and print one remediation line naming
+        # what to configure.  JSON/SARIF output is untouched (the guard
+        # above); the machine report already carries the full reasons list.
         for assessment in results.mask_copper_assessments:
             print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
-            for reason in assessment.reasons:
-                print(f"  {reason}")
+            # Issue #8991: a ``complete`` assessment with nothing to report
+            # prints only the header; the "no reason reported" placeholder is
+            # kept for non-complete states (and for any reasons present).
+            if assessment.reasons or assessment.coverage != "complete":
+                print(f"  {collapse_reasons(assessment.reasons, limit=_MASK_STDOUT_REASON_LIMIT)}")
+            remediation = assessment.remediation
+            if remediation:
+                print(f"  Remediation: {remediation}")
 
     _warn_attach_zone_suppressed(results)
 
@@ -2993,6 +3159,7 @@ def evaluate_check_verdict(
     mask_copper_default: bool = False,
     dfm_incomplete: bool = False,
     manufacturer: str | None = None,
+    recorded_fab_counts: Mapping[str, Mapping[str, int]] | None = None,
 ) -> CheckVerdict:
     """Turn DRC results into ``kct check``'s verdict + exit code (Issue #7260).
 
@@ -3022,6 +3189,11 @@ def evaluate_check_verdict(
         manufacturer: Manufacturer id; for the JLCPCB family a danger-capable
             ``not_covered`` fab DFM parity row (Issue #8845) makes an otherwise
             passing verdict ``incomplete``.
+        recorded_fab_counts: Recorded fab DFM result ``counts`` (Issue #8940;
+            ``--fab-dfm-result``).  When given, the parity report carries the
+            per-category kct-vs-fab count comparison (findings are attributed
+            by each row's ``count_rule_ids`` using the same ``is_error`` /
+            ``is_warning`` predicates as *error_count* / *warning_count*).
     """
     counted = list(results.violations) if violations is None else list(violations)
     error_count = sum(1 for v in counted if v.is_error)
@@ -3051,17 +3223,37 @@ def evaluate_check_verdict(
             f"{error_count} error(s), {warning_count} warning(s)"
         ),
     )
+    from kicad_tools.validate.fab_dfm_parity import evaluate_parity
+
+    parity = evaluate_parity(manufacturer, findings=counted, recorded_counts=recorded_fab_counts)
     meta: MetaCheckResult | None = None
     if not drc_only:
+        # Issue #8949: ONE notion of "incomplete".  Every incompleteness the
+        # exit code already honours (a default-applied mask coverage check
+        # that could not run, a stackup with no DFM-table entry, a
+        # danger-capable fab DFM parity row) is folded into the meta rollup
+        # through one flag, so ``meta.overall``, the printed ``Overall:``
+        # line and the exit code cannot disagree.  Never widened: an
+        # explicitly requested mask check that cannot run is ``mask_failed``
+        # above and keeps reporting FAILED.  ``compute_overall`` ranks
+        # FAILED first, so a failed board still reads FAILED.
+        incomplete_categories: list[str] = []
+        if mask_incomplete:
+            incomplete_categories.append("mask_to_copper")
+        if dfm_incomplete:
+            incomplete_categories.append("dfm_table")
+        if parity is not None and parity.incomplete:
+            incomplete_categories.append("fab_dfm_parity")
         meta = run_meta_checks(
             Path(pcb_path),
             drc_status=drc_sub,
             schematic=schematic,
             strict=strict,
+            coverage_incomplete=bool(incomplete_categories),
+            incomplete_categories=tuple(incomplete_categories),
         )
     verdict, exit_code = _check_verdict(
         mask_copper_failed=bool(mask_failed),
-        mask_copper_incomplete=mask_incomplete,
         strict_copper_disagreement=strict_copper_disagreement,
         drc_only=drc_only,
         error_count=error_count,
@@ -3070,10 +3262,12 @@ def evaluate_check_verdict(
         allow_incomplete=allow_incomplete,
         meta=meta,
     )
-    from kicad_tools.validate.fab_dfm_parity import evaluate_parity
-
-    parity = evaluate_parity(manufacturer)
     if (dfm_incomplete or (parity is not None and parity.incomplete)) and verdict == "pass":
+        # Reachable only under ``drc_only`` since #8949: without the meta
+        # rollup there is no ``Overall:`` line to keep honest (the branch is
+        # dead on the meta path -- a "pass" verdict there implies no
+        # incompleteness), but the exit code must still honour the
+        # incompleteness.
         from ._gate import gate_exit_code
 
         exit_code, verdict = gate_exit_code(
@@ -3092,7 +3286,6 @@ def evaluate_check_verdict(
 def _check_verdict(
     *,
     mask_copper_failed: bool,
-    mask_copper_incomplete: bool = False,
     strict_copper_disagreement: bool,
     drc_only: bool,
     error_count: int,
@@ -3108,6 +3301,12 @@ def _check_verdict(
     ``--allow-incomplete`` an incomplete verdict still exits 0 (the verdict
     stays honest).  Numbering is unchanged (Issue #3750): the ``"check"``
     ladder of :func:`~kicad_tools.cli._gate.gate_exit_code`.
+
+    Issue #8949: the meta path reads incompleteness solely from
+    ``meta.overall`` -- the rollup now folds every incompleteness the exit
+    code honours (mask coverage, DFM table, fab DFM parity) via
+    ``coverage_incomplete``, so the printed ``Overall:`` line and this
+    decision cannot disagree.
     """
     from ._gate import gate_exit_code
 
@@ -3122,11 +3321,12 @@ def _check_verdict(
         )
     else:
         # The meta rollup already folded DRC (incl. --strict warnings), ERC,
-        # LVS and the manifest into FAILED / INCOMPLETE / PASSED.
+        # LVS, the manifest and #8949's coverage incompleteness into
+        # FAILED / INCOMPLETE / PASSED.
         exit_code, verdict = gate_exit_code(
             1 if meta.overall == "FAILED" else 0,
             0,
-            incomplete=meta.overall == "INCOMPLETE" or mask_copper_incomplete,
+            incomplete=meta.overall == "INCOMPLETE",
             allow_incomplete=allow_incomplete,
             style="check",
         )
@@ -3184,7 +3384,12 @@ def _emit_drc_sidecars(
             )
         else:
             from kicad_tools.manufacturers.dru_generator import merge_dru_floors
-            from kicad_tools.manufacturers.project_generator import generate_project_dru
+            from kicad_tools.manufacturers.project_generator import (
+                PRESERVE_MODE_OFF,
+                generate_project_dru,
+                preserve_board_rules_mode,
+            )
+            from kicad_tools.manufacturers.zone_clearance_dru import zone_clearance_targets
 
             dru_path = pcb_path.with_suffix(".kicad_dru")
             pro_path = pcb_path.with_suffix(".kicad_pro")
@@ -3195,6 +3400,21 @@ def _emit_drc_sidecars(
             existing_dru = dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
             from kicad_tools.manufacturers.keepout_dru import apply_keepout_rules
 
+            # Issue #8937: zone ``connect_pads`` clearances feed the emitted
+            # block's zone arm and the loosening gate's authored baselines.
+            zone_targets = zone_clearance_targets(pcb_path) if pcb_path.exists() else []
+            authored_state = {
+                "netclasses": {
+                    str(cls.get("name")): cls.get("clearance")
+                    for cls in project_data.get("net_settings", {}).get("classes", [])
+                    if isinstance(cls.get("clearance"), (int, float))
+                    and not isinstance(cls.get("clearance"), bool)
+                },
+                "zones": [[layer, net, value] for layer, net, value in zone_targets],
+            }
+            allow_dru = (
+                ("*",) if preserve_board_rules_mode(project_data) == PRESERVE_MODE_OFF else ()
+            )
             merged_dru = merge_dru_floors(
                 existing_dru,
                 generate_project_dru(
@@ -3202,8 +3422,11 @@ def _emit_drc_sidecars(
                     project_data,
                     manufacturer_id=manufacturer_id,
                     net_classes=net_classes,
+                    zone_clearances=zone_targets,
                 ),
                 path=dru_path,
+                authored=authored_state,
+                allow=allow_dru,
             )
             # Issue #6039: per-rule-area keepout rules (kicad-cli < 10.0.6
             # does not enforce rule areas without them, #7198).
@@ -3796,6 +4019,22 @@ def run_selected_checks(
         pour_unmeasured = getattr(checker, "ampacity_unmeasured_nets", None)
         if category == "ampacity" and pour_unmeasured and pre is None:
             cov_map[category] = cov.ampacity_pour_unknown(pour_unmeasured)
+        # Issue #8924: the mask assessment's own ``coverage`` is only knowable
+        # after the run, and the row defaulted to ``checked`` for an assessment
+        # the same report showed as ``incomplete``.  ``not_run`` is mapped
+        # explicitly rather than left to fall through: a *requested* check that
+        # never ran is not a pass either.  Keyed on ``coverage``, never on
+        # ``passed`` -- see ``cov.mask_copper_unknown``.
+        mask_assessment = getattr(checker, "mask_copper_assessment", None)
+        if (
+            category == "mask_to_copper"
+            and pre is None
+            and mask_assessment is not None
+            and mask_assessment.coverage != "complete"
+        ):
+            cov_map[category] = cov.mask_copper_unknown(
+                mask_assessment.coverage, mask_assessment.reasons
+            )
         # Issue #7743: a footprint whose models resolve only through a host
         # library variable was not judged by a host-independent report, so the
         # category is ``unknown`` -- on every host, so evidence bytes never
@@ -4000,6 +4239,60 @@ def _copper_weights_provenance(
     }
 
 
+def _dfm_stackup_args(
+    layers: int | None,
+    outer: float | None,
+    inner: float | None,
+    preset_oz: float,
+    n_layers_fallback: int,
+    profile,
+) -> tuple[int, float, float, bool]:
+    """Resolve the DFM table lookup key ``(n_layers, eff_outer, eff_inner, assumed)``.
+
+    The one stackup-resolution path for the DFM threshold table (#8839), shared
+    by :func:`_apply_dfm_table` (floors) and the fab-view gap-band resolution
+    (#8938), so both always agree on which entry applies.
+    """
+    n_layers = layers if layers is not None else n_layers_fallback
+    base = profile.get_design_rules(n_layers, preset_oz)
+    eff_outer = outer if outer is not None else (preset_oz if preset_oz else 1.0)
+    assumed = outer is None or (n_layers > 2 and inner is None)
+    if n_layers <= 2:
+        eff_inner = 0.0
+    else:
+        eff_inner = inner if inner is not None else base.inner_copper_oz
+    return n_layers, eff_outer, eff_inner, assumed
+
+
+def _resolve_fab_gap_policy(
+    mfr: str,
+    layers: int | None,
+    outer: float | None,
+    inner: float | None,
+    preset_oz: float,
+    n_layers_fallback: int,
+):
+    """The stackup's fab-view gap bands for ``DRCChecker(fab_view_gap_policy=...)``.
+
+    ``None`` when the fab has no table or the stackup has no entry: the gap
+    pass then fails closed (issue #8938) instead of severity-grading from
+    assumed edges -- the missing entry already drives an ``incomplete``
+    verdict via :func:`_apply_dfm_table`.
+    """
+    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
+
+    profile = get_profile(mfr)
+    if profile.dfm_thresholds is None:
+        return None
+    n_layers, eff_outer, eff_inner, _assumed = _dfm_stackup_args(
+        layers, outer, inner, preset_oz, n_layers_fallback, profile
+    )
+    entry = profile.get_dfm_entry(n_layers, eff_outer, eff_inner)
+    if entry is None:
+        return None
+    return fab_gap_policy_from_entry(entry)
+
+
 def _apply_dfm_table(
     checker: DRCChecker,
     mfr: str,
@@ -4024,14 +4317,9 @@ def _apply_dfm_table(
             "reason": f"no table for {mfr}",
         }
         return False
-    n_layers = layers if layers is not None else len(checker.pcb.copper_layers)
-    base = profile.get_design_rules(n_layers, preset_oz)
-    eff_outer = outer if outer is not None else (preset_oz if preset_oz else 1.0)
-    assumed = outer is None or (n_layers > 2 and inner is None)
-    if n_layers <= 2:
-        eff_inner = 0.0
-    else:
-        eff_inner = inner if inner is not None else base.inner_copper_oz
+    n_layers, eff_outer, eff_inner, assumed = _dfm_stackup_args(
+        layers, outer, inner, preset_oz, len(checker.pcb.copper_layers), profile
+    )
     entry = profile.get_dfm_entry(n_layers, eff_outer, eff_inner)
     stackup = f"{n_layers}-layer, {eff_outer:g}oz outer / {eff_inner:g}oz inner"
     if assumed:
@@ -4197,7 +4485,7 @@ def output_table(
             by_rule[v.rule_id]["warnings"] += 1
 
         if v.rule_id in _NET_RELATIONSHIP_RULE_IDS:
-            relationship = _net_relationship(v.nets)
+            relationship = _finding_relationship(v)
             if relationship is not None:
                 counts = by_rule_relationship.setdefault(
                     v.rule_id, {"same-net": 0, "different-net": 0}
@@ -4277,11 +4565,22 @@ def output_table(
     # Render them in a dedicated WAIVED section so a reviewer can audit each
     # documented exception (with its reason / tracking issue).
     if waived:
+        # Issue #8938: state how many waived findings are the same-net class,
+        # so a deliberate class waiver is visible as a count, not just as
+        # rows in the listing below.
+        same_net_waived = sum(1 for v in waived if v.same_net)
         print(f"\n{'-' * 60}")
         print("WAIVED (documented exceptions, non-blocking):")
+        if same_net_waived:
+            print(
+                f"  Same-net findings waived: {same_net_waived} "
+                "(each named below with its reason and issue)"
+            )
         for v in waived:
             print(f"\n  [W] {v.rule_id}")
             print(f"      {v.message}")
+            if v.waiver_reason:
+                print(f"      Waiver reason: {v.waiver_reason}")
             if v.waiver_issue:
                 print(f"      Waiver issue: {v.waiver_issue}")
             if verbose:
@@ -4318,7 +4617,7 @@ def _print_violation(v: DRCViolation, verbose: bool, indent: str = "  ") -> None
     # (different-net drill-wall breakage -> short) from lower-risk same-net /
     # floating pairs -- without eyeballing two net names.  Presentational only;
     # severity is unchanged.
-    relationship = _net_relationship(v.nets) if v.rule_id in _NET_RELATIONSHIP_RULE_IDS else None
+    relationship = _finding_relationship(v) if v.rule_id in _NET_RELATIONSHIP_RULE_IDS else None
     header = v.rule_id if relationship is None else f"{v.rule_id} ({relationship})"
     print(f"\n{indent}[{symbol}] {header}")
     print(f"{indent}    {v.message}")

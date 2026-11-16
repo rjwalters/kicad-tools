@@ -1,7 +1,14 @@
-"""Strict polygon reconstruction of the macro-free native Gerber export profile.
+"""Strict polygon reconstruction of the native Gerber export profile.
 
 Unknown commands reject the complete layer. Geometry is millimetres, board y-down.
 The chord error is a numerical approximation budget, not a manufacturing limit.
+
+Aperture macros are expanded for exactly the subset KiCad 10 emits (%AMRoundRect):
+comment primitives and primitives 1 (circle), 4 (outline) and 20 (vector line),
+with literal, $n and single-binary-`+` field arithmetic; macro lengths scale
+with the units command, and a macro aperture may only be flashed, never drawn.
+Any other macro construct rejects the complete layer rather than guessing pad
+geometry.
 """
 
 from __future__ import annotations
@@ -13,9 +20,153 @@ from typing import Any
 
 GERBER_CHORD_ERROR_MM = 0.000001
 
+# Macro outline vertex-count bounds: the spec requires at least three vertices
+# and the cap keeps a hostile body from exploding the geometry budget.
+_MACRO_OUTLINE_VERTICES = (3, 500)
+
+# Relative tolerance for accepting a repaired self-touching region contour:
+# the repair must preserve the contour's own (shoelace) area.
+REGION_REPAIR_AREA_TOLERANCE = 1e-9
+
 
 class GerberGeometryError(ValueError):
     """The complete layer cannot be reconstructed with known semantics."""
+
+
+@dataclass
+class _MacroPrimitive:
+    code: int
+    exposure: int
+    args: list[str]
+    rotation: str | None
+
+
+def _macro_number(text: str, params: list[float], name: str) -> float:
+    """Evaluate a macro field: a literal, an $n reference, or one binary + over two."""
+    total = 0.0
+    parts = text.split("+")
+    if not 1 <= len(parts) <= 2:
+        raise GerberGeometryError(f"Unsupported arithmetic in macro {name}: {text.strip()!r}")
+    for part in parts:
+        part = part.strip()
+        if part.startswith("$"):
+            index = part[1:]
+            if not index.isdigit():
+                raise GerberGeometryError(
+                    f"Unsupported arithmetic in macro {name}: {text.strip()!r}"
+                )
+            if not 1 <= int(index) <= len(params):
+                raise GerberGeometryError(f"Unbound macro parameter in macro {name}: {part}")
+            total += params[int(index) - 1]
+            continue
+        if not re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)", part):
+            raise GerberGeometryError(f"Unsupported arithmetic in macro {name}: {text.strip()!r}")
+        total += float(part)
+    if not math.isfinite(total):
+        raise GerberGeometryError(f"Nonfinite macro arithmetic in macro {name}")
+    return total
+
+
+def _parse_aperture_macro(name: str, body: str) -> list[_MacroPrimitive]:
+    """Validate a macro body at definition time; comments are dropped."""
+    primitives: list[_MacroPrimitive] = []
+    for token in body.split("*"):
+        token = token.strip()
+        if not token:
+            continue
+        if re.split(r"\s+", token, maxsplit=1)[0] == "0":
+            continue  # Comment primitive: carries no geometry.
+        fields = token.split(",")
+        if not re.fullmatch(r"[124][0-9]?", fields[0].strip()) or int(fields[0]) not in {1, 4, 20}:
+            raise GerberGeometryError(f"Unsupported macro primitive {fields[0]} in macro {name}")
+        code = int(fields[0])
+        if len(fields) < 2 or fields[1].strip() not in {"0", "1"}:
+            raise GerberGeometryError(f"Unsupported macro exposure in macro {name}: {token[:60]}")
+        if code == 4:
+            if len(fields) < 3 or not fields[2].strip().isdigit():
+                raise GerberGeometryError(f"Invalid macro outline vertex count in macro {name}")
+            count = int(fields[2])
+            if not _MACRO_OUTLINE_VERTICES[0] <= count <= _MACRO_OUTLINE_VERTICES[1]:
+                raise GerberGeometryError(
+                    f"Macro outline vertex count out of range in macro {name}"
+                )
+            base, rotated = 2 * count + 5, 2 * count + 6
+        else:
+            base, rotated = (5, 6) if code == 1 else (7, 8)
+        if len(fields) not in {base, rotated}:
+            raise GerberGeometryError(
+                f"Unsupported macro primitive {code} parameter count in macro {name}"
+            )
+        args = fields[2:base]
+        rotation = fields[rotated - 1].strip() if len(fields) == rotated else None
+        primitives.append(_MacroPrimitive(code, int(fields[1]), args, rotation))
+    if not primitives:
+        raise GerberGeometryError(f"Macro {name} defines no geometry")
+    return primitives
+
+
+def _expand_aperture_macro(
+    name: str,
+    primitives: list[_MacroPrimitive],
+    params: list[float],
+    *,
+    units: float,
+    Point: Any,
+    LineString: Any,
+    Polygon: Any,
+    rotate: Any,
+    _buffer: Any,
+) -> Any:
+    """Build one aperture shape: dark primitives union, clear primitives erase.
+
+    Length fields are scaled by ``units`` so the shape is millimetres under
+    both unit modes (the outline vertex count and rotations stay unscaled).
+    Shapely callables are passed in by the caller so the module keeps exactly
+    one (lazy) import site per shapely module.
+    """
+
+    def evaluate(text: str) -> float:
+        return _macro_number(text, params, name)
+
+    def length(text: str) -> float:
+        return evaluate(text) * units
+
+    shape = None
+    for primitive in primitives:
+        if primitive.code == 1:
+            diameter, cx, cy = (length(a) for a in primitive.args)
+            if diameter <= 0:
+                raise GerberGeometryError(f"Nonpositive macro circle in macro {name}")
+            piece = _buffer(Point(cx, cy), diameter / 2)
+        elif primitive.code == 4:
+            count = int(evaluate(primitive.args[0]))
+            coords = [length(a) for a in primitive.args[1:]]
+            points = list(zip(coords[0::2], coords[1::2], strict=False))
+            if len(points) != count + 1 or points[0] != points[-1]:
+                raise GerberGeometryError(f"Open or degenerate macro outline in macro {name}")
+            piece = Polygon(points)
+        else:
+            width, x1, y1, x2, y2 = (length(a) for a in primitive.args)
+            if width <= 0:
+                raise GerberGeometryError(f"Nonpositive macro line in macro {name}")
+            piece = _buffer(LineString([(x1, y1), (x2, y2)]), width / 2)
+        angle = evaluate(primitive.rotation) if primitive.rotation is not None else 0.0
+        if angle:
+            piece = rotate(piece, angle, origin=(0, 0))
+        if piece.is_empty or not piece.is_valid:
+            raise GerberGeometryError(f"Invalid macro primitive polygon in macro {name}")
+        if shape is None:
+            if not primitive.exposure:
+                # The macro image starts empty; a leading clear erases nothing.
+                continue
+            shape = piece
+        elif primitive.exposure:
+            shape = shape.union(piece)
+        else:
+            shape = shape.difference(piece)
+    if shape is None or shape.is_empty:
+        raise GerberGeometryError(f"Macro {name} produced no geometry")
+    return shape
 
 
 @dataclass
@@ -51,8 +202,9 @@ def _arc(start, end, center, clockwise, tolerance):
 
 
 def parse_gerber_geometry(data: str) -> GerberGeometry:
-    """Read native macro-free Gerber; reject incomplete or unknown command streams."""
-    from shapely.affinity import scale, translate  # type: ignore[import-untyped]
+    """Read native Gerber with the KiCad %AMRoundRect macro subset; reject the rest."""
+    from shapely import make_valid  # type: ignore[import-untyped]
+    from shapely.affinity import rotate, scale, translate  # type: ignore[import-untyped]
     from shapely.geometry import (  # type: ignore[import-untyped]
         GeometryCollection,
         LineString,
@@ -66,6 +218,7 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
 
     geometry = GeometryCollection()
     apertures = {}
+    macros: dict[str, list[_MacroPrimitive]] = {}
     selected = None
     units = None
     decimals = None
@@ -138,27 +291,68 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                 r"(?:TF\.[^*]+|TA\.[^*]+|TO\.[^*]+|TD(?:\.[^*]+)?)", command
             ):
                 pass  # X2 metadata does not change the image.
-            elif match := re.fullmatch(r"ADD(\d+)([CROP]),(.+)", command):
+            elif match := re.fullmatch(r"AM([A-Za-z0-9_+\-]+)\*(.+)", command, re.DOTALL):
+                name = match[1]
+                if name in {"C", "R", "O", "P"}:
+                    # Reserved standard template names: a macro must not shadow
+                    # the meaning of %ADDC/%ADDR/%ADDO/%ADDP (spec §4.5.2).
+                    raise GerberGeometryError(
+                        f"Aperture macro uses a reserved template name: {name}"
+                    )
+                if name in macros:
+                    raise GerberGeometryError("Redefined aperture macro")
+                macros[name] = _parse_aperture_macro(name, match[2])
+            elif match := re.fullmatch(r"ADD(\d+)([A-Za-z][A-Za-z0-9_+\-]*)(?:,(.+))?", command):
                 if units is None:
                     raise GerberGeometryError("Aperture before units")
                 number, kind = int(match[1]), match[2]
                 if number in apertures:
                     raise GerberGeometryError("Redefined aperture")
-                values = [float(v) for v in match[3].split("X")]
+                if kind not in {"C", "R", "O", "P"} and kind not in macros:
+                    raise GerberGeometryError(f"Unknown aperture template: {kind}")
+                try:
+                    values = [float(v) for v in match[3].split("X")] if match[3] else []
+                except ValueError:
+                    raise GerberGeometryError(f"Invalid aperture parameters: {kind}") from None
                 if not all(math.isfinite(v) for v in values):
                     raise GerberGeometryError("Nonfinite aperture")
+                if kind in macros:
+                    # Macro apertures are flashed; width/hole only apply to draws.
+                    # nonpositive is False: the macro's own expansion rejects empty
+                    # geometry, and a draw must reach the macro-kind raise below.
+                    apertures[number] = (
+                        _expand_aperture_macro(
+                            kind,
+                            macros[kind],
+                            values,
+                            units=units,
+                            Point=Point,
+                            LineString=LineString,
+                            Polygon=Polygon,
+                            rotate=rotate,
+                            _buffer=_buffer,
+                        ),
+                        kind,
+                        0.0,
+                        False,
+                        False,
+                    )
+                    continue
                 required = {"C": 1, "R": 2, "O": 2, "P": 3}[kind]
                 if len(values) not in {required, required + 1}:
                     raise GerberGeometryError("Unsupported aperture parameters")
                 width = values[0] * units
-                if width <= 0:
-                    raise GerberGeometryError("Nonpositive aperture")
+                # A zero-size aperture may be defined and selected (KiCad uses
+                # one as the current aperture while emitting G36/G37 regions);
+                # only flashing or stroking it is illegal, so the rejection
+                # lives at the use sites below.
+                nonpositive = width <= 0
                 if kind == "C":
                     shape = _buffer(Point(0, 0), width / 2)
                 elif kind in {"R", "O"}:
                     height = values[1] * units
                     if height <= 0:
-                        raise GerberGeometryError("Nonpositive aperture")
+                        nonpositive = True
                     if kind == "R":
                         shape = box(-width / 2, -height / 2, width / 2, height / 2)
                     else:
@@ -185,7 +379,7 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                 hole = len(values) > required and values[-1] > 0
                 if hole:
                     shape = shape.difference(_buffer(Point(0, 0), values[-1] * units / 2))
-                apertures[number] = (shape, kind, width, hole)
+                apertures[number] = (shape, kind, width, hole, nonpositive)
             else:
                 raise GerberGeometryError(f"Unsupported extended command: {command[:80]}")
             continue
@@ -211,7 +405,28 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                     raise GerberGeometryError("Open or degenerate region")
                 polygon = Polygon(points)
                 if not polygon.is_valid:
-                    raise GerberGeometryError("Invalid region contour")
+                    # A self-touching contour is normal fill output (a pour
+                    # pinching off at a point) and carries unambiguous area:
+                    # keep the polygonal parts of the repair and require the
+                    # shoelace area to survive it. An ambiguous interior
+                    # (e.g. a self-intersecting bow tie) changes the area and
+                    # is still rejected. make_valid can also yield
+                    # lower-dimensional parts at the pinch, so filtering only
+                    # a Polygon/MultiPolygon top-level result is not enough.
+                    repaired = make_valid(polygon)
+                    parts = [
+                        part
+                        for part in getattr(repaired, "geoms", [repaired])
+                        if part.geom_type in {"Polygon", "MultiPolygon"}
+                    ]
+                    if not parts:
+                        raise GerberGeometryError("Invalid region contour")
+                    repaired = unary_union(parts)
+                    if abs(repaired.area - polygon.area) > REGION_REPAIR_AREA_TOLERANCE * max(
+                        polygon.area, 1.0
+                    ):
+                        raise GerberGeometryError("Invalid region contour")
+                    polygon = repaired
                 shape = shape.symmetric_difference(polygon)
             emit(shape)
             region, contour = None, []
@@ -260,21 +475,28 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
             else:
                 if selected is None:
                     raise GerberGeometryError("Draw before aperture selection")
-                aperture, kind, width, hole = apertures[selected]
+                aperture, kind, width, hole, nonpositive = apertures[selected]
+                if nonpositive:
+                    raise GerberGeometryError("Nonpositive aperture")
                 if hole or (interpolation != 1 and kind != "C"):
                     raise GerberGeometryError("Unsupported swept aperture")
                 if kind == "C":
                     emit(_buffer(LineString(points), width / 2))
-                else:
+                elif kind in {"R", "O", "P"}:
                     emit(
                         unary_union(
                             [translate(aperture, *position), translate(aperture, *endpoint)]
                         ).convex_hull
                     )
+                else:
+                    raise GerberGeometryError(f"Draw with macro aperture: {kind}")
         elif operation == 3:
             if region is not None or selected is None:
                 raise GerberGeometryError("Invalid flash")
-            emit(translate(apertures[selected][0], *endpoint))
+            aperture, _, _, _, nonpositive = apertures[selected]
+            if nonpositive:
+                raise GerberGeometryError("Nonpositive aperture")
+            emit(translate(aperture, *endpoint))
         else:
             raise GerberGeometryError("Coordinates without valid operation")
         position = endpoint

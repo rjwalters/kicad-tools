@@ -2,8 +2,7 @@
 # test-resync-installed-stamp.sh - install-metadata.json re-stamping in
 # resync-installed.sh's restamp_metadata() (#9174, #9613, #10717)
 #
-# Split out of test-resync-installed.sh (frozen by the file-size ratchet,
-# .loom/docs/file-size-policy.md) rather than grown in place.
+# Split out of test-resync-installed.sh rather than grown in place.
 #
 # Covers the two ways the stamp was wrong:
 #   (1) #9174 -- loom_commit was written with `git rev-parse --short HEAD`.

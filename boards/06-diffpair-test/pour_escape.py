@@ -50,6 +50,12 @@ _FOLDED_FLOOR_FAMILIES = {
     # rule per class.  Folding each board-wide is conservative, like the
     # layer-scoped floors above.
     "Reviewed clearance": ("clearance", "clearance"),
+    # Issue #8937: the managed block now restores each zone's authored
+    # ``connect_pads`` clearance as a layer-scoped, net-conditioned rule.
+    # Folding each board-wide is conservative, like the reviewed classes
+    # above: the escape path then keeps that much clearance from every
+    # copper, the zone's own net included.
+    "Zone clearance": ("clearance", "clearance"),
 }
 # Families the generator can also emit that can never constrain the copper
 # this search adds (an F.Cu track and/or a through via, away from the board
@@ -82,7 +88,7 @@ _IGNORED_FLOOR_FAMILIES = {
 _MAX_CONSTRAINT_FAMILIES = frozenset({"Max Hole Size"})
 _DRU_RULE_RE = re.compile(
     r'\(rule "(?P<name>[^"]+)"\n'
-    r"(?:\s*\(layer (?P<layer>\w+)\)\n)?"
+    r'(?:\s*\(layer (?P<layer>"[^"]+"|\w+)\)\n)?'
     r'(?:\s*\(condition "(?P<condition>[^"]*)"\)\n)?'
     r"\s*\(constraint (?P<constraint>\w+) \((?P<kind>min|max) (?P<value>[0-9.]+)mm\)\)\)"
 )
@@ -338,12 +344,19 @@ def find_escape(
     *,
     step=0.05,
     node_budget=200_000,
+    via_ok=None,
 ):
     """Find a clear 45-degree path to primary copper or a legal through via.
 
     Geometry is immutable here. The caller commits only a complete result.
     Via entries carry their actual drill diameter, including earlier repairs.
     A budget exhaustion returns no repair, never a partial path.
+
+    ``via_ok`` is an optional ``(x, y) -> bool`` seat predicate applied at
+    every candidate through-via node (issue #8975): the geometric blockers
+    above know foreign-net copper but not same-net fab-view grading, so the
+    caller can reject seats the ``physical_copper_gap`` band would flag
+    without this module growing a dependence on the band predicate.
     """
     if not math.isfinite(step) or step <= 0 or node_budget < 1:
         raise ValueError("Escape search requires a positive grid step and node budget")
@@ -438,6 +451,7 @@ def find_escape(
             and min_y + radius <= xy[1] <= max_y - radius
             and not blocked_via.intersects(pt)
             and through.intersects(pt)
+            and (via_ok is None or via_ok(xy))
         )
         if on_front or on_via:
             nodes = []

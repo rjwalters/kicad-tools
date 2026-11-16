@@ -3,13 +3,45 @@
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 __all__ = ["run_pcb_command"]
 
 
 #: Upper bound on re-plan passes in one ``kct pcb prune`` run (#8730).
 _PRUNE_MAX_PASSES = 10
+
+
+def _sheet_reporters(
+    pcb,
+) -> tuple[float, float, Callable[[Any], list[float]], Callable[[dict[str, Any]], dict[str, Any]]]:
+    """Report renderers in the sheet frame the KiCad GUI shows (#8493, #8798).
+
+    Router and prune coordinates are board-relative; every coordinate a report
+    quotes must be sheet-absolute so pasting it into the KiCad GUI's locator
+    finds the copper. Returns ``(origin_x, origin_y, sheet_point,
+    sheet_witness)``: ``sheet_point`` shifts a ``(x, y)`` pair by the board's
+    ``board_origin`` and ``sheet_witness`` shifts a witness dict's coordinate
+    keys in place, leaving absent keys absent (never injecting ``0``).
+    """
+    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+
+    def sheet(point) -> list[float]:
+        return [point[0] + origin_x, point[1] + origin_y]
+
+    def sheet_witness(witness: dict[str, Any]) -> dict[str, Any]:
+        out = dict(witness)
+        for key in ("start", "end", "position"):
+            if key in out:
+                out[key] = sheet(out[key])
+        if out.get("blocking_branches"):
+            out["blocking_branches"] = [
+                {**b, "start": sheet(b["start"]), "end": sheet(b["end"])}
+                for b in out["blocking_branches"]
+            ]
+        return out
+
+    return origin_x, origin_y, sheet, sheet_witness
 
 
 def _carry_sidecars(src: Path, dst: Path) -> None:
@@ -847,6 +879,15 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         return 1
     assert res is not None  # _PRUNE_MAX_PASSES >= 1, so the loop ran at least once
 
+    # Quote sheet positions like the sibling commands and kct check (#8954);
+    # the library's plans and uncut loops stay board-relative.
+    origin_x, origin_y, _sheet, _sheet_witness = _sheet_reporters(pcb)
+
+    # --region takes board-relative mm while every coordinate quoted below is
+    # sheet-absolute; twin the box so the report shows both frames (#8969).
+    # scope.region keeps echoing the argument verbatim (#8954).
+    region_sheet = _sheet(region[:2]) + _sheet(region[2:]) if region else None
+
     def _net(p) -> dict[str, Any]:
         return {
             "net": p.net_name or p.net_number,
@@ -854,11 +895,33 @@ def _run_prune_command(args, pcb_path: Path) -> int:
             "vias_removed": len(p.remove_vias),
             "ends_snapped": len(p.snaps),
             "stubs_added": [
-                {"layer": layer, "start": list(a), "end": list(b), "width": w}
+                {"layer": layer, "start": _sheet(a), "end": _sheet(b), "width": w}
                 for layer, a, b, w in p.stubs
             ],
             **({"reject_reason": p.reject_reason} if p.reject_reason else {}),
         }
+
+    def _sheet_uncut_loop(u: dict[str, Any]) -> dict[str, Any]:
+        """One uncut-loop entry, re-quoted at sheet positions (#8954)."""
+        out = dict(u)
+        if "witness" in out:
+            # audit_loops_left entry: re-render the text from the raw witness,
+            # then shift the witness dict itself, so text and dict agree.
+            from kicad_tools.router.current_paths import witness_text
+
+            out["segments"] = [witness_text(out["witness"], (origin_x, origin_y))]
+            out["witness"] = _sheet_witness(out["witness"])
+        elif "segment_ends" in out:
+            ends = out["segment_ends"]
+            out["segments"] = [
+                f"({e['a'][0] + origin_x}, {e['a'][1] + origin_y})->"
+                f"({e['b'][0] + origin_x}, {e['b'][1] + origin_y}) {e['layer']}"
+                for e in ends
+            ]
+            out["segment_ends"] = [
+                {"a": _sheet(e["a"]), "b": _sheet(e["b"]), "layer": e["layer"]} for e in ends
+            ]
+        return out
 
     changed = (
         res.stats["segments_removed"]
@@ -878,8 +941,12 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         "snapped": res.stats["ends_snapped"],
         "nets": [_net(p) for p in res.accepted],
         "rejected_by_drc": [_net(p) for p in res.rejected],
-        "uncut_loops": res.uncut_loops,
-        "scope": {"nets": nets, "region": list(region) if region else None},
+        "uncut_loops": [_sheet_uncut_loop(u) for u in res.uncut_loops],
+        "scope": {
+            "nets": nets,
+            "region": list(region) if region else None,
+            "region_sheet": region_sheet,
+        },
         "region_skipped": [_net(p) for p in res.region_skipped],
     }
     if output_format == "json":
@@ -888,6 +955,12 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         print(f"PCB Prune {'(dry run)' if dry_run else ''}")
         print(f"  Input:  {pcb_path}")
         print(f"  DRC:    {res.drc_note}")
+        if region is not None and region_sheet is not None:
+            print(
+                f"  Region: ({region[0]}, {region[1]}) to ({region[2]}, {region[3]}) mm "
+                f"(board-relative) = ({region_sheet[0]}, {region_sheet[1]}) to "
+                f"({region_sheet[2]}, {region_sheet[3]}) mm sheet-absolute"
+            )
         print(f"  Segments removed: {res.stats['segments_removed']:,}")
         if res.stats.get("vias_removed"):
             print(f"  Vias removed:     {res.stats['vias_removed']:,}")
@@ -977,7 +1050,11 @@ def _print_reinforce_legs(outcome, origin_x: float, origin_y: float) -> None:
         anchors = ", ".join(f"({a.x + origin_x:.2f}, {a.y + origin_y:.2f})" for a in leg.anchors)
         print(
             f"    leg {i} [{leg.kind}] {leg.layer} {leg.length_mm:.1f} mm -- "
-            f"{len(leg.anchors)}/2 anchored [{leg.status}]"
+            + (
+                f"{leg.strategy} [{leg.status}]"
+                if leg.strategy != "wire"
+                else f"{len(leg.anchors)}/2 anchored [{leg.status}]"
+            )
             + (
                 f", wire spans {leg.wire_span_mm:.1f} of {leg.length_mm:.1f} mm"
                 if leg.wire_span_mm
@@ -1018,6 +1095,10 @@ def _print_clear_lines(clear_outcome, origin_x: float, origin_y: float, dry_run:
         print(
             f"    kept anchor at ({r.x + origin_x:.2f}, {r.y + origin_y:.2f}): refused -- {r.reason}"
         )
+    for c in clear_outcome.copies_removed:
+        print(f"  Parallel copy on {c.layer} {verb}: {c.segments} segment(s), {c.vias} via(s)")
+    for c in clear_outcome.copies_refused:
+        print(f"  Parallel copy on {c.layer} kept: refused -- {c.reason}")
     if clear_outcome.openings_removed:
         print(f"  Mask openings cleared: {len(clear_outcome.openings_removed)} ({verb})")
         for o in clear_outcome.openings_removed:
@@ -1046,9 +1127,68 @@ def _drop_cleared_wires(output_path: Path, clear_outcome, origin_x: float, origi
     from kicad_tools.pcb.reinforcement_sidecar import drop_wires, sidecar_path
 
     removed = [(a.x + origin_x, a.y + origin_y) for a in clear_outcome.removed]
-    if not removed:
+    copies = [c.key for c in getattr(clear_outcome, "copies_removed", [])]
+    if not removed and not copies:
         return 0
-    return drop_wires(sidecar_path(output_path), clear_outcome.net_name, removed)
+    return drop_wires(sidecar_path(output_path), clear_outcome.net_name, removed, copies)
+
+
+def _cleared_anything(clear_outcome) -> bool:
+    """True when a clear pass removed an anchor or a parallel copy (#8916)."""
+    return bool(clear_outcome.removed_count or getattr(clear_outcome, "copies_removed", None))
+
+
+def _cleared_copy_entries(clear_outcome) -> list:
+    return [
+        {"layer": c.layer, "segments": c.segments, "vias": c.vias}
+        for c in getattr(clear_outcome, "copies_removed", [])
+    ]
+
+
+def _copy_entry(copy, origin_x: float, origin_y: float) -> dict | None:
+    """JSON form of a parallel copy (#8916), sheet-absolute; None when absent."""
+    if copy is None:
+        return None
+    return {
+        "layer": copy.layer,
+        "segments": [
+            {
+                "start": [round(a[0] + origin_x, 4), round(a[1] + origin_y, 4)],
+                "end": [round(b[0] + origin_x, 4), round(b[1] + origin_y, 4)],
+                "width_mm": round(w, 4),
+            }
+            for a, b, w in copy.segments
+        ],
+        "stitch_vias": [
+            [round(x + origin_x, 4), round(y + origin_y, 4)] for x, y in copy.stitch_vias
+        ],
+        "via_size_mm": round(copy.via_size_mm, 4),
+        "via_drill_mm": round(copy.via_drill_mm, 4),
+        "existing_segments": copy.existing_segments,
+        "existing_vias": copy.existing_vias,
+    }
+
+
+def _print_reinforce_copies(outcome, origin_x: float, origin_y: float) -> None:
+    """Text report of the parallel copies of a ``--strategy`` pass (#8916)."""
+    print(f"  Parallel copies: {len(outcome.copies)} placed, {len(outcome.refused_copies)} refused")
+    for c in outcome.copies:
+        vias = ", ".join(f"({x + origin_x:.2f}, {y + origin_y:.2f})" for x, y in c.stitch_vias)
+        print(
+            f"    {c.layer}: {len(c.segments)} segment(s), {len(c.stitch_vias)} stitching via(s)"
+            + (f" at {vias}" if vias else "")
+            + (
+                f" [{c.existing_segments} segment(s) already present]"
+                if c.existing_segments
+                else ""
+            )
+            + (f" [{c.existing_vias} via(s) already present]" if c.existing_vias else "")
+        )
+    for r in outcome.refused_copies:
+        print(
+            f"    refused on {r.copy_layer or r.leg_layer} at ({r.x + origin_x:.2f}, "
+            f"{r.y + origin_y:.2f}): {r.reason}"
+        )
 
 
 def _opening_entries(openings, origin_x: float, origin_y: float) -> list:
@@ -1073,7 +1213,7 @@ def _finish_reinforce_clear(
                 {
                     "input": str(pcb_path),
                     "output": str(output_path)
-                    if not dry_run and clear_outcome.removed_count
+                    if not dry_run and _cleared_anything(clear_outcome)
                     else None,
                     "dry_run": dry_run,
                     "clear": True,
@@ -1090,6 +1230,7 @@ def _finish_reinforce_clear(
                     "mask_openings_cleared": _opening_entries(
                         clear_outcome.openings_removed, origin_x, origin_y
                     ),
+                    "copies_cleared": _cleared_copy_entries(clear_outcome),
                 },
                 indent=2,
             )
@@ -1103,15 +1244,20 @@ def _finish_reinforce_clear(
             f"  Anchor size:    drill {clear_outcome.anchor_drill_mm:.3f} mm, "
             f"pad {clear_outcome.anchor_pad_mm:.3f} mm"
         )
-        if not clear_outcome.removed and not clear_outcome.refused:
+        if (
+            not clear_outcome.removed
+            and not clear_outcome.refused
+            and not clear_outcome.copies_removed
+            and not clear_outcome.copies_refused
+        ):
             print("  Nothing to clear: no anchor-sized same-net vias found.")
         else:
             _print_clear_lines(clear_outcome, origin_x, origin_y, dry_run)
-        if not dry_run and clear_outcome.removed_count:
+        if not dry_run and _cleared_anything(clear_outcome):
             print()
             print("  NOTE: refill zone pours afterward (e.g. `kicad-cli pcb drc --refill-zones`).")
 
-    if not dry_run and clear_outcome.removed_count:
+    if not dry_run and _cleared_anything(clear_outcome):
         try:
             pcb.save(output_path)
             _carry_sidecars(pcb_path, output_path)
@@ -1168,7 +1314,12 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     are refused and reported, never placed. In-place by default; ``-o``
     writes elsewhere; ``--dry-run`` reports without writing.
     """
-    from kicad_tools.pcb.reinforce import ReinforceError, clear_anchors, reinforce_net
+    from kicad_tools.pcb.reinforce import (
+        ReinforceError,
+        clear_anchors,
+        reinforce_net,
+        resolve_min_wire_length_mm,
+    )
     from kicad_tools.schema.pcb import PCB
 
     net_name = getattr(args, "net", None)
@@ -1199,12 +1350,21 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         )
     mask_opening = getattr(args, "mask_opening", None)
     mask_width = getattr(args, "mask_width", None)
+    strategy = getattr(args, "strategy", None) or "wire"
     if mask_width is not None and mask_width <= 0:
         print("Error: --mask-width must be positive", file=sys.stderr)
         return 1
     layer = getattr(args, "layer", None)
     all_runs = getattr(args, "all_runs", False)
     min_run_length = getattr(args, "min_run_length", None)
+    min_wire_length = getattr(args, "min_wire_length", None)
+    for flag, value in (
+        ("--min-run-length", min_run_length),
+        ("--min-wire-length", min_wire_length),
+    ):
+        if value is not None and value < 0:
+            print(f"Error: {flag} must not be negative", file=sys.stderr)
+            return 1
     dry_run = getattr(args, "dry_run", False)
     output_format = getattr(args, "format", "text")
     output_path = Path(args.output) if getattr(args, "output", None) else pcb_path
@@ -1294,13 +1454,18 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     # (in memory; nothing is written under --dry-run). --replace carries on to
     # place new anchors and writes once.
     clear_outcome = None
+    # Issue #8916: the records are also how a parallel re-run tells its own
+    # earlier copper from copper that predates the tool.
+    prior_wires = (
+        _load_sidecar_wires(pcb_path) if (clear_only or replace or strategy != "wire") else None
+    )
     if clear_only or replace:
         try:
             clear_outcome = clear_anchors(
                 pcb,
                 net_name,
                 wire_gauge_awg=wire_gauge,
-                sidecar_wires=_load_sidecar_wires(pcb_path),
+                sidecar_wires=prior_wires,
             )
         except ReinforceError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -1320,6 +1485,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             dry_run=dry_run,
             all_runs=all_runs,
             min_run_length_mm=min_run_length,
+            min_wire_length_mm=min_wire_length,
             current_paths=current_paths,
             net_class_clearances=net_class_clearances,
             pairwise_clearance=pairwise,
@@ -1329,6 +1495,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             max_end_shift_mm=max_end_shift,
             mask_opening=mask_opening,
             mask_width_mm=mask_width,
+            strategy=strategy,
+            sidecar_wires=prior_wires,
         )
     except ReinforceError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -1337,6 +1505,14 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
     # Refusal anchors are board-relative internally; report sheet-absolute
     # coordinates like ``kct check`` / kicad-cli DRC (Issue #8493).
     origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    # ``UnresolvedPath.reason`` is coordinate-free; its witness is rendered
+    # here in the same sheet frame as every other coordinate below (#8928).
+    from kicad_tools.router.current_paths import describe_witness
+
+    unresolved_reasons = [
+        u.reason + describe_witness(u.witness, (origin_x, origin_y))
+        for u in outcome.unresolved_paths
+    ]
 
     result: dict[str, Any] = {
         "input": str(pcb_path),
@@ -1370,6 +1546,13 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         # unchanged so current agent consumers keep working.
         "all_runs": all_runs,
         "min_run_length_mm": min_run_length,
+        # Issue #8915: what --min-wire-length was given (None = not given) and
+        # the minimum actually enforced for this mode after resolving the
+        # alias and the ends-mode 15.0 default.
+        "min_wire_length_mm": min_wire_length,
+        "min_wire_length_effective_mm": resolve_min_wire_length_mm(
+            min_wire_length, min_run_length, anchor_mode
+        ),
         "runs_total": len(outcome.runs),
         "runs_fully_reinforced": outcome.runs_fully_reinforced,
         "runs_partial": outcome.runs_partial,
@@ -1413,6 +1596,11 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
                 "paths": leg.paths,
                 "mask_status": leg.mask_status,
                 "mask_reason": leg.mask_reason,
+                # Issue #8916: per-leg strategy and parallel copy (additive).
+                "strategy": leg.strategy,
+                "copy_status": leg.copy_status,
+                "copy_reason": leg.copy_reason,
+                "copy": _copy_entry(leg.copy, origin_x, origin_y),
                 "polyline": [
                     [round(x + origin_x, 4), round(y + origin_y, 4)] for x, y in leg.polyline
                 ],
@@ -1420,8 +1608,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             for leg in outcome.legs
         ],
         "unresolved_paths": [
-            {"path": u.path, "status": u.status, "reason": u.reason}
-            for u in outcome.unresolved_paths
+            {"path": u.path, "status": u.status, "reason": why}
+            for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True)
         ],
         # Issue #8743: solder-mask openings (additive).
         "mask_opening": outcome.mask_opening,
@@ -1448,6 +1636,24 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             }
             for r in outcome.refused_openings
         ],
+        # Issue #8916: reinforcement strategy and parallel copies (additive).
+        "strategy": outcome.strategy,
+        "copies_placed": outcome.copies_placed_count,
+        "copies": [_copy_entry(c, origin_x, origin_y) for c in outcome.copies],
+        "refused_copies": [
+            {
+                "leg_layer": r.leg_layer,
+                "copy_layer": r.copy_layer,
+                "x": round(r.x + origin_x, 4),
+                "y": round(r.y + origin_y, 4),
+                "rule": r.rule,
+                "required_mm": round(r.required_mm, 4),
+                "actual_mm": round(r.actual_mm, 4),
+                "obstacle_net": r.obstacle_net,
+                "reason": r.reason,
+            }
+            for r in outcome.refused_copies
+        ],
     }
     if clear_outcome is not None:
         result["replace"] = True
@@ -1460,6 +1666,7 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         result["mask_openings_cleared"] = _opening_entries(
             clear_outcome.openings_removed, origin_x, origin_y
         )
+        result["copies_cleared"] = _cleared_copy_entries(clear_outcome)
         if not dry_run:
             try:
                 _drop_cleared_wires(output_path, clear_outcome, origin_x, origin_y)
@@ -1485,10 +1692,10 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             file=sys.stderr,
         )
 
-    for u in outcome.unresolved_paths:
+    for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
         print(
             f"Warning: declared current path {u.path!r} on net {outcome.net_name!r} is "
-            f"{u.status}: {u.reason} -- it gets no anchors",
+            f"{u.status}: {why} -- it gets no anchors",
             file=sys.stderr,
         )
 
@@ -1508,10 +1715,18 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         print(f"  Anchor pad:     {outcome.anchor_pad_mm:.3f} mm")
         if outcome.anchor_mode == "ends":
             print(f"  Anchor mode:    ends (end offset {outcome.end_offset_mm:g} mm)")
+            print(f"  Strategy:       {outcome.strategy}")
         else:
             print("  Anchor mode:    spaced")
             print(f"  Spacing:        {outcome.spacing_mm:.1f} mm")
-        if outcome.anchor_mode == "ends" and outcome.placed_count == 0:
+        # Issue #8915: show the minimum actually enforced, so the ends-mode
+        # 15.0 default is visible in the report and not just in --help.
+        effective_min = result["min_wire_length_effective_mm"]
+        if effective_min:
+            print(f"  Min wire length: {effective_min:g} mm (shorter legs get no wire)")
+        else:
+            print("  Min wire length: none (every leg is a wire candidate)")
+        if outcome.anchor_mode == "ends" and outcome.placed_count == 0 and not outcome.copies:
             # Every attempted leg was refused or too short: nothing is anchored.
             print("  Anchored run:   none (no leg received an anchor; see legs below)")
         else:
@@ -1527,8 +1742,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         if outcome.unresolved_paths:
             print()
             print("  Unresolved current paths (no anchors):")
-            for u in outcome.unresolved_paths:
-                print(f"    {u.path}: {u.status} -- {u.reason}")
+            for u, why in zip(outcome.unresolved_paths, unresolved_reasons, strict=True):
+                print(f"    {u.path}: {u.status} -- {why}")
         if outcome.anchor_mode == "ends":
             _print_reinforce_legs(outcome, origin_x, origin_y)
         else:
@@ -1539,6 +1754,8 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         print()
         print(f"  Anchors placed:  {outcome.placed_count}")
         print(f"  Anchors refused: {outcome.refused_count}")
+        if outcome.strategy != "wire":
+            _print_reinforce_copies(outcome, origin_x, origin_y)
         for r in outcome.refused:
             detail = (
                 f" [{r.rule}: need {r.required_mm:.3f} mm, have {r.actual_mm:.3f} mm"
@@ -1553,14 +1770,18 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
         if result["wire_sidecar"]:
             print(f"  Wire list:      {result['wire_sidecar']} ({len(wire_records)} wire(s))")
         if not dry_run and (
-            outcome.placed_count or (clear_outcome is not None and clear_outcome.removed_count)
+            outcome.placed_count
+            or outcome.copies
+            or (clear_outcome is not None and _cleared_anything(clear_outcome))
         ):
             print()
             print(
                 "  NOTE: anchors are same-net vias -- refill zone pours "
                 "afterward (e.g. `kicad-cli pcb drc --refill-zones`)."
             )
-            if outcome.mask_opening:
+            if outcome.copies and not outcome.placed_count:
+                pass  # parallel copies only (#8916): no anchors, no mask openings
+            elif outcome.mask_opening:
                 new = sum(1 for o in outcome.openings if not o.existing)
                 print(
                     f"  Mask openings:   {len(outcome.openings)} ({new} new); "
@@ -1588,9 +1809,11 @@ def _run_reinforce_command(args, pcb_path: Path) -> int:
             else:
                 print("  NOTE: mask openings are off; anchors inherit the board's via tenting.")
 
-    # Save unless dry-run and at least one anchor was placed (or cleared).
+    # Save unless dry-run and at least one anchor or copy was placed (or cleared).
     if not dry_run and (
-        outcome.placed_count or (clear_outcome is not None and clear_outcome.removed_count)
+        outcome.placed_count
+        or outcome.copies
+        or (clear_outcome is not None and _cleared_anything(clear_outcome))
     ):
         try:
             pcb.save(output_path)
@@ -1614,7 +1837,12 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
     copper on a declared net that no resolved path covers. Read-only --
     never mutates or saves the board.
     """
-    from kicad_tools.router.current_paths import audit_current_paths, load_current_path_specs
+    from kicad_tools.router.current_paths import (
+        PathResolution,
+        audit_current_paths,
+        describe_witness,
+        load_current_path_specs,
+    )
     from kicad_tools.schema.pcb import PCB
 
     current_paths_arg = getattr(args, "current_paths", None)
@@ -1637,17 +1865,35 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
     audit = audit_current_paths(pcb, specs)
     output_format = getattr(args, "format", "text")
     # Report sheet coordinates, the frame ``kct check`` uses (#8798).
-    origin_x, origin_y = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    origin_x, origin_y, _sheet, _sheet_witness = _sheet_reporters(pcb)
 
-    def _sheet(point) -> list[float]:
-        return [point[0] + origin_x, point[1] + origin_y]
+    def _reason(resolution: PathResolution) -> str:
+        """``reason`` plus its witness, quoted at sheet positions (#8928)."""
+        return resolution.reason + describe_witness(resolution.witness, (origin_x, origin_y))
 
-    def _sheet_witness(witness: dict[str, Any]) -> dict[str, Any]:
-        out = dict(witness)
-        for key in ("start", "end", "position"):
-            if key in out:
-                out[key] = _sheet(out[key])
-        return out
+    def _min_width_fields(resolution) -> dict[str, Any]:
+        """Narrowest copper of one resolved path, in sheet coordinates (#8917).
+
+        All four keys are ``null`` for an ``unresolved``/``ambiguous`` path --
+        never ``0``, which would read as "zero-width copper" rather than "not
+        measured".
+        """
+        found = resolution.min_width
+        if found is None:
+            return {
+                "min_width_mm": None,
+                "min_width_at": None,
+                "min_width_layer": None,
+                "min_width_parallel_group": None,
+            }
+        return {
+            "min_width_mm": round(found.width_mm, 4),
+            # Board coordinates come out of the resolver; the audit reports
+            # sheet coordinates, like its layer-change positions (#8798).
+            "min_width_at": _sheet(found.position),
+            "min_width_layer": found.layer,
+            "min_width_parallel_group": found.parallel_group,
+        }
 
     result: dict[str, Any] = {
         "input": str(pcb_path),
@@ -1676,10 +1922,11 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 "fusing_checked": r.spec.pulsed_a is None or r.spec.pulse_duration_s is not None,
                 "reinforcement_eligible": r.spec.reinforcement_eligible,
                 "status": r.status,
-                "reason": r.reason,
+                "reason": _reason(r),
                 "witness": _sheet_witness(r.witness),
                 "segment_count": len(r.segments),
                 "length_mm": round(r.length_mm, 4),
+                **_min_width_fields(r),
                 "layer_changes": [
                     {
                         "position": _sheet(c.position),
@@ -1738,7 +1985,7 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 f"on {r.spec.net_name!r} [{r.status}]"
             )
             if r.reason:
-                print(f"      {r.reason}")
+                print(f"      {_reason(r)}")
             if r.ok:
                 thermal = r.spec.thermal_design_current()
                 print(
@@ -1748,6 +1995,16 @@ def _run_current_paths_audit_command(args, pcb_path: Path) -> int:
                 )
                 if thermal.assumption:
                     print(f"      assumption: {thermal.assumption}")
+                narrowest = r.min_width
+                if narrowest is not None:
+                    nx, ny = _sheet(narrowest.position)
+                    # Say when the figure is a group's summed width, so
+                    # 2.0 mm is not misread as one trace's width (#8917).
+                    doubled = " (summed parallel group)" if narrowest.parallel_group else ""
+                    print(
+                        f"      min width {narrowest.width_mm:.3f} mm on "
+                        f"{narrowest.layer} at ({nx:.3f}, {ny:.3f}){doubled}"
+                    )
                 for c in r.layer_changes:
                     cx, cy = _sheet(c.position)
                     print(

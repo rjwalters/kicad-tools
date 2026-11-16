@@ -3344,14 +3344,16 @@ class TestStrandedCopper:
         pcb, scratch = self._swap_pcb([], [], ["1"])
         rec = self._rec()
         with patch("kicad_tools.schema.pcb.PCB.load", return_value=scratch):
-            seeds = rec._removed_pad_seeds(pcb, [self.SWAP])
+            seeds, gaps = rec._removed_pad_seeds(pcb, [self.SWAP])
         assert seeds == [{"reference": "R1", "pad": "2", "pcb_net": "GND"}]
+        assert gaps == []
 
     def test_pad_present_in_both_footprints_is_not_seeded(self):
         pcb, scratch = self._swap_pcb([], [((0, 0), "GND", "v1")], ["1", "2"])
         rec = self._rec()
         with patch("kicad_tools.schema.pcb.PCB.load", return_value=scratch):
-            assert rec._removed_pad_seeds(pcb, [self.SWAP]) == []
+            seeds, gaps = rec._removed_pad_seeds(pcb, [self.SWAP])
+        assert seeds == [] and gaps == []
 
     def test_via_stub_on_removed_pad_is_reported_and_removed_on_apply(self, tmp_path):
         # Segment is deleted by the swap itself; the via at the pad is not.
@@ -3388,3 +3390,65 @@ class TestStrandedCopper:
 
         assert main(["--analyze", "--remove-stranded", "--schematic", "a", "--pcb", "b"]) == 1
         assert "--remove-stranded requires --apply" in capsys.readouterr().err
+
+
+class TestRemovedPadScanProjectLib:
+    """Issue #8942: replacement footprints from a project fp-lib-table library.
+
+    These tests use the real fixture at ``tests/fixtures/removed_pad_scan_project``
+    and never mock ``add_footprint`` -- the mocked ``TestStrandedCopper`` cases
+    above are exactly why the project-library gap was invisible to the suite.
+    """
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "removed_pad_scan_project"
+
+    SWAP_TO_PROJ = {
+        "type": "update_footprint",
+        "reference": "R1",
+        "old_value": "OldLib:OldFP",
+        "new_value": "scanlib:ProjFP",
+    }
+
+    def _rec(self):
+        rec = Reconciler.__new__(Reconciler)
+        rec._schematic_path = self.FIXTURE / "removed_pad_scan.kicad_sch"
+        rec._pcb_path = self.FIXTURE / "removed_pad_scan.kicad_pcb"
+        return rec
+
+    def test_project_library_replacement_resolves_and_seeds(self):
+        from kicad_tools.schema.pcb import PCB
+
+        rec = self._rec()
+        pcb = PCB.load(str(rec._pcb_path))
+        seeds, gaps = rec._removed_pad_seeds(pcb, [self.SWAP_TO_PROJ])
+        # ProjFP has only pad 1, so old pad 2 (on GND) is seeded.
+        assert seeds == [{"reference": "R1", "pad": "2", "pcb_net": "GND"}]
+        assert gaps == []
+
+    def test_unresolvable_replacement_records_scan_gap(self):
+        from kicad_tools.schema.pcb import PCB
+
+        swap = {**self.SWAP_TO_PROJ, "new_value": "Nonexistent:BogusFP"}
+        rec = self._rec()
+        pcb = PCB.load(str(rec._pcb_path))
+        seeds, gaps = rec._removed_pad_seeds(pcb, [swap])
+        assert seeds == []
+        assert [g["reference"] for g in gaps] == ["R1"]
+        assert "BogusFP" in gaps[0]["reason"]
+
+    def test_whole_scan_failure_records_scan_gap(self):
+        rec = self._rec()
+        with patch("kicad_tools.schema.pcb.PCB.load", side_effect=OSError("disk gone")):
+            stranded, gaps = rec._find_stranded_copper([], [self.SWAP_TO_PROJ])
+        assert stranded == []
+        assert [g["reference"] for g in gaps] == ["*"]
+
+    def test_analysis_reports_scan_gaps(self):
+        gap = {"reference": "R1", "reason": "Footprint 'X' not found"}
+        a = SyncAnalysis(
+            matches=[SyncMatch("R1", "R1", "high", "exact", actions=(self.SWAP_TO_PROJ,))],
+            scan_gaps=[gap],
+        )
+        assert a.to_dict()["scan_gaps"] == [gap]
+        assert a.to_dict()["summary"]["scan_gaps"] == 1
+        assert "Removed-pad scan gaps" in a.summary()

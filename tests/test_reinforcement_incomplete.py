@@ -7,6 +7,7 @@ a time.
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from kicad_tools.manufacturers import DesignRules
 from kicad_tools.pcb.reinforce import reinforce_net
 from kicad_tools.router.current_paths import CurrentPathSpec, PathEndpoint
 from kicad_tools.schema.pcb import PCB
+from kicad_tools.validate.checker import DRCChecker
 from kicad_tools.validate.rules.reinforcement_incomplete import (
     ReinforcementIncompleteRule,
     reinforcement_waived_nets,
@@ -365,9 +367,14 @@ class TestRecordedEndShift:
         assert self._check(pcb, self._wires(outcome, bound=None)) == ["a"]
 
 
-def _four_layer_wire_board() -> PCB:
-    """Wire-reinforced B.Cu run on a 4-layer board (Issue #8866, net A shape)."""
-    pcb = PCB.create(width=200, height=100, layers=4, center=False)
+def _four_layer_wire_board(*, center: bool = False) -> PCB:
+    """Wire-reinforced B.Cu run on a 4-layer board (Issue #8866, net A shape).
+
+    ``center=True`` places the outline in the middle of the sheet, giving the
+    board a genuine non-zero ``PCB.board_origin`` while leaving every
+    board-relative coordinate below unchanged (Issue #8912).
+    """
+    pcb = PCB.create(width=200, height=100, layers=4, center=center)
     pcb.add_trace((20, 50), (120, 50), width=2.0, layer="B.Cu", net=NET)
     _add_th_pad_footprint(pcb, ref="J1", x=20.0, y=50.0, net=NET, drill=1.0, size=2.0)
     _add_th_pad_footprint(pcb, ref="J2", x=120.0, y=50.0, net=NET, drill=1.0, size=2.0)
@@ -416,9 +423,9 @@ class TestWireRunWithOrdinaryTaps:
         assert _subchecks(_run(pcb)) == ["a"]
 
 
-def _ambiguous_wire_board() -> PCB:
+def _ambiguous_wire_board(*, center: bool = False) -> PCB:
     """A mask-strip wire on B.Cu whose net also has a loop-closing tap (Issue #8886)."""
-    pcb = _four_layer_wire_board()
+    pcb = _four_layer_wire_board(center=center)
     pcb.add_trace((50, 50), (50, 58), width=0.25, layer="B.Cu", net=NET)
     pcb.add_trace((50, 58), (70, 58), width=0.25, layer="B.Cu", net=NET)
     pcb.add_trace((70, 58), (70, 50), width=0.25, layer="B.Cu", net=NET)
@@ -465,10 +472,132 @@ class TestNoWireAndSkipLocation:
         assert v.location != (0.0, 0.0)
         assert all(round(c, 3) == c for c in v.location)
 
-    def test_skip_message_rounds_witness_coordinates(self):
-        from kicad_tools.validate.rules.reinforcement_incomplete import _round_floats
 
-        assert _round_floats("at (10.799999999999997, 10.8)") == "at (10.800, 10.8)"
+def _ambiguous_skipped_board(*, center: bool = False) -> PCB:
+    """Ambiguous copper whose wire cannot be located: a ``[skipped]`` with a witness.
+
+    Removing the mask strips leaves only anchor evidence, so ``_locate_wire``
+    finds no wire copper but the net is not wire-less (Issue #8928).
+    """
+    pcb = _ambiguous_wire_board(center=center)
+    pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
+    return pcb
+
+
+class TestSkippedMessageWitnessFrame:
+    """Issue #8928: the ``[skipped]`` witness is quoted at its sheet position."""
+
+    @staticmethod
+    def _skipped_message(pcb: PCB) -> str:
+        checker = DRCChecker(pcb, layers=4, current_path_specs=[_spec()])
+        (v,) = checker.check_reinforcement_incomplete().violations
+        assert v.items[1].split("@")[0] == "skipped"
+        return v.message
+
+    def test_fixture_is_ambiguous_and_skipped(self):
+        pcb = _ambiguous_skipped_board(center=True)
+        assert _resolution_status(pcb) == "ambiguous"
+        assert "[witness: " in self._skipped_message(pcb)
+
+    def test_witness_is_quoted_at_the_sheet_position(self):
+        pcb = _ambiguous_skipped_board(center=True)
+        assert tuple(pcb.board_origin) == pytest.approx((48.5, 55.0))
+        message = self._skipped_message(pcb)
+        # Board-relative (70, 58) -> (70, 50) is sheet (118.5, 113) -> (118.5, 105).
+        assert "[witness: segment (118.500, 113.000)->(118.500, 105.000) on B.Cu]" in message
+        assert "(70.000, 58.000)" not in message
+        assert "[blocking branches: (68.500, 105.000)->(168.500, 105.000) on B.Cu" in message
+
+    def test_zero_origin_message_quotes_board_coordinates(self):
+        message = self._skipped_message(_ambiguous_skipped_board(center=False))
+        assert "[witness: segment (70.000, 58.000)->(70.000, 50.000) on B.Cu]" in message
+
+    def test_prose_is_unchanged_across_origins(self):
+        """Only the witness coordinates move; the reason prose is frame-free."""
+        flat = self._skipped_message(_ambiguous_skipped_board(center=False))
+        shifted = self._skipped_message(_ambiguous_skipped_board(center=True))
+        assert flat.split(" [witness: ")[0] == shifted.split(" [witness: ")[0]
+
+
+class TestNonZeroBoardOriginLocations:
+    """Issue #8912: ``[no_wire]`` / ``[skipped]`` locations are not double-offset.
+
+    Rules build ``DRCViolation.location`` in the board-relative frame and
+    ``DRCChecker._absolutize`` adds ``board_origin`` back exactly once. These
+    assertions therefore run through the public ``check_reinforcement_incomplete``
+    -- asserting the sheet position against a bare ``rule.check()`` would be
+    inverted (it would pass while the rule double-offsets).
+    """
+
+    @staticmethod
+    def _wireless(*, center: bool) -> PCB:
+        pcb = _ambiguous_wire_board(center=center)
+        pcb.graphic_lines[:] = [g for g in pcb.graphic_lines if g.layer != "B.Mask"]
+        pcb.vias[:] = [v for v in pcb.vias if v.net_name != NET]
+        return pcb
+
+    @staticmethod
+    def _located(pcb: PCB, spec: CurrentPathSpec) -> tuple[str, tuple[float, float]]:
+        """``(sub-check, sheet-absolute location)`` of the rule's single finding."""
+        checker = DRCChecker(pcb, layers=4, current_path_specs=[spec])
+        (v,) = checker.check_reinforcement_incomplete().violations
+        return v.items[1].split("@")[0], v.location
+
+    def test_no_wire_location_is_the_sheet_position_of_the_path(self):
+        """The J1 pad sits at board-relative (20, 50) on both boards."""
+        flat = self._wireless(center=False)
+        shifted = self._wireless(center=True)
+        ox, oy = shifted.board_origin
+        assert (ox, oy) != (0.0, 0.0), "fixture must have a non-zero board origin"
+
+        kind_flat, loc_flat = self._located(flat, _spec())
+        kind_shifted, loc_shifted = self._located(shifted, _spec())
+        assert kind_flat == kind_shifted == "no_wire"
+        # One origin, not two: the location tracks the board, not 2x the shift.
+        assert loc_shifted == pytest.approx((loc_flat[0] + ox, loc_flat[1] + oy))
+
+    def test_skipped_location_is_the_sheet_position_of_the_path(self):
+        spec = dataclasses.replace(_spec(True), source=PathEndpoint("NOPE", "1"))
+        flat = _ambiguous_wire_board(center=False)
+        shifted = _ambiguous_wire_board(center=True)
+        ox, oy = shifted.board_origin
+
+        kind_flat, loc_flat = self._located(flat, spec)
+        kind_shifted, loc_shifted = self._located(shifted, spec)
+        assert kind_flat == kind_shifted == "skipped"
+        assert loc_shifted == pytest.approx((loc_flat[0] + ox, loc_flat[1] + oy))
+
+    def test_no_wire_location_lands_inside_the_board_outline(self):
+        """A double-offset location falls outside the outline -- unclickable."""
+        pcb = self._wireless(center=True)
+        ox, oy = pcb.board_origin
+        _, (x, y) = self._located(pcb, _spec())
+        assert ox <= x <= ox + 200.0, f"x={x} outside [{ox}, {ox + 200.0}]"
+        assert oy <= y <= oy + 100.0, f"y={y} outside [{oy}, {oy + 100.0}]"
+
+    def test_net_without_copper_reports_the_board_origin(self):
+        """``_on_path``'s no-copper fallback absolutizes to the board origin.
+
+        Both endpoints must be unresolvable *and* the net stripped of copper to
+        reach that branch -- a resolved pad short-circuits it.
+        """
+        pcb = self._wireless(center=True)
+        net = pcb.get_net_by_name(NET)
+        assert net is not None
+        pcb.segments[:] = [s for s in pcb.segments if s.net_number != net.number]
+        spec = dataclasses.replace(
+            _spec(True), source=PathEndpoint("NOPE", "1"), sink=PathEndpoint("NOPE", "2")
+        )
+        kind, loc = self._located(pcb, spec)
+        assert kind == "skipped"
+        # Board-relative (0, 0) is the board origin -- not (0, 0), not 2x the shift.
+        assert loc == pytest.approx(tuple(pcb.board_origin))
+
+    def test_zero_origin_locations_are_unchanged(self):
+        """The common case keeps reporting board-relative == sheet coordinates."""
+        pcb = self._wireless(center=False)
+        assert tuple(pcb.board_origin) == (0.0, 0.0)
+        assert self._located(pcb, _spec()) == ("no_wire", pytest.approx((20.0, 50.0)))
 
 
 class TestStitchedDoubledCopper:
@@ -476,8 +605,14 @@ class TestStitchedDoubledCopper:
 
     Eligibility is *declared* in the current-paths sidecar, never inferred from
     the copper. Undeclared, the net yields no finding. Declared
-    ``reinforcement_eligible: true``, the rule is working as designed and
-    reports the missing anchors / mask opening on it.
+    ``reinforcement_eligible: true`` with no sidecar record, the rule is
+    working as designed and reports the missing anchors / mask opening on it.
+
+    Issue #8916 changed two things here, deliberately. (d) no longer fires on
+    the via at (70, 50): it pins the two branches together mid-run, so the
+    path does not change layer there (``PathResolution.series_layer_changes``).
+    And once the sidecar records the doubling as a parallel copy, the legs
+    need no wire at all.
     """
 
     @staticmethod
@@ -495,4 +630,193 @@ class TestStitchedDoubledCopper:
 
     def test_declared_eligible_doubled_copper_is_flagged_as_designed(self):
         results = _run(self._board(), eligible=True)
-        assert set(_subchecks(results)) == {"a", "b", "d"}
+        assert set(_subchecks(results)) == {"a", "b"}
+
+    def test_mid_run_stitching_via_is_not_a_layer_change(self):
+        """Was ``d`` before #8916: the via sits inside both branches."""
+        assert "d" not in _subchecks(_run(self._board(), eligible=True))
+
+    def test_recorded_parallel_copy_needs_no_wire(self):
+        """The same copper, recorded by ``--strategy parallel``, is clean."""
+        record = {
+            "net": NET,
+            "layer": "B.Cu",
+            "kind": "run",
+            "leg_start": {"x": 20.0, "y": 50.0},
+            "leg_end": {"x": 120.0, "y": 50.0},
+            "anchors": [],
+            "wire_gauge_awg": 16,
+            "status": "parallel",
+            "strategy": "parallel",
+            "copy_status": "placed",
+            "copy_layer": "F.Cu",
+            "polyline": [{"x": 20.0, "y": 50.0}, {"x": 120.0, "y": 50.0}],
+            "copy_segments": [
+                {"start": {"x": 20.0, "y": 50.0}, "end": {"x": 120.0, "y": 50.0}, "width_mm": 2.6}
+            ],
+            "stitch_vias": [{"x": 70.0, "y": 50.0}],
+        }
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=[record])
+        assert rule.check(self._board(), _rules()).violations == []
+
+
+class TestBelowMinWireLengthInteraction:
+    """Issue #8915 asked what this rule reports once a declared-eligible path's
+    only leg falls under the default 15 mm minimum. Measured: the path still
+    resolves ``ok``, so it is checked from its resolved segments and yields the
+    ``a`` (no anchor holes) + ``b`` (no mask opening) warnings -- **not**
+    ``no_wire``, which only fires for an *unresolved* declared-eligible path.
+
+    Issue #8916 gives that short leg somewhere to go: ``--strategy auto``
+    copies it onto the opposite outer layer, the wire list records the copy,
+    and ``a`` / ``b`` stop firing for it. A ``wire`` leg still earns them.
+    """
+
+    @staticmethod
+    def _reinforced_short(length: float, **kw) -> PCB:
+        pcb = _board(length=length)
+        reinforce_net(pcb, NET, current_paths=[_spec(True)], **kw)
+        return pcb
+
+    def test_below_minimum_reports_a_and_b_not_no_wire(self):
+        results = _run(self._reinforced_short(12.0))
+        assert set(_subchecks(results)) == {"a", "b"}
+        assert "no_wire" not in _subchecks(results)
+        assert {v.severity for v in results.violations} == {"warning"}
+
+    def test_pinning_the_minimum_off_leaves_the_path_clean(self):
+        """The findings above are the minimum's doing, not the 12 mm leg's."""
+        assert _subchecks(_run(self._reinforced_short(12.0, min_wire_length_mm=0.0))) == []
+
+    def test_leg_above_the_minimum_is_clean(self):
+        assert _subchecks(_run(self._reinforced_short(25.0))) == []
+
+    def test_auto_strategy_copy_clears_a_and_b(self):
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board(length=12.0)
+        result = reinforce_net(pcb, NET, current_paths=[_spec(True)], strategy="auto")
+        assert [leg.strategy for leg in result.legs] == ["parallel"]
+        wires = build_wire_records(result, 0.0, 0.0)
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
+        assert _subchecks(rule.check(pcb, _rules())) == []
+
+    def test_wire_strategy_short_leg_still_reports_a_and_b(self):
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board(length=12.0)
+        result = reinforce_net(pcb, NET, current_paths=[_spec(True)], strategy="wire")
+        rule = ReinforcementIncompleteRule(
+            specs=[_spec(True)], wires=build_wire_records(result, 0.0, 0.0)
+        )
+        assert set(_subchecks(rule.check(pcb, _rules()))) == {"a", "b"}
+
+
+class TestFullyPreExistingCopy:
+    """Issue #8951, case 2: a leg doubled by hand before ``reinforce`` ran has
+    every copy piece reused unrecorded, so its record is ``copy_status:
+    placed`` with ``copy_segments: []``. The rule used to skip such records
+    entirely and raise subchecks a/b on a leg ``kct pcb reinforce`` itself
+    reported as placed. The copy is now credited by checking coverage along
+    the recorded polyline on the copy layer -- and, symmetrically, deleting
+    an unrecorded piece of a placed copy stops the credit again.
+    """
+
+    @staticmethod
+    def _hand_doubled(length: float = 40.0):
+        """A leg whose copy-layer twin was drawn by hand, then reinforced.
+
+        The twin mirrors the leg's segment decomposition piece for piece, so
+        ``reinforce`` reuses every piece without recording it.
+        """
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board(length=length)
+        step = length / 4
+        xs = [20.0 + i * step for i in range(5)]
+        for a, b in zip(xs, xs[1:], strict=False):
+            # Same width as the leg's own pieces, so every twin piece is
+            # foreign-matched (same endpoints, same width) and none recorded.
+            pcb.add_trace((a, 50.0), (b, 50.0), width=2.0, layer="B.Cu", net=NET)
+        result = reinforce_net(pcb, NET, current_paths=[_spec(True)], strategy="parallel")
+        wires = build_wire_records(result, 0.0, 0.0)
+        return pcb, wires, result
+
+    def test_record_carries_no_copy_segments(self):
+        _, wires, result = self._hand_doubled()
+        assert result.refused_copies == []
+        placed = [w for w in wires if w.get("copy_status") == "placed"]
+        assert placed and all(not w["copy_segments"] for w in placed)
+
+    def test_hand_doubled_leg_raises_no_a_or_b(self):
+        pcb, wires, _ = self._hand_doubled()
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
+        assert _subchecks(rule.check(pcb, _rules())) == []
+
+    def test_gated_hand_doubled_leg_raises_nothing_either(self):
+        pcb, wires, _ = self._hand_doubled()
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires, waived_nets=(NET,))
+        results = rule.check(pcb, _rules())
+        assert "a" not in _subchecks(results) and "b" not in _subchecks(results)
+
+    def test_deleting_an_unrecorded_twin_piece_raises_a_and_b_again(self):
+        pcb, wires, _ = self._hand_doubled()
+        step = 40.0 / 4
+        dead = [
+            s
+            for s in pcb.segments
+            if s.layer == "B.Cu"
+            and s.net_name == NET
+            and abs(s.start[0] - (20.0 + 2 * step)) < 1e-9
+            and abs(s.end[0] - (20.0 + 3 * step)) < 1e-9
+        ]
+        assert len(dead) == 1
+        pcb.remove_segments(dead)
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
+        # With the twin broken, a stitching via also reads as a layer change,
+        # so ``d`` may join in; a and b raising again is the point here.
+        assert {"a", "b"} <= set(_subchecks(rule.check(pcb, _rules())))
+
+    def test_copy_whose_original_was_deleted_is_a_plain_leg_again(self):
+        pcb, wires, _ = self._hand_doubled()
+        dead = [s for s in pcb.segments if s.layer == "F.Cu" and s.net_name == NET]
+        assert dead
+        pcb.remove_segments(dead)
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=wires)
+        assert set(_subchecks(rule.check(pcb, _rules()))) == {"a", "b"}
+
+    def test_copy_coverage_matches_by_layer_and_net_not_width(self):
+        """The coverage check mirrors the leg-layer one: ``board_on`` filters
+        by layer and net, not width -- the judgment call recorded for
+        #8951. A twin drawn at a different width still credits the record."""
+        record = {
+            "net": NET,
+            "layer": "F.Cu",
+            "kind": "run",
+            "leg_start": {"x": 20.0, "y": 50.0},
+            "leg_end": {"x": 60.0, "y": 50.0},
+            "anchors": [],
+            "wire_gauge_awg": 16,
+            "status": "parallel",
+            "strategy": "parallel",
+            "copy_status": "placed",
+            "copy_layer": "B.Cu",
+            "polyline": [{"x": 20.0, "y": 50.0}, {"x": 60.0, "y": 50.0}],
+            "copy_segments": [],
+            "stitch_vias": [],
+        }
+        pcb = _board(length=40.0)
+        pcb.add_trace((20.0, 50.0), (60.0, 50.0), width=3.5, layer="B.Cu", net=NET)
+        rule = ReinforcementIncompleteRule(specs=[_spec(True)], wires=[record])
+        assert _subchecks(rule.check(pcb, _rules())) == []
+
+    def test_recorded_copy_is_still_credited_over_its_recorded_extent(self):
+        """A normally recorded copy (this suite's other tests) stays credited."""
+        from kicad_tools.pcb.reinforcement_sidecar import build_wire_records
+
+        pcb = _board(length=40.0)
+        result = reinforce_net(pcb, NET, current_paths=[_spec(True)], strategy="parallel")
+        rule = ReinforcementIncompleteRule(
+            specs=[_spec(True)], wires=build_wire_records(result, 0.0, 0.0)
+        )
+        assert _subchecks(rule.check(pcb, _rules())) == []

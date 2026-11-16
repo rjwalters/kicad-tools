@@ -63,6 +63,7 @@ from kicad_tools.router.via_clearance import (
     COORD_WRITE_GUARD_MM,
     HOLE_TO_HOLE_TOLERANCE,
     drill_hole_to_hole_clear,
+    same_net_pad_gap_acceptable,
 )
 from kicad_tools.schema.pcb import _is_footprint_tag
 from kicad_tools.sexp import SExp
@@ -165,6 +166,48 @@ def _resolve_mfr_min_hole_to_hole(mfr: str, layers: int, copper: float = 1.0) ->
     rule of ``kct check --mfr`` enforces.
     """
     return float(_resolve_mfr_rules(mfr, layers, copper).min_hole_to_hole_mm)
+
+
+def _resolve_mfr_pad_gap_edge(mfr: str, layers: int, copper: float = 1.0) -> float | None:
+    """Fab-view pad-population detection edge (mm) for the stackup, or ``None``.
+
+    Issue #8957, corrected by #9016: the edge ``kct check --mfr`` starts
+    grading same-net pad copper gaps at -- ``GapBand.detection_edge_mm`` of
+    the resolved stackup's ``pad_spacing`` dfm entry (the looser of the danger
+    and warning values: 0.15 mm on jlcpcb ``4layer_1oz``, and also 0.15 mm on
+    ``4layer_2oz`` whose recorded warning band, 0.13 mm, sits below the danger
+    value).  This is the contract of ``same_net_pad_gap_acceptable()``
+    (#8976): a gap in ``[error_edge, detection_edge)`` is a
+    ``physical_copper_gap`` warning, so passing the error edge would let the
+    stitcher seat vias the checker flags.  Resolved from the profile table,
+    never a literal, so the stitcher's acceptance band matches the checker by
+    construction.  ``None`` when the fab ships no table or the stackup has no
+    entry: the band guard then stays off rather than guessing an edge.
+    """
+    from kicad_tools.manufacturers.base import load_dfm_thresholds
+    from kicad_tools.validate.rules.physical_gap import GapBand
+
+    # Mirror _resolve_mfr_via_dimensions's alias candidates: registry ids may
+    # use ``-`` where the YAML filename uses ``_``.
+    candidates = [mfr]
+    if "-" in mfr:
+        candidates.append(mfr.replace("-", "_"))
+    if "_" in mfr:
+        candidates.append(mfr.replace("_", "-"))
+    table = None
+    for candidate in candidates:
+        table = load_dfm_thresholds(candidate)
+        if table is not None:
+            break
+    if table is None:
+        return None
+    rules = _resolve_mfr_rules(mfr, layers, copper)
+    inner = float(rules.inner_copper_oz) if layers > 2 else 0.0
+    entry = table.lookup(layers, float(rules.outer_copper_oz), inner)
+    if entry is None:
+        return None
+    pad = entry.thresholds["pad_spacing"]
+    return float(GapBand(pad.danger_mm, pad.warning_mm).detection_edge_mm)
 
 
 def _resolve_mfr_via_dimensions(
@@ -385,6 +428,11 @@ class StitchResult:
     # corresponding pads are also recorded in ``pads_skipped`` with a
     # ``hole_to_hole:`` reason.
     hole_to_hole_rejected: int = 0
+    # Issue #8957: placements whose via annulus sat inside the fab-view slit
+    # band against a same-net SMD pad (avoid_pad_overlap +
+    # same_net_pad_gap_mm).  Dropped at the commit chokepoint; the pad is
+    # recorded in ``pads_skipped`` with a ``same_net_pad_gap`` reason.
+    same_net_pad_gap_filtered: int = 0
     # Issue #4432: pads whose only reachable via site lands OFF the same-net
     # refilled fill (inside a keepout void / clearance pullback where the
     # pour has retreated).  A local via there would dangle (``via_dangling``)
@@ -2420,6 +2468,8 @@ def calculate_via_stub(
     preferred_positions: Sequence[tuple[float, float]] = (),
     dogleg_variants: Sequence[bool] = (False, True),
     pad_edge_guard: PadEdgeGuard | None = None,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
+    same_net_pad_gap_mm: float = 0.0,
 ) -> tuple[float, float, tuple[float, float] | None] | None:
     """Calculate a valid via placement position near the pad.
 
@@ -2658,6 +2708,21 @@ def calculate_via_stub(
             if pad_edge_guard is not None and pad_edge_guard.blocks(via_x, via_y, via_drill):
                 continue
 
+            # Issue #8957: fab-view slit band vs same-net SMD pads.  The drill
+            # clearing the pad bbox (#3271) does not clear the ANNULUS: a seat
+            # a hair outside the pad edge leaves two sub-edge notches of air
+            # beside the stub, which the fab-view ``physical_copper_gap``
+            # grading reports as errors regardless of nets (#8938).  Reject a
+            # candidate whose annulus gap to any same-net SMD pad falls in
+            # ``(0, same_net_pad_gap_mm)`` -- touching/overlapping the pad is
+            # one copper union, and a gap at/beyond the edge is not a finding
+            # -- so the ladder walks on to the next rung.  No-op unless the
+            # caller supplies the pads and a resolved edge (``<= 0`` off).
+            if not same_net_pad_gap_acceptable(
+                via_x, via_y, via_size, same_net_pad_bboxes, same_net_pad_gap_mm
+            ):
+                continue
+
             # Issue #3855: drill hole-to-hole guard.  The checks above use
             # COPPER geometry; they do not enforce the fab's drill-to-drill
             # minimum.  A stitch via dropped within ``min_hole_to_hole``
@@ -2875,6 +2940,8 @@ def calculate_dogleg_via_position(
     other_net_track_index: TrackSpatialIndex[TrackSegment] | None = None,
     other_net_pad_bboxes: list[PadBBox] | None = None,
     pad_edge_guard: PadEdgeGuard | None = None,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
+    same_net_pad_gap_mm: float = 0.0,
 ) -> tuple[float, float, float, float] | None:
     """Calculate a dog-leg (L-shaped) via placement for fine-pitch components.
 
@@ -3109,6 +3176,14 @@ def calculate_dogleg_via_position(
                     # Issue #7322: mask-dam zone of any SMD pad.
                     if pad_edge_guard is not None and pad_edge_guard.blocks(
                         via_x, via_y, via_drill
+                    ):
+                        continue
+
+                    # Issue #8957: same-net pad slit band (see
+                    # calculate_via_stub) -- keep the annulus out of the
+                    # fab-view error band against same-net SMD pads.
+                    if not same_net_pad_gap_acceptable(
+                        via_x, via_y, via_size, same_net_pad_bboxes, same_net_pad_gap_mm
                     ):
                         continue
 
@@ -3375,6 +3450,8 @@ def calculate_extended_escape_position(
     other_net_pad_bboxes: list[PadBBox] | None = None,
     pad_edge_guard: PadEdgeGuard | None = None,
     keepouts: Sequence[KeepoutPolygon] = (),
+    same_net_pad_bboxes: list[tuple[float, float, float, float]] | None = None,
+    same_net_pad_gap_mm: float = 0.0,
 ) -> tuple[float, float, list[tuple[float, float]]] | None:
     """Calculate an extended escape route for pads in dense IC pin fields.
 
@@ -3549,6 +3626,14 @@ def calculate_extended_escape_position(
 
         # Issue #7322: mask-dam zone of any SMD pad (``via_at_pad_edge``).
         if pad_edge_guard is not None and pad_edge_guard.blocks(vx, vy, via_drill):
+            return False
+
+        # Issue #8957: same-net pad slit band (see calculate_via_stub) --
+        # keep the annulus out of the fab-view error band against same-net
+        # SMD pads.
+        if not same_net_pad_gap_acceptable(
+            vx, vy, via_size, same_net_pad_bboxes, same_net_pad_gap_mm
+        ):
             return False
 
         # Issue #4177: drill hole-to-hole guard.  The checks above use
@@ -6015,6 +6100,7 @@ def run_stitch(
     avoid_sites: Mapping[str, Sequence[tuple[float, float]]] | None = None,
     min_hole_to_hole: float = MIN_HOLE_TO_HOLE_CLEARANCE,
     pad_edge_gap: float = 0.0,
+    same_net_pad_gap_mm: float = 0.0,
 ) -> StitchResult:
     """Run the stitching operation on a PCB.
 
@@ -6077,6 +6163,18 @@ def run_stitch(
             copper would sit inside the stale fill.  On a 4-layer board whose
             GND pours cover every layer this is the difference between "no
             via site anywhere" and a via the refill simply clears around.
+        same_net_pad_gap_mm: Issue #8957 -- with ``avoid_pad_overlap``, the
+            fab-view pad-population detection edge (mm) every stitch via's
+            copper annulus must keep to same-net SMD pads: a candidate seated
+            with ``0 < gap < same_net_pad_gap_mm`` (a slit the fab grades as a
+            ``physical_copper_gap`` finding regardless of nets) is rejected and
+            the ladder keeps walking; annulus overlapping the pad (a copper
+            union) and gaps at/beyond the edge stay acceptable.  The CLI
+            resolves it from the ``--mfr`` profile's ``pad_spacing`` dfm
+            entry (``GapBand.detection_edge_mm``); ``0.0`` (default) disables
+            the guard.  A placement no acceptable strategy can seat is
+            dropped with an explicit ``same_net_pad_gap`` skip reason and
+            counted in ``StitchResult.same_net_pad_gap_filtered``.
 
     Returns:
         StitchResult with details of what was done
@@ -6358,6 +6456,9 @@ def run_stitch(
             same_net_fill_layer=terminus_layer,
             other_net_track_index=eff_track_index,
             pad_edge_guard=pad_edge_guard,
+            # Issue #8957: same-net SMD pad slit band (annulus vs pad edge).
+            same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
+            same_net_pad_gap_mm=pad_band_edge_mm,
             # Issue #6401: the site ``kct route`` reserved for this pad.
             preferred_positions=(preferred_sites or {}).get(
                 f"{pad.reference}.{pad.pad_number}", ()
@@ -6395,6 +6496,8 @@ def run_stitch(
                 same_net_fill_layer=terminus_layer,
                 other_net_track_index=eff_track_index,
                 pad_edge_guard=pad_edge_guard,
+                same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
+                same_net_pad_gap_mm=pad_band_edge_mm,
             )
 
             if dogleg_pos is None:
@@ -6421,6 +6524,8 @@ def run_stitch(
                     other_net_track_index=eff_track_index,
                     pad_edge_guard=pad_edge_guard,
                     keepouts=[k for k in eff_other_fill if isinstance(k, KeepoutPolygon)],
+                    same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
+                    same_net_pad_gap_mm=pad_band_edge_mm,
                 )
 
                 if extended_pos is None:
@@ -6446,6 +6551,8 @@ def run_stitch(
                             same_net_fill_layer=terminus_layer,
                             other_net_track_index=eff_track_index,
                             pad_edge_guard=pad_edge_guard,
+                            same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
+                            same_net_pad_gap_mm=pad_band_edge_mm,
                         )
                         micro_pos, micro_corner_pos = _split_via_stub(micro_stub)
                         if micro_corner_pos is not None:
@@ -6471,6 +6578,8 @@ def run_stitch(
                                 same_net_fill_layer=terminus_layer,
                                 other_net_track_index=eff_track_index,
                                 pad_edge_guard=pad_edge_guard,
+                                same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
+                                same_net_pad_gap_mm=pad_band_edge_mm,
                             )
                             if micro_dogleg is not None:
                                 # Use micro dogleg
@@ -6498,6 +6607,8 @@ def run_stitch(
                                 keepouts=[
                                     k for k in eff_other_fill if isinstance(k, KeepoutPolygon)
                                 ],
+                                same_net_pad_bboxes=vip_bboxes_by_net.get(pad.net_number),
+                                same_net_pad_gap_mm=pad_band_edge_mm,
                             )
                             if micro_extended is not None:
                                 return (None, None, micro_extended, True)
@@ -6541,6 +6652,13 @@ def run_stitch(
             sexp, net_numbers_local
         ):
             vip_bboxes_by_net.setdefault(net_num, []).append((min_x, min_y, max_x, max_y))
+
+    # Issue #8957: the same-net pad slit band is a property of the
+    # avoid_pad_overlap mode -- that mode is what pushes vias just outside
+    # their own pad, creating the sub-edge annulus slits.  Without the flag a
+    # via landing in its own pad is a copper union (no slit) and the band has
+    # nothing to reject.  ``same_net_pad_gap_mm <= 0`` stays off regardless.
+    pad_band_edge_mm = same_net_pad_gap_mm if avoid_pad_overlap else 0.0
 
     # #3855: the per-strategy ``calculate_via_position`` guard catches
     # straight-line placements at candidate selection, but the dog-leg /
@@ -6626,6 +6744,25 @@ def run_stitch(
                 "(#3855/#4177); pad relies on the plane pour for "
                 "connectivity"
             )
+
+        # Issue #8957: slit-band backstop.  The placement strategies already
+        # reject band candidates; this chokepoint guarantees NO committed
+        # stitch via (micro / connectivity-fallback paths included) sits with
+        # its copper annulus inside the fab-view error band of a same-net SMD
+        # pad.  The via is dropped and the pad REPORTED (pour fallback), not
+        # silently lost.
+        if pad_band_edge_mm > 0:
+            band_bboxes = vip_bboxes_by_net.get(placement.pad.net_number, [])
+            if not same_net_pad_gap_acceptable(
+                placement.via_x, placement.via_y, placement.size, band_bboxes, pad_band_edge_mm
+            ):
+                result.same_net_pad_gap_filtered += 1
+                return (
+                    "same_net_pad_gap: stitch via annulus sits within the "
+                    f"{pad_band_edge_mm:.2f}mm fab-view slit band of a "
+                    "same-net SMD pad (#8957); pad relies on the plane pour "
+                    "for connectivity"
+                )
         return None
 
     # Process each pad
@@ -7378,6 +7515,16 @@ def output_result(
             "would have violated the drill hole-to-hole floor vs an existing "
             "different-net hole (pads rely on the plane pour for connectivity)"
         )
+    if result.same_net_pad_gap_filtered:
+        # Issue #8957: surface the slit-band guard so operators can see why
+        # the via count dropped -- the annulus would have sat inside the
+        # fab-view error band of a same-net SMD pad (a physical_copper_gap
+        # error regardless of nets).
+        print(
+            f"  ~ Filtered {result.same_net_pad_gap_filtered} via placement(s) "
+            "whose annulus sat in the fab-view slit band of a same-net SMD pad "
+            "(--avoid-pad-overlap; pads rely on the plane pour for connectivity)"
+        )
     if result.connectivity_fallback:
         # Issue #3633: pour pads rescued by the connectivity fallback -- the
         # cross-net co-check found no clearing placement, so we placed the
@@ -7495,6 +7642,7 @@ def result_document(
         },
         "via_in_pad_filtered": result.via_in_pad_filtered,
         "hole_to_hole_rejected": result.hole_to_hole_rejected,
+        "same_net_pad_gap_filtered": result.same_net_pad_gap_filtered,
         "connectivity_fallback": [
             {**_pad_ref(pad), "reason": reason} for pad, reason in result.connectivity_fallback
         ],
@@ -7836,10 +7984,15 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
     # Issue #7322: the fab's mask-dam floor, the same value the router reads
     # for ``DesignRules.min_via_pad_edge_gap``; 0 (off) without ``--mfr``.
     pad_edge_gap = 0.0
+    # Issue #8957: the fab-view pad-population detection edge, so the stitcher
+    # keeps every via annulus out of the same-net pad slit band; None (off)
+    # without ``--mfr`` or when the fab ships no table/entry for the stackup.
+    pad_gap_edge: float | None = None
     if args.mfr is not None:
         try:
             detected_layers = _count_copper_layers(pcb_path)
             min_h2h = _resolve_mfr_min_hole_to_hole(args.mfr, detected_layers, args.copper)
+            pad_gap_edge = _resolve_mfr_pad_gap_edge(args.mfr, detected_layers, args.copper)
             pad_edge_gap = float(
                 _resolve_mfr_rules(args.mfr, detected_layers, args.copper).min_solder_mask_dam_mm
             )
@@ -7977,6 +8130,7 @@ def _run_main(args: argparse.Namespace, as_json: bool) -> tuple[int, dict | None
                 avoid_pad_overlap=args.avoid_pad_overlap,
                 min_hole_to_hole=min_h2h,
                 pad_edge_gap=pad_edge_gap,
+                same_net_pad_gap_mm=pad_gap_edge or 0.0,
             )
 
         if not as_json:

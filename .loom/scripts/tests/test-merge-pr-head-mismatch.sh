@@ -204,10 +204,8 @@ source "$SCRIPT_DIR/lib/require-daemon-bin.sh"
 loom_test_require_daemon_bin "$HELPERS_DIR" "merge-pr"
 
 CLASSIFIER_FILE="$(mktemp)"
-# `_classify_merge_response` is a single dense line (merge-pr.sh is
-# ratchet-frozen and `shell-budget --check` refuses any growth of the portable
-# pool), so it is captured by `print; next` rather than the brace-matching
-# error_head_moved needs.
+# `_classify_merge_response` is a single dense line, so it is captured by
+# `print; next` rather than the brace-matching error_head_moved needs.
 awk '
   /^error_head_moved\(\) \{/ { capture_error=1; capture_error_open=1 }
   capture_error { print; if (/^}/) capture_error=0 }

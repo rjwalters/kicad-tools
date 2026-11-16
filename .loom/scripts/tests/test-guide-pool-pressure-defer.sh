@@ -14,10 +14,14 @@
 # The #6135 fix adds a pool-pressure backoff to Guide's Document Maintenance
 # Step 5 (create_docs_pr()), gated by a new Step 4b:
 #   - pool_pressure_fraction(): a CHEAP read of the already-refreshed
-#     `.loom/tokens/.ranking` file (never a fresh `tokens check --ranking`
-#     probe, which would itself burn a real request against the pool this
-#     check exists to protect) -- reduced to "fraction of accounts NOT
-#     `available`".
+#     ranking (never a fresh `tokens check --ranking` probe, which would
+#     itself burn a real request against the pool this check exists to
+#     protect) -- reduced to "fraction of accounts NOT `available`".
+#     Since #13839 it goes through `loom-daemon tokens pressure` rather than
+#     opening the pool directory itself: `guide` declares no
+#     `credential-store` capability, so the role-tool-policy hook (#8256)
+#     DENIES any Bash call naming a path under `.loom/tokens`, and the
+#     hardcoded repo-local path was wrong anyway on a shared-pool host.
 #   - last_docs_maintenance_merge_epoch(): epoch of the most recently merged
 #     docs-maintenance PR of ANY kind (WORK_LOG, WORK_PLAN, or README) --
 #     deliberately NOT filtered to a specific file the way
@@ -39,8 +43,13 @@
 #      reads both config knobs with the documented env-var + default names.
 #   2. THE REGRESSION, executed rather than grepped:
 #      a. pool_pressure_fraction() itself, sourced verbatim from guide.md and
-#         run against real `.ranking` fixtures in a throwaway git repo --
-#         mixed statuses, an empty file, and a missing file.
+#         run against a STUB `loom-daemon` on PATH -- a real fraction, "0",
+#         no output at all, non-numeric output, and a stub that exits
+#         non-zero (an older daemon with no `pressure` verb). Every
+#         unexpected shape must fail open to "0".
+#      a'. #13839: the function body names no path under `.loom/tokens`, and
+#         `loom-daemon role-tool-policy check guide` ALLOWS the command it
+#         actually runs (the regression that made the whole check dead code).
 #      b. last_docs_maintenance_merge_epoch()'s jq filter, executed against a
 #         fixture that proves it is NOT restricted to a specific file (a
 #         README-only docs PR still anchors the clock -- the opposite of
@@ -50,9 +59,9 @@
 #         threshold, at/above threshold within the max-defer ceiling,
 #         at/above threshold past the ceiling, and an empty merge history.
 #
-# Hermetic: throwaway git repo under mktemp -d for the ranking-file test,
-# pure jq/arithmetic against fixture values for the rest. No forge, network,
-# or `gh` calls.
+# Hermetic: a throwaway git repo under mktemp -d with a stub `loom-daemon`
+# first on PATH for the fraction test, pure jq/arithmetic against fixture
+# values for the rest. No forge, network, `gh`, or real-daemon calls.
 
 set -uo pipefail
 
@@ -71,6 +80,7 @@ fi
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
+# Local assert_eq kept: takes (actual, expected, msg); shared assert_eq is (expected, actual, msg).
 assert_eq() {
     local actual="$1" expected="$2" msg="$3"
     if [[ "$actual" == "$expected" ]]; then pass "$msg"; else fail "$msg (got '$actual', expected '$expected')"; fi
@@ -88,8 +98,8 @@ echo "Test 1: guide.md defines and wires the pool-pressure backoff"
 
 assert_grep 'pool_pressure_fraction\(\) \{' "$GUIDE_MD" \
     "pool_pressure_fraction() is defined"
-assert_grep '\.loom/tokens/\.ranking' "$GUIDE_MD" \
-    "pool_pressure_fraction() reads .loom/tokens/.ranking"
+assert_grep 'loom-daemon tokens pressure' "$GUIDE_MD" \
+    "pool_pressure_fraction() goes through the loom-daemon tokens pressure verb (#13839)"
 assert_grep 'last_docs_maintenance_merge_epoch\(\) \{' "$GUIDE_MD" \
     "last_docs_maintenance_merge_epoch() is defined"
 assert_grep 'should_defer_for_pool_pressure\(\) \{' "$GUIDE_MD" \
@@ -160,10 +170,17 @@ fi
 
 # ---------------------------------------------------------------------------
 # Test 3: THE REGRESSION (a) -- pool_pressure_fraction() sourced verbatim and
-# executed against real `.ranking` fixtures in a throwaway git repo.
+# executed against a STUB `loom-daemon tokens pressure` on PATH.
+#
+# Before #13839 this function opened `<repo>/.loom/tokens/.ranking` itself,
+# which the role-tool-policy hook denies for `guide` (no `credential-store`
+# capability) and which points at the wrong directory on a shared-pool host.
+# It now shells out to the verb, so what has to be executed here is the
+# function's handling of what the verb prints -- including every way an older
+# or broken daemon can answer.
 # ---------------------------------------------------------------------------
 echo ""
-echo "Test 3: pool_pressure_fraction(), executed against real .ranking fixtures"
+echo "Test 3: pool_pressure_fraction(), executed against a stub loom-daemon"
 
 PPF_SRC="$(awk '/^pool_pressure_fraction\(\) \{/{flag=1} flag{print} /^\}/{if(flag){exit}}' "$GUIDE_MD")"
 
@@ -171,6 +188,21 @@ if [[ -z "$PPF_SRC" ]]; then
     fail "could not extract pool_pressure_fraction() from guide.md"
 else
     pass "extracted pool_pressure_fraction() from guide.md"
+
+    # #13839: the body must not name the credential-store path at all. A
+    # single occurrence anywhere in the function is enough for the hook to
+    # deny the entire Bash call it appears in.
+    if [[ "$PPF_SRC" == *'.loom/tokens'* ]]; then
+        fail "pool_pressure_fraction() still names a path under .loom/tokens -- the role-tool-policy hook denies that for 'guide' (#13839)"
+    else
+        pass "pool_pressure_fraction() names no path under .loom/tokens (#13839)"
+    fi
+
+    if [[ "$PPF_SRC" == *'loom-daemon tokens pressure'* ]]; then
+        pass "pool_pressure_fraction() obtains the fraction from 'loom-daemon tokens pressure'"
+    else
+        fail "pool_pressure_fraction() does not call 'loom-daemon tokens pressure' (#13839)"
+    fi
 
     SANDBOX="$(mktemp -d)"
     cleanup_sandbox() { rm -rf "$SANDBOX"; }
@@ -180,45 +212,107 @@ else
     printf '%s\n' "$PPF_SRC" > "$PPF_SCRIPT"
 
     (cd "$SANDBOX" && git init -q)
-    mkdir -p "$SANDBOX/.loom/tokens"
 
-    # Fixture: 3 of 5 accounts NOT `available` (exhausted x2, rate_limited x1)
-    # -- mirrors the #6135 incident shape (a majority-unavailable pool).
-    cat > "$SANDBOX/.loom/tokens/.ranking" <<'EOF'
-alice|available|0.20|
-bob|exhausted|0.99|2026-08-20T00:00:00Z
-carol|exhausted|0.99|2026-08-20T00:00:00Z
-dave|rate_limited|0.85|2026-08-13T10:00:00Z
-eve|available|0.10|
-EOF
+    # A stub `loom-daemon` first on PATH. It echoes whatever
+    # $STUB_OUT holds and exits with $STUB_RC, so one stub covers every
+    # answer shape the real verb (or an older daemon) can produce.
+    mkdir -p "$SANDBOX/bin"
+    cat > "$SANDBOX/bin/loom-daemon" <<'STUB'
+#!/usr/bin/env bash
+[[ -n "${STUB_OUT:-}" ]] && printf '%s\n' "$STUB_OUT"
+exit "${STUB_RC:-0}"
+STUB
+    chmod +x "$SANDBOX/bin/loom-daemon"
 
-    RESULT="$(cd "$SANDBOX" && source "$PPF_SCRIPT" && pool_pressure_fraction)"
-    assert_eq "$RESULT" "0.6000" "3 of 5 unavailable accounts -> fraction 0.6000"
+    # Run the function with the stub shadowing any real loom-daemon.
+    run_ppf() {
+        (cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" \
+            STUB_OUT="${1-}" STUB_RC="${2:-0}" \
+            bash -c "source '$PPF_SCRIPT'; pool_pressure_fraction")
+    }
 
-    # A healthy pool -- 1 of 5 unavailable.
-    cat > "$SANDBOX/.loom/tokens/.ranking" <<'EOF'
-alice|available|0.20|
-bob|available|0.30|
-carol|available|0.15|
-dave|rate_limited|0.85|2026-08-13T10:00:00Z
-eve|available|0.10|
-EOF
-    RESULT="$(cd "$SANDBOX" && source "$PPF_SCRIPT" && pool_pressure_fraction)"
-    assert_eq "$RESULT" "0.2000" "1 of 5 unavailable accounts -> fraction 0.2000"
+    # The verb reports real pressure -- passed through verbatim.
+    RESULT="$(run_ppf "0.7500" 0)"
+    assert_eq "$RESULT" "0.7500" "a 0.7500 reading from the verb is passed through verbatim"
 
-    # Empty ranking file -- fails open (0 pressure), never a divide-by-zero
-    # or a corrupted multi-line capture.
-    : > "$SANDBOX/.loom/tokens/.ranking"
-    RESULT="$(cd "$SANDBOX" && source "$PPF_SCRIPT" && pool_pressure_fraction)"
-    assert_eq "$RESULT" "0" "an empty .ranking file fails open (fraction 0, not an error)"
+    RESULT="$(run_ppf "0.0000" 0)"
+    assert_eq "$RESULT" "0.0000" "a fully healthy pool (0.0000) is passed through verbatim"
 
-    # Missing ranking file -- fails open.
-    rm -f "$SANDBOX/.loom/tokens/.ranking"
-    RESULT="$(cd "$SANDBOX" && source "$PPF_SCRIPT" && pool_pressure_fraction)"
-    assert_eq "$RESULT" "0" "a missing .ranking file fails open (fraction 0)"
+    # The verb's own fail-open answer for absent/unparseable ranking data.
+    RESULT="$(run_ppf "0" 0)"
+    assert_eq "$RESULT" "0" "the verb's no-data answer ('0') is passed through"
+
+    # An older daemon that does not know the `pressure` verb: clap exits
+    # non-zero. Must fail open, never propagate an error or empty string.
+    RESULT="$(run_ppf "error: unrecognized subcommand 'pressure'" 2)"
+    assert_eq "$RESULT" "0" "a daemon too old for the verb (non-zero exit) fails open to 0"
+
+    # Exit 0 but nothing on stdout -- also fails open rather than producing an
+    # empty fraction that would corrupt the awk comparison downstream.
+    RESULT="$(run_ppf "" 0)"
+    assert_eq "$RESULT" "0" "empty output with exit 0 fails open to 0"
+
+    # Non-numeric output (a warning line leaking onto stdout, say) must never
+    # reach the awk comparison in should_defer_for_pool_pressure().
+    RESULT="$(run_ppf "warning: no pool found" 0)"
+    assert_eq "$RESULT" "0" "non-numeric output fails open to 0"
 
     trap - EXIT
     cleanup_sandbox
+fi
+
+# ---------------------------------------------------------------------------
+# Test 3b: #13839 -- the command pool_pressure_fraction() runs is ALLOWED by
+# the role-tool-policy hook for role `guide`. This is the actual reported
+# regression: the prescribed read was refused at the harness, so the whole
+# #6135 backoff was dead code for any Guide that followed its prompt.
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 3b: role-tool-policy allows the command for role 'guide' (#13839)"
+
+if ! command -v loom-daemon >/dev/null 2>&1; then
+    echo "SKIP: loom-daemon not on PATH"
+elif ! loom-daemon role-tool-policy check --help >/dev/null 2>&1; then
+    echo "SKIP: this loom-daemon has no 'role-tool-policy check' subcommand"
+else
+    # The exact command line the function runs, with the command
+    # substitution left intact -- the hook judges raw command text.
+    PPF_CMD='loom-daemon tokens pressure --workspace "$(git rev-parse --show-toplevel 2>/dev/null || echo .)"'
+    if loom-daemon role-tool-policy check guide --workspace "$REPO_ROOT" --command "$PPF_CMD" >/dev/null 2>&1; then
+        pass "role-tool-policy ALLOWS the pool-pressure command for role 'guide'"
+    else
+        fail "role-tool-policy DENIES the pool-pressure command for role 'guide' (#13839 regression)"
+    fi
+
+    # Control: the pre-#13839 direct read is still denied, which is what makes
+    # the assertion above meaningful rather than vacuously true.
+    if loom-daemon role-tool-policy check guide --workspace "$REPO_ROOT" \
+        --command 'awk -F"|" "{print}" .loom/tokens/.ranking' >/dev/null 2>&1; then
+        fail "control: a direct read of .loom/tokens/.ranking should be DENIED for 'guide' -- the matcher is not exercising the capability"
+    else
+        pass "control: a direct read of .loom/tokens/.ranking is still denied for 'guide'"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Test 3c: #13839 -- guide.json keeps an EMPTY capability allowlist. The fix
+# must not have widened the role's capabilities to make the read legal.
+# ---------------------------------------------------------------------------
+echo ""
+echo "Test 3c: guide.json still declares no capabilities (#13839)"
+
+GUIDE_JSON=""
+for candidate in "$REPO_ROOT/.loom/roles/guide.json" "$REPO_ROOT/defaults/roles/guide.json"; do
+    [[ -f "$candidate" ]] && { GUIDE_JSON="$candidate"; break; }
+done
+
+if [[ -z "$GUIDE_JSON" ]]; then
+    fail "could not locate guide.json"
+elif ! command -v jq >/dev/null 2>&1; then
+    echo "SKIP: jq not available"
+else
+    CAPS="$(jq -c '.toolPolicy.allowedCapabilities // []' "$GUIDE_JSON")"
+    assert_eq "$CAPS" "[]" "guide.json's allowedCapabilities is still empty (the fix did not grant credential-store)"
 fi
 
 # ---------------------------------------------------------------------------

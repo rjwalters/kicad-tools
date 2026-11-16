@@ -30,11 +30,9 @@
 #                                                   (#4823 / #5657 / #7765 /
 #                                                   #9083)
 #
-# They live here rather than inline in worktree.sh per
-# `.loom/docs/file-size-policy.md` — worktree.sh is over the 1000-line ratchet
-# threshold and therefore frozen at its current size, and "new sibling module,
-# small dispatch arm left behind" is that policy's own preferred remedy.
-# worktree.sh calls `_worktree_resolve_origin_branch_reuse` and reads back
+# They live here rather than inline in worktree.sh, which keeps only a small
+# dispatch arm behind: worktree.sh calls
+# `_worktree_resolve_origin_branch_reuse` and reads back
 # `_WT_REUSE_REMOTE_BRANCH`; the other two are internal to this file.
 #
 # Both functions depend on worktree.sh's `print_error` / `print_info`, and on
@@ -395,7 +393,7 @@ _worktree_guard_fresh_branch_against_open_pr() {
 # Decide, for a branch that has no LOCAL ref yet, whether worktree.sh should
 # reuse origin's branch of the same name or create a fresh one off the base
 # ref. Moved out of worktree.sh together with the #7765 check it now gates on
-# (file-size ratchet — see the header of this file); the three arms are:
+# (see the header of this file); the three arms are:
 #
 #   - origin has the ref and it has NOT landed on the default branch -> reuse
 #     it (the #4823 in-flight-cycle case: a Doctor fixing review feedback must

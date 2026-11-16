@@ -40,6 +40,7 @@ DOC="$ROLE_DIR/champion-pr-merge.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
+# Local assert_doc_contains kept: fixed $DOC/$CHAMPION_MD target, so (needle, msg) not (file, needle, msg).
 assert_doc_contains() {
     local needle="$1" msg="$2"
     if grep -qF -- "$needle" "$DOC"; then

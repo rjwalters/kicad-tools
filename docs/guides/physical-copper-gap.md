@@ -14,15 +14,44 @@ limits, and live in one table at the top of `validate/rules/physical_gap.py`:
 | Copper gap (tracks, pads, vias, fills; same-net included) | < 0.10 mm | `error` |
 | Copper gap | 0.10 to < 0.15 mm | `warning` |
 | Pad-to-pad mask bridge on **2 oz** copper | < 0.20 mm | `error` |
-| THT pad to SMD pad (`tht_smd_spacing`; vias opt-in, `include_vias`) | < 2.0 mm / < 2.7 mm | `error` / `warning` |
+| THT pad (any drill) or via drilled >= 1.0 mm, to SMD pad; via drilled >= 1.0 mm, to exposed via annulus (`tht_smd_spacing`) | < 2.0 mm / < 2.7 mm | `error` / `warning` |
 
 Same-net near-parallel copper (e.g. 0.08 mm) is always listed; it uses the same
 tiers. The mask-bridge check needs a known copper weight (stackup or `--copper`);
 with the weight unknown it emits a `physical_copper_gap_incomplete` *info* finding
 (listed, not blocking) rather than assuming 1 oz, and weights other than 2 oz are not judged (versioned per-weight
-table: epic #8838 item 2). `tht_smd_spacing` measures **copper edge to copper
+table: epic #8838 item 2). The mask-bridge check runs on the outer copper
+layers (`F.Cu` / `B.Cu`) only (Issue #8913): solder mask exists only as
+`F.Mask` / `B.Mask`, so there is no inner-layer mask to bridge, and a
+through-hole pad pair yields at most one finding per outer side rather than one
+per copper layer. No inner-layer mask-bridge findings on a 4-layer board is the
+intended scope, not a missed case. `tht_smd_spacing` measures **copper edge to copper
 edge**; the epic does not say whether JLCDFM measures hole centre, hole edge or
 copper edge, so this is a documented choice.
+
+`tht_smd_spacing` judges a plated hole by its **drill diameter**, not by whether
+KiCad stores it as a footprint pad or a via (Issue #8914): JLCDFM flagged
+1.3-1.42 mm wire-anchor vias that the rule previously never looked at, because
+the only way to include vias was an `include_vias=True` argument no `kct check`
+code path ever passed. Component THT pads are judged at every drill size; a via
+is judged once its drill reaches `ANCHOR_DRILL_MM` (1.0 mm, just under 18 AWG
+wire). Judging *every* via is still wrong -- it produced 176 to 1,068 findings
+per board on this repo's routed boards, against 0 to 6 at the 1.0 mm default,
+where every via drills 0.15-0.3 mm. A THT or SMD pad whose `shape` the rule
+cannot reproduce exactly (`custom`, `trapezoid`) reports
+`tht_smd_spacing_incomplete` at *info* rather than being dropped silently, so
+missing coverage never looks like a cleared pad.
+
+An **exposed via annulus** also counts as the "SMD" side (Issue #8925): JLCDFM
+flagged a 1.9 mm / 1.3 mm-drill anchor via 1.5 mm from an ordinary 0.8 mm /
+0.4 mm via. Only an anchor *via* (drill >= `ANCHOR_DRILL_MM`) is paired against
+via annuli -- a THT component pad never is (that reading added 24 findings to
+board 05), and fan-out-vs-fan-out pairs are never judged. An annulus counts only
+on an outer face where it is **not tented** (per-via `(tenting ...)` override,
+then the board setup default, then KiCad's absent-token default: tented); the
+fab's exact tenting test is unverified. A pair is reported once, naming every
+layer it meets on. Every via on boards 03 / 05 / 06 / 07 resolves as tented, so
+their counts are unchanged and the live calibration of this pairing is unverified.
 
 **Design decision: flattened board geometry, not exported gerbers.** The pass runs
 on the same per-layer copper union as the opt-in check: it exists and is tested,

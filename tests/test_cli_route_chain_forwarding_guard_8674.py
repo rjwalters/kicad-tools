@@ -129,6 +129,7 @@ NOT_COPPER = {
     "--diagnostics",
     "--show-congestion",
     "--report-stage-quality",
+    "--report-detour-ratio",  # read-only post-settle report (#9003); places no copper
     "--diagnose-unrouted-budget",
     "--census-advisory",
     "--census-advisory-gate",

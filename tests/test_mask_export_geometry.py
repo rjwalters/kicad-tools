@@ -18,7 +18,17 @@ HEADER = "%FSLAX46Y46*%\n%MOMM*%\n%LPD*%\n"
 
 @pytest.mark.parametrize(
     "command",
-    ["%AMBad*1,1,1,0,0*%", "%SRX2Y2I1J1*%", "%LMX*%", "%LR30*%", "G74*", "G99*", "%MIA1B0*%"],
+    [
+        # Primitive 21 (centre line) is outside the supported macro subset
+        # (0/1/4/20, issue #8959); 1,1,1,0,0 alone now parses by design.
+        "%AMBad*21,1,1,1,0,0,0*%",
+        "%SRX2Y2I1J1*%",
+        "%LMX*%",
+        "%LR30*%",
+        "G74*",
+        "G99*",
+        "%MIA1B0*%",
+    ],
 )
 def test_unknown_gerber_rejects_whole_layer(command):
     with pytest.raises(GerberGeometryError):

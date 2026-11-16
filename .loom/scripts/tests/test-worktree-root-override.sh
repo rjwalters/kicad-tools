@@ -51,6 +51,7 @@ assert_no_dir() {
 assert_file() {
     if [[ -f "$1" ]]; then pass "$2"; else fail "$2 (expected file: $1)"; fi
 }
+# Local assert_eq kept: takes (actual, expected, msg); shared assert_eq is (expected, actual, msg).
 assert_eq() {
     if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (expected '$2', got '$1')"; fi
 }

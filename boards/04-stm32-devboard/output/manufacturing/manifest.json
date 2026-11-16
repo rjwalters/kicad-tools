@@ -25,8 +25,8 @@
       "size": 640
     },
     "check-report.json": {
-      "sha256": "f07fcbfabce4274e254b66575e2e1d7d9a7eba05f37511af2ce52de0eb19de70",
-      "size": 9554
+      "sha256": "869ee266916083c479c05ed469ee86511be8576550753c9828354bf1e117f8ef",
+      "size": 8483
     },
     "cpl_jlcpcb.csv": {
       "sha256": "5b6854e3efb25a771146c01fdf51dfff148bf7fc6079d582842f14bcfd2bda20",
@@ -45,8 +45,8 @@
       "size": 3394
     },
     "design-source/generate_design.py": {
-      "sha256": "25cfc3f2f73cb987fcb672e7cd4f843c25b1406b310d264d5dad7777c3b8ef83",
-      "size": 128374
+      "sha256": "940b7c97fef6bf76eea9ed645bb8a2cde9f87b58df1eaf139a55f086b8360438",
+      "size": 135226
     },
     "design-source/manufacturing_process.py": {
       "sha256": "982049e24965b623d7dec062dc932f2d12e3f77c21c9ad9ac493b3925c8bf6f8",
@@ -57,12 +57,12 @@
       "size": 4932
     },
     "fill-consistency.json": {
-      "sha256": "3369e42a5c0ea40c718cdf6016b83fa85b04260ad66cf757b282ea30ef9561b6",
-      "size": 33
+      "sha256": "e97008d91d4b25581ed9dc26b1688787236d900b6386f16ff4441d87d28d4217",
+      "size": 43
     },
     "gerbers/gerbers.zip": {
-      "sha256": "289aa38bce5ece0b9ff6e27d34c83b5e5f302237a9d679d52c784a3b0b163f4f",
-      "size": 51959
+      "sha256": "204679e431958bc6675c00ce9c59270b89226ca7ab698ef3d826b10a59911483",
+      "size": 51307
     },
     "images/assembly.png": {
       "sha256": "13c8323b975a1191f79843c910fd5e1e4f3b6b936d0d9efd7a95f30d2e09a28f",
@@ -93,8 +93,8 @@
       "size": 278127
     },
     "kicad_project.zip": {
-      "sha256": "b2741a5df1364d8af3452ffbb21bbb97545171b1a8d64957375f874b05e65c1e",
-      "size": 72513
+      "sha256": "07e1fad30928ced9c774ffc670b5075fe1feaa70fc49d41110d547986e17be0c",
+      "size": 71831
     },
     "manufacturing-requirements.json": {
       "sha256": "52ef1e5957c569c120a43b82a63c9dff8d3bf5dee2392e473e2e73f20b8fb199",

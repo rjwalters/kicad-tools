@@ -1285,6 +1285,72 @@ def check_silk_over_copper(
     return results
 
 
+def check_silk_hole_overlap(
+    pcb: PCB,
+    design_rules: DesignRules,
+) -> DRCResults:
+    """Silkscreen over a drilled hole (via, PTH or NPTH), threshold 0 mm.
+
+    Unlike :func:`check_silk_over_copper` this tests the **drill** circle, not
+    the mask aperture, so silk over a *tented* via hole is reported (Issue
+    #8844; the fab's DFM flags it).  Holes pierce every layer, so both silk
+    sides are tested.  Text uses the same bbox approximation as the other
+    silk checks.  Emits one ``silk_hole_overlap`` warning per (silk, hole)
+    pair.
+    """
+    require_shapely("silk-hole overlap geometry")
+    from shapely import STRtree
+    from shapely.geometry import Point
+
+    from .factory_clearance import _hole_geometry
+
+    results = DRCResults(rules_checked=1)
+    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+
+    holes: list[tuple[Any, str]] = []
+    for via in pcb.vias:
+        if via.drill > 0:
+            x, y = via.position
+            holes.append(
+                (
+                    Point(x, y).buffer(via.drill / 2.0, quad_segs=32),
+                    f"via at ({x + ox:.3f}, {y + oy:.3f})",
+                )
+            )
+    for footprint in pcb.footprints:
+        for pad in footprint.pads:
+            if pad.type not in ("thru_hole", "np_thru_hole") or not pad.drill:
+                continue
+            geom = _hole_geometry(pad, footprint)
+            if geom is not None and not geom.is_empty:
+                holes.append((geom, f"{footprint.reference} pad {pad.number} hole"))
+    if not holes:
+        return results
+
+    tree = STRtree([g for g, _ in holes])
+    found: list[DRCViolation] = []
+    for _side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
+        for idx in tree.query(geom):
+            hole_geom, hole_label = holes[int(idx)]
+            if not geom.intersects(hole_geom):
+                continue
+            found.append(
+                DRCViolation(
+                    rule_id="silk_hole_overlap",
+                    severity="warning",
+                    message=f"Silkscreen {silk_label} overlaps drilled hole of {hole_label}",
+                    location=location,
+                    layer=layer,
+                    actual_value=0.0,
+                    required_value=0.0,
+                    items=(silk_label, hole_label),
+                )
+            )
+    for violation in sorted(found, key=lambda v: (v.items[0], v.items[1])):
+        results.add(violation)
+    return results
+
+
 def _mask_circle_geometry(
     graphic: FootprintGraphic | BoardGraphic, xf: _Transform
 ) -> _Geometry | None:
@@ -1953,6 +2019,7 @@ def check_all_silkscreen(
     )
     results.merge(check_silkscreen_over_pads(pcb, design_rules))
     results.merge(check_silk_over_copper(pcb, design_rules))
+    results.merge(check_silk_hole_overlap(pcb, design_rules))
     results.merge(check_silk_over_mask_opening(pcb, design_rules))
     from .factory_clearance import check_silk_pad_clearance
 

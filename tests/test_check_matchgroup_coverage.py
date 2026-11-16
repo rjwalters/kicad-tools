@@ -76,13 +76,29 @@ class TestBoard07Allowance:
         assert not hasattr(mod, "MATCHGROUP_VIOLATION_BASELINE")
         assert not hasattr(mod, "check_zero_violations")
 
-    def test_fixture_finding_allowance_is_empty(self):
-        """Issue #5333: with ``--differential-pairs`` on, the seed-42 re-route
-        no longer fires the #7349 impedance or #7619 TMDS_D0 skew findings, so
-        the identity allowance is empty and every blocking finding counts."""
+    def test_fixture_finding_allowance_is_fab_gap_only(self):
+        """Issues #5333/#6448 emptied the pair/impedance/skew entries, so the
+        identity allowance holds only the #8957 fab-view ``physical_copper_gap``
+        nets: every other blocking finding counts.  #8974's route-side
+        slit-band fix, measured on the tree merged with #8975 and #8937,
+        drained DQS_P, DQS_N, GND and +1V2 entirely (entries deleted) and
+        re-pointed the six survivors to the #8962 parent tracker."""
         mod = _load_helper_module()
-        assert mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS == {}
-        assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == {}
+        assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS) == {
+            ("physical_copper_gap", net)
+            for net in (
+                "MIPI_CLK_N",
+                "MIPI_DAT0_N",
+                "MIPI_DAT1_N",
+                "TMDS_D0_N",
+                "TMDS_D1_N",
+                "TMDS_D2_N",
+            )
+        }
+        assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS.values()) == {8962}
+        assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == (
+            mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
+        )
 
 
 class TestBoard07SkewRetune:

@@ -28,9 +28,8 @@
 # environment" asserted below is exactly the environment the real CLI
 # would have been started with.
 #
-# Split out from the parent suite for the same reason the #8697 suite was:
-# test-spawn-claude.sh is over scripts/check-file-size-budget.sh's threshold
-# and therefore frozen.
+# Split out from test-spawn-claude.sh as its own suite, like the #8697 suite
+# (test-spawn-claude-credential-proxy.sh).
 #
 # Style matches test-spawn-claude.sh — plain bash, hand-rolled assertions.
 #
@@ -69,12 +68,11 @@ export LOOM_SWEEP_CPU_QUOTA=0
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_eq() {
-    if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3"; echo "    Expected: '$1'"; echo "    Actual:   '$2'"; fi
-}
+# Local assert_contains kept: takes (needle, haystack, msg); shared helper is (haystack, needle, msg).
 assert_contains() {
     if [[ "$2" == *"$1"* ]]; then pass "$3"; else fail "$3"; echo "    Expected to contain: '$1'"; echo "    In: '$2'"; fi
 }
+# Local assert_not_contains kept: takes (needle, haystack, msg); shared helper is (haystack, needle, msg).
 assert_not_contains() {
     if [[ "$2" != *"$1"* ]]; then pass "$3"; else fail "$3"; echo "    Expected NOT to contain: '$1'"; fi
 }

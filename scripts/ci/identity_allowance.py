@@ -10,6 +10,14 @@ An allowance is ``{(rule_id, identity): tracking_issue}``.  ``identity`` is the
 sorted, ``/``-joined ``items`` (falling back to ``nets``) of one error
 violation record, so two segments of the same net share one slot.  Removing an
 entry is a plain deletion (#7349 does that once the router defect is fixed).
+
+Issue #8957 / #8938: for :data:`NET_IDENTITY_RULES` the identity is the
+``nets`` signature (falling back to ``items``) instead.  Those rules' ``items``
+are geometry refs (track/via positions, footprint UUIDs), and the synthetic
+gates regenerate their boards from scratch every CI run, so geometry-keyed
+items differ run to run while the net signature is stable: measured on CI run
+43652354983, two independent board-07 regenerations agreed on all nine
+``physical_copper_gap`` net signatures while sharing zero geometry-keyed items.
 """
 
 from __future__ import annotations
@@ -19,10 +27,25 @@ from typing import Any
 
 Allowance = dict[tuple[str, str], int]
 
+#: Rules whose ``items`` are geometry refs (track/via positions, footprint
+#: UUIDs) rather than net names, so their allowance identity is the ``nets``
+#: signature (Issue #8957: those refs are re-minted by every synthetic-board
+#: regeneration, but the net signature is stable run to run).
+NET_IDENTITY_RULES = frozenset({"physical_copper_gap"})
+
 
 def violation_identity(violation: dict[str, Any]) -> str:
-    """Identity of one ``kct check --format json`` violation: its net(s)."""
-    names = violation.get("items") or violation.get("nets") or []
+    """Identity of one ``kct check --format json`` violation: its net(s).
+
+    :data:`NET_IDENTITY_RULES` prefer ``nets`` over ``items``: on the
+    regenerated synthetic boards their geometry-keyed items are ephemeral
+    while the net signature is stable, so the allowance stays keyed to
+    something the next run reproduces.
+    """
+    if violation.get("rule_id") in NET_IDENTITY_RULES:
+        names = violation.get("nets") or violation.get("items") or []
+    else:
+        names = violation.get("items") or violation.get("nets") or []
     return "/".join(sorted(str(n) for n in names))
 
 

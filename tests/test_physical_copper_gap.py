@@ -637,8 +637,31 @@ def test_same_net_near_parallel_copper_is_listed():
         board(track((0, 0), (4, 0), "a", net=1), track((0, 0.28), (4, 0.28), "b", net=1))
     )
     assert found and found[0].actual_value == pytest.approx(0.08, abs=0.002)
-    # Same-net slits are always listed but never blocking (issue #8843).
+    # Issue #8938: the fab cannot see nets and fails the board on a sub-danger
+    # slit regardless, so a same-net gap below the danger edge is an error.
+    # The old "same-net is always a warning" downgrade is gone; the class is
+    # labelled (same_net) so a project can waive it deliberately instead.
+    assert [v.severity for v in found] == ["error"]
+    assert [v.same_net for v in found] == [True]
+
+
+def test_same_net_between_danger_and_warning_is_listed_warning():
+    found = _tiered(
+        board(track((0, 0), (4, 0), "a", net=1), track((0, 0.32), (4, 0.32), "b", net=1))
+    )
+    assert found and found[0].actual_value == pytest.approx(0.12, abs=0.002)
+    # Listed, non-blocking: the warning band survives for same-net pairs at
+    # fab-warning distances (issue #8938 keeps the two-tier shape, minus the
+    # same-net downgrade below the danger edge).
     assert [v.severity for v in found] == ["warning"]
+    assert [v.same_net for v in found] == [True]
+
+
+def test_different_net_finding_carries_same_net_false():
+    found = _tiered(
+        board(track((0, 0), (4, 0), "a", net=1), track((0, 0.28), (4, 0.28), "b", net=2))
+    )
+    assert found and [v.same_net for v in found] == [False]
 
 
 def _pad(ref, x, y, uuid, net=1):
@@ -665,18 +688,120 @@ def test_mask_bridge_unknown_weight_fails_closed():
     assert not check_pad_mask_bridge(pcb, 1.0).violations  # known, not 2 oz: not judged here
 
 
+def board4(*items):
+    """A 4-layer stackup; ``board()`` above declares F.Cu/B.Cu only."""
+    return PCB(
+        parse_string(
+            """(kicad_pcb (version 20240108) (generator pcbnew)
+      (general (thickness 1.6))
+      (layers (0 "F.Cu" signal) (1 "In1.Cu" signal) (2 "In2.Cu" signal)
+              (31 "B.Cu" signal))
+      (net 0 "") (net 1 "GND") (net 2 "VCC")
+    """
+            + "\n".join(items)
+            + ")"
+        )
+    )
+
+
+def _tht_pad(ref, x, y, uuid, net=1):
+    """A through-hole pad: copper on every layer, mask on the outer two."""
+    return f'''(footprint "X" (layer "F.Cu") (at {x} {y})
+      (property "Reference" "{ref}")
+      (pad "1" thru_hole circle (at 0 0) (size 1 1) (drill 0.5)
+           (layers "*.Cu" "*.Mask") (net {net} "GND") (uuid "{uuid}")))'''
+
+
+def _inner_pad(ref, x, y, uuid, net=1, layer="In1.Cu"):
+    """An SMD pad on an inner layer only -- copper, but no solder mask."""
+    return f'''(footprint "X" (layer "F.Cu") (at {x} {y})
+      (property "Reference" "{ref}")
+      (pad "1" smd rect (at 0 0) (size 1 1) (layers "{layer}")
+           (net {net} "GND") (uuid "{uuid}")))'''
+
+
+def test_mask_bridge_tht_outer_layers_only():
+    """A THT pad pair is a mask bridge on the outer sides only (Issue #8913).
+
+    ``_collect`` expands a ``*.Cu`` pad onto every copper layer for the copper-gap
+    pass; inner layers have no solder mask, so they must not be reported here.
+    """
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board4(_tht_pad("U1", 0, 0, "p0"), _tht_pad("U2", 1.19, 0, "p1", net=2))
+    found = check_pad_mask_bridge(pcb, 2.0).violations
+    # Assert the layer SET, not just the count: a count-only assertion would
+    # pass if the two findings had landed on In1.Cu and In2.Cu instead.
+    assert {v.layer for v in found} == {"F.Cu", "B.Cu"}
+    assert len(found) == 2
+    assert all(v.rule_id == "physical_copper_gap" and v.severity == "error" for v in found)
+
+
+def test_mask_bridge_tht_above_threshold_still_clean():
+    """The outer-only filter must not move the threshold."""
+    from kicad_tools.validate.rules.physical_gap import check_pad_mask_bridge
+
+    pcb = board4(_tht_pad("U1", 0, 0, "p0"), _tht_pad("U2", 1.22, 0, "p1", net=2))
+    assert not check_pad_mask_bridge(pcb, 2.0).violations
+
+
+def test_inner_only_pads_are_copper_gap_not_mask_bridge():
+    """The two passes must not be narrowed together (Issue #8913).
+
+    An inner-layer-only pad pair has no mask to bridge, but its inner copper gap
+    is real and ``check_physical_copper_gap`` must still report it.
+    """
+    from kicad_tools.validate.rules.physical_gap import (
+        check_pad_mask_bridge,
+        check_physical_copper_gap,
+    )
+
+    pcb = board4(
+        _inner_pad("U1", 0, 0, "p0"),
+        _inner_pad("U2", 1.19, 0, "p1", net=2),
+    )
+    assert not check_pad_mask_bridge(pcb, 2.0).violations
+    copper = [
+        v
+        for v in check_physical_copper_gap(pcb, 0.25).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+    assert copper and {v.layer for v in copper} == {"In1.Cu"}
+
+
 def test_checker_default_on_only_under_fab_view():
     from kicad_tools.validate.checker import DRCChecker
+    from kicad_tools.validate.rules.physical_gap import FabGapPolicy, GapBand
 
     pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2))
     assert not DRCChecker(pcb).check_physical_copper_gap().violations
-    on = DRCChecker(pcb, fab_view=True, fab_view_copper_oz=1.0).check_physical_copper_gap()
+    # Issue #8938: the fab-view bands come from the resolved stackup's DFM
+    # threshold entry, passed in as a policy -- no hardcoded module constants.
+    policy = FabGapPolicy(trace=GapBand(0.10, 0.15), pad=GapBand(0.15, 0.13))
+    on = DRCChecker(
+        pcb, fab_view=True, fab_view_copper_oz=1.0, fab_view_gap_policy=policy
+    ).check_physical_copper_gap()
     assert [v.severity for v in on.violations] == ["error"]
     # An explicit threshold wins over the fab-view default (single tier, all errors).
     explicit = DRCChecker(
         pcb, fab_view=True, fab_view_copper_oz=1.0, physical_copper_gap_mm=0.3
     ).check_physical_copper_gap()
     assert explicit.violations and explicit.violations[0].required_value == 0.3
+
+
+def test_checker_fab_view_without_resolved_bands_fails_closed():
+    """No policy (no DFM entry for the stackup): no tiered pass, not a guess.
+
+    Issue #8938 AC: a stackup whose bands are unknown must not silently fall
+    back to hardcoded constants -- the historical 0.10/0.15 fallback could
+    severity-grade gaps the fab never judged.
+    """
+    from kicad_tools.validate.checker import DRCChecker
+
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2))
+    on = DRCChecker(pcb, fab_view=True, fab_view_copper_oz=1.0).check_physical_copper_gap()
+    assert [v.rule_id for v in on.violations] == ["physical_copper_gap_incomplete"]
+    assert all(v.severity == "info" for v in on.violations)
 
 
 def test_cli_jlcpcb_default_on_and_other_mfr_unchanged(tmp_path, capsys):
@@ -700,3 +825,231 @@ def test_cli_jlcpcb_default_on_and_other_mfr_unchanged(tmp_path, capsys):
     )
     other = run("pcbway")
     assert not any(v["rule_id"] == "physical_copper_gap" for v in other["violations"])
+
+
+# ---- Issue #8938: fab-view bands from the DFM threshold table --------------
+
+
+def _via(x, y, uuid, net=1):
+    return (
+        f'(via (at {x} {y}) (size .6) (drill .3) (layers "F.Cu" "B.Cu") '
+        f'(net {net}) (uuid "{uuid}"))'
+    )
+
+
+def _zone(uuid, net=1):
+    return f'''(zone (net {net}) (net_name "GND") (layer "F.Cu") (uuid "{uuid}")
+      (polygon (pts (xy 0 0) (xy 4 0) (xy 4 2) (xy 0 2)))
+      (filled_polygon (layer "F.Cu") (pts (xy 0 0) (xy 4 0) (xy 4 2) (xy 0 2))))'''
+
+
+def _fab(pcb, policy):
+    from kicad_tools.validate.rules.physical_gap import check_physical_copper_gap_fab_view
+
+    return [
+        v
+        for v in check_physical_copper_gap_fab_view(pcb, policy).violations
+        if v.rule_id == "physical_copper_gap"
+    ]
+
+
+def _one_oz():
+    from kicad_tools.validate.rules.physical_gap import FabGapPolicy, GapBand
+
+    return FabGapPolicy(
+        trace=GapBand(0.1016, None), pad=GapBand(0.15, None), stackup_key="4layer_1oz"
+    )
+
+
+def test_fab_view_same_net_via_at_pad_edge_is_error():
+    """The #8938 board's measured danger geometry: a via 0.08 mm from a
+    same-net pad edge.  The fab flags it (it cannot see nets); kct must too."""
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(0.88, 0, "v1", net=1))
+    found = _fab(pcb, _one_oz())
+    assert found and [v.severity for v in found] == ["error"]
+    assert found[0].same_net is True
+
+
+def test_fab_view_pour_to_pad_is_advisory_not_error():
+    """1,516 of the #8938 board's warnings were pour-to-pad gaps at
+    0.10-0.13 mm that JLCDFM does not flag at all.  They must not become
+    errors (the "pour-to-pad collision"): in fab view they report at info."""
+    pcb = board(_zone("z1"), _pad("U1", 2, 2.62, "p1"))  # pad edge 0.12 mm off the fill
+    found = _fab(pcb, _one_oz())
+    assert found and found[0].actual_value == pytest.approx(0.12, abs=0.002)
+    assert found[0].severity == "info"
+    assert "zone" in found[0].message.lower()
+
+
+def test_fab_view_trace_gap_above_danger_edge_without_warning_band_not_reported():
+    """A stackup whose warning_mm is absent has NO warning band: gaps at or
+    above the danger edge are not fab findings (JLCDFM trace_spacing recorded
+    0 danger / 0 warning on the #8938 board).  Explicit, not defaulted."""
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.32), (4, 0.32), "b", net=2))
+    assert not _fab(pcb, _one_oz())  # 0.12 mm >= 0.1016 danger edge
+
+
+def test_fab_view_trace_gap_below_danger_edge_is_error():
+    pcb = board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2))
+    found = _fab(pcb, _one_oz())
+    assert found and [v.severity for v in found] == ["error"]
+    assert found[0].same_net is False
+
+
+def test_fab_view_sets_fab_band_per_population():
+    """Issue #8972: the band a finding was graded against is carried on the
+    finding (``DRCViolation.fab_band``) so parity attribution can tell the
+    trace and pad populations apart without splitting the rule id.
+
+    ``"trace"`` for no-pad/no-zone gaps, ``"pad"`` for pad-adjacent and
+    mask-bridge gaps, ``None`` for the bandless emit sites (the zone-fill
+    ``info`` branch and the legacy opt-in pass).
+    """
+    from kicad_tools.validate.rules.physical_gap import (
+        check_pad_mask_bridge,
+        check_physical_copper_gap,
+    )
+
+    trace = _fab(
+        board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2)), _one_oz()
+    )
+    assert [v.fab_band for v in trace] == ["trace"]
+    pad = _fab(board(_pad("U1", 0, 0, "p1"), _via(0.88, 0, "v1", net=1)), _one_oz())
+    assert [v.fab_band for v in pad] == ["pad"]
+    pour = _fab(board(_zone("z1"), _pad("U1", 2, 2.62, "p1")), _one_oz())
+    assert [v.severity for v in pour] == ["info"]
+    assert [v.fab_band for v in pour] == [None]
+    bridge = [
+        v
+        for v in check_pad_mask_bridge(
+            board(_pad("U1", 0, 0, "p0"), _pad("U2", 1.18, 0, "p1", net=2)), 2.0
+        ).violations
+        if v.severity != "info"
+    ]
+    assert bridge and [v.fab_band for v in bridge] == ["pad"]
+    legacy = check_physical_copper_gap(
+        board(track((0, 0), (4, 0), "a"), track((0, 0.28), (4, 0.28), "b", net=2)), 0.1016
+    ).violations
+    assert legacy and [v.fab_band for v in legacy] == [None]
+
+
+def _two_oz_pad_policy():
+    from kicad_tools.validate.rules.physical_gap import FabGapPolicy, GapBand
+
+    # The verified correction: 4layer_2oz pad_spacing records warning_mm 0.13
+    # BELOW danger_mm 0.15 -- band logic must not assume an ordering.
+    return FabGapPolicy(trace=GapBand(0.10, 0.15), pad=GapBand(0.15, 0.13))
+
+
+def test_inverted_band_error_below_tighter_edge():
+    """warning_mm (0.13) < danger_mm (0.15): the tighter edge is the error
+    edge, so a 0.08 mm pad gap is an error (the fab's 8 danger on 2 oz)."""
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(0.88, 0, "v1", net=1))
+    found = _fab(pcb, _two_oz_pad_policy())
+    assert found and [v.severity for v in found] == ["error"]
+
+
+def test_inverted_band_warning_between_tighter_and_looser_edge():
+    """A 0.14 mm pad gap: below the 0.15 danger entry but above the observed
+    0.13 warning edge -- the fab recorded 2 warnings in exactly this band."""
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(0.94, 0, "v1", net=1))
+    found = _fab(pcb, _two_oz_pad_policy())
+    assert found and [v.severity for v in found] == ["warning"]
+
+
+def test_inverted_band_above_looser_edge_not_reported():
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(1.04, 0, "v1", net=1))  # gap 0.24
+    assert not _fab(pcb, _two_oz_pad_policy())
+
+
+def test_recorded_8938_danger_geometry_yields_errors_from_live_table():
+    """The acceptance bite: bands resolved from the REAL jlcpcb table for the
+    recorded board's stackup (4layer_1oz) must make the fab-danger same-net
+    pad-edge geometry an error.  If the same-net downgrade or the table wiring
+    regresses, kct reports zero errors here and this fails."""
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.validate.checker import DRCChecker
+    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
+
+    profile = get_profile("jlcpcb")
+    entry = profile.get_dfm_entry(4, 1.0, 0.5)
+    assert entry is not None and entry.key == "4layer_1oz"
+    policy = fab_gap_policy_from_entry(entry)
+    assert policy.pad.error_edge_mm == pytest.approx(0.15)
+    assert policy.trace.error_edge_mm == pytest.approx(0.1016)
+    # No warning band is recorded for 4layer_1oz: None, not danger, not 0.
+    assert policy.pad.warning_mm is None and policy.trace.warning_mm is None
+
+    pcb = board(_pad("U1", 0, 0, "p1"), _via(0.88, 0, "v1", net=1))
+    found = DRCChecker(
+        pcb, fab_view=True, fab_view_copper_oz=1.0, fab_view_gap_policy=policy
+    ).check_physical_copper_gap()
+    errors = [v for v in found.violations if v.rule_id == "physical_copper_gap"]
+    assert errors, "fab-danger geometry produced no findings"
+    assert all(v.severity == "error" for v in errors)
+
+
+def test_output_names_waived_same_net_findings_and_counts_them(capsys):
+    """Issue #8938 AC: a waived same-net finding is listed with its reason and
+    issue, and the output states how many same-net findings are waived."""
+    from pathlib import Path
+
+    from kicad_tools.cli.check_cmd import output_table
+    from kicad_tools.validate import DRCResults, DRCViolation
+
+    violations = [
+        DRCViolation(
+            "physical_copper_gap",
+            "error",
+            "Physical copper gap 0.0800mm < 0.1500mm",
+            nets=("GND",),
+            same_net=True,
+            waived=True,
+            waiver_reason="deliberate same-net slit, reviewed",
+            waiver_issue="8938",
+        ),
+        DRCViolation(
+            "physical_copper_gap",
+            "error",
+            "Physical copper gap 0.0700mm < 0.1500mm",
+            nets=("VCC",),
+            same_net=True,
+            waived=True,
+            waiver_reason="second deliberate slit",
+            waiver_issue="8938",
+        ),
+    ]
+    results = DRCResults()
+    for v in violations:
+        results.add(v)
+    output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 4, False)
+    out = capsys.readouterr().out
+    assert "Same-net findings waived: 2" in out
+    assert "Waiver reason: deliberate same-net slit, reviewed" in out
+    assert "Waiver issue: 8938" in out
+
+
+def test_output_tags_same_net_finding_headers(capsys):
+    """Issue #8938 AC: the same-net class is identifiable in the text output
+    without re-deriving it from the net names."""
+    from pathlib import Path
+
+    from kicad_tools.cli.check_cmd import output_table
+    from kicad_tools.validate import DRCResults, DRCViolation
+
+    violations = [
+        DRCViolation(
+            "physical_copper_gap",
+            "error",
+            "Physical copper gap 0.0800mm < 0.1500mm",
+            nets=("GND",),
+            same_net=True,
+        ),
+    ]
+    results = DRCResults()
+    for v in violations:
+        results.add(v)
+    output_table(violations, results, Path("board.kicad_pcb"), "jlcpcb", 4, False)
+    out = capsys.readouterr().out
+    assert "physical_copper_gap (same-net)" in out
+    assert "1 same-net" in out  # BY RULE relationship breakdown

@@ -93,6 +93,9 @@ def test_python_object_specific_clearance(tmp_path, kind, gap, options, expected
     path = board_fixture(tmp_path / "probe.kicad_pcb", kind, gap, **options)
     pcb = PCB.load(path)
     rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1)
+    # Single-tier native floor; two-tier bands are tested in
+    # test_silk_pad_clearance_bands_8844.py (Issue #8844).
+    rules = replace(rules, silk_to_pad_danger_mm=None, silk_to_pad_warning_mm=None)
     results = (
         check_silk_pad_clearance(pcb, rules)
         if kind == "silk"
@@ -606,7 +609,11 @@ def test_custom_rule_survives_repeated_emission(tmp_path):
     first = dru.read_bytes()
     write_drc_constraints(path, rules, manufacturer_id="jlcpcb", layers=4)
     assert dru.read_bytes() == first
-    assert custom.strip() in first.decode()
+    # The user's rule content survives below the anchored block (Issue
+    # #8937: the block sits above foreign rules, below the version form).
+    text = first.decode()
+    assert text.startswith("(version 1)\n")
+    assert '# Reviewed creepage\n(rule "Reviewed HV" (constraint clearance (min 2mm)))' in text
     assert first.count(b'(rule "Silk to Pad') == 1
 
 

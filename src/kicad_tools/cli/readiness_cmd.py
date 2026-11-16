@@ -120,6 +120,7 @@ REQUIRED_CHECKS = ("kct_check", "native_drc", "artifacts", "bom")
 ASSEMBLY_AFFECTING_RULES = frozenset(
     {
         "silk_over_copper",
+        "silk_hole_overlap",
         "silkscreen_line_width",
         "silk_edge_clearance",
         "silk_overlap",
@@ -3562,6 +3563,16 @@ def _hashable_inputs(options: ReadinessOptions) -> list[Path]:
                 or path.name.endswith("fab_profile.json")
             ):
                 paths.add(path.resolve())
+
+    # Issue #9006: the waivers sidecar `kct check` auto-loads for this PCB
+    # changes the verdict (errors -> waived), so it is evidence input like
+    # the rule files.  Same lookup order as the check loader; one outside
+    # the board directory is dropped by the filter below.
+    from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
+
+    sidecar = discover_waivers_sidecar(options.pcb)
+    if sidecar is not None:
+        paths.add(sidecar.resolve())
 
     for directory in (options.output_dir, options.evidence_dir):
         if directory.is_dir():

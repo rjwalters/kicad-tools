@@ -157,6 +157,17 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
     """
     results = DRCResults()
     minimum = rules.min_silk_to_pad_clearance_mm
+    danger = rules.silk_to_pad_danger_mm
+    warning = rules.silk_to_pad_warning_mm
+    if danger is not None or warning is not None:
+        # Two-tier mode (Issue #8844): error <= danger, warning <= warning.
+        if danger is None:
+            danger = minimum if minimum is not None else 0.0
+        if warning is None or warning < danger:
+            warning = danger
+        minimum = warning
+    else:
+        danger = warning = None
     if minimum is None:
         return results
     require_shapely("silk pad clearance")
@@ -218,16 +229,24 @@ def check_silk_pad_clearance(pcb: PCB, rules: DesignRules) -> DRCResults:
         for idx in trees[silk_side].query(query_box):
             aperture, pad_reference = side_entries[int(idx)]
             distance = geom.distance(aperture)
-            if distance + DRC_TOLERANCE < minimum:
+            if distance <= minimum + DRC_TOLERANCE and (
+                danger is not None or distance + DRC_TOLERANCE < minimum
+            ):
+                if danger is None:
+                    severity, required = "error", minimum
+                elif distance <= danger + DRC_TOLERANCE:
+                    severity, required = "error", danger
+                else:
+                    severity, required = "warning", minimum
                 results.add(
                     DRCViolation(
                         rule_id="silk_pad_clearance",
-                        severity="error",
-                        message=f"Silk to pad clearance {distance:.4f}mm < {minimum}mm",
+                        severity=severity,
+                        message=f"Silk to pad clearance {distance:.4f}mm < {required}mm",
                         location=location,
                         layer=graphic.layer,
                         actual_value=distance,
-                        required_value=minimum,
+                        required_value=required,
                         items=(silk_item, pad_reference),
                     )
                 )

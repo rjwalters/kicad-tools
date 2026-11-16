@@ -3,10 +3,7 @@
 # with classify-dependency-block.sh's --check-defer gate (#7904).
 #
 # Extracted as a sibling module from test-classify-dependency-block.sh
-# (#7758 file-size ratchet: that file was already at the 1000-code-line
-# threshold, and this scenario is a self-contained addition) per
-# .loom/docs/file-size-policy.md's "extracting a test module to a sibling
-# file is a real improvement" guidance.
+# (#7758): this scenario is a self-contained addition.
 #
 # #7657 added a separate premise-false close gate to champion-issue-promo.md;
 # its own acceptance criteria require that a MIXED premise-false + open-

@@ -216,6 +216,9 @@ class ViolationType(Enum):
     PHYSICAL_COPPER_GAP = "physical_copper_gap"
     PHYSICAL_COPPER_GAP_INCOMPLETE = "physical_copper_gap_incomplete"
     THT_SMD_SPACING = "tht_smd_spacing"
+    # Issue #8914: a THT/SMD pad whose shape the rule cannot measure, reported
+    # at info so missing coverage is never read as a cleared pad.
+    THT_SMD_SPACING_INCOMPLETE = "tht_smd_spacing_incomplete"
     EDGE_CLEARANCE_TRACE = "edge_clearance_trace"
     EDGE_CLEARANCE_PAD = "edge_clearance_pad"
     EDGE_CLEARANCE_PAD_HOLE = "edge_clearance_pad_hole"
@@ -282,6 +285,9 @@ class ViolationType(Enum):
     SOLDER_MASK_BRIDGE = "solder_mask_bridge"
     SOLDER_MASK_CLEARANCE = "solder_mask_clearance"
     MASK_TO_COPPER = "mask_to_copper"
+    # Issue #8914: the native mask-to-copper assessment did not complete, so its
+    # zero findings prove nothing about the board.  Info severity.
+    MASK_TO_COPPER_INCOMPLETE = "mask_to_copper_incomplete"
     MASK_NEGATIVE_EXPANSION = "mask_negative_expansion"
     MASK_MULTI_SEGMENT = "mask_multi_segment"
     MIN_PAD_SIZE = "min_pad_size"
@@ -481,6 +487,12 @@ class ViolationType(Enum):
             "physical_copper_gap": cls.PHYSICAL_COPPER_GAP,
             "physical_copper_gap_incomplete": cls.PHYSICAL_COPPER_GAP_INCOMPLETE,
             "tht_smd_spacing": cls.THT_SMD_SPACING,
+            # Issue #8914 incomplete-coverage ids.  Explicit for the same reason
+            # as ``copper_sliver`` above: the fuzzy fallback has no branch that
+            # matches either one ("mask" alone is not "solder"+"mask"), so both
+            # would drop to UNKNOWN and corrupt the downstream ``type`` field.
+            "tht_smd_spacing_incomplete": cls.THT_SMD_SPACING_INCOMPLETE,
+            "mask_to_copper_incomplete": cls.MASK_TO_COPPER_INCOMPLETE,
             # kicad-cli 10 DRC type strings that ``kct drc --mfr`` judges
             # against fab floors (Issue #7170).  Explicit, because the fuzzy
             # fallback mis-routes every one of them: ``annular_width``,

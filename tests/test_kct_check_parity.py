@@ -137,6 +137,16 @@ BOARD_07_EXPECTED_FAMILY_DELTA = {
     "match_group_length_skew": 0,
 }
 
+# Re-pinned by #8938: the fab-view copper gap pass no longer downgrades a
+# same-net gap to a warning (the fab cannot see nets and flags it anyway), and
+# pad-involving gaps are judged at pad_spacing's recorded 0.15 mm danger edge
+# instead of the old hardcoded 0.10 mm.  On this fixture that re-severitied
+# 101 findings from warning to error: 96 same-net slits (mostly the dense
+# 0.0891 mm via-field pattern) plus 5 different-net pad-involving gaps at
+# 0.115-0.1345 mm, below the table's pad danger edge.  The committed copper
+# did not change.
+BOARD_07_EXPECTED_GAP_ERRORS = 101
+
 
 def _load_resolver_module():
     """Import ``scripts/ci/net_class_map_resolver.py`` as a module."""
@@ -454,7 +464,10 @@ class TestCiGateCountsGatedFamilies:
             pytest.skip("board 07 regression fixture not present")
         gate = self._load_gate()
         blocking, advisory = gate.count_errors(BOARD_07_PCB)
-        assert blocking == 5 + sum(BOARD_07_EXPECTED_FAMILY_DELTA.values())
+        assert (
+            blocking
+            == 5 + sum(BOARD_07_EXPECTED_FAMILY_DELTA.values()) + BOARD_07_EXPECTED_GAP_ERRORS
+        )
         assert advisory.get("connectivity", 0) == 4
 
 

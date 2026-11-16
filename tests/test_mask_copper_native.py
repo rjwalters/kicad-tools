@@ -56,6 +56,94 @@ FACTORY_SILK_DRU = """(version 1)
   (constraint clearance (min 0.15mm)))
 """
 
+# The kct-managed fab-floor vocabulary (#8948): ``physical_hole_clearance``,
+# ``text_thickness`` and ``text_height``, the constraints every shipped tier
+# file and the managed ``.kicad_dru`` block carry on top of the silk rules
+# above. Shaped like the tier files themselves, and with
+# ``physical_hole_clearance`` deliberately appearing in two rules to pin that
+# a repeated constraint name yields no duplicated report entry.
+FACTORY_FAB_FLOOR_DRU = """(version 1)
+(rule "Factory hole to edge"
+  (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
+  (constraint physical_hole_clearance (min 0.4mm)))
+(rule "Factory via hole to edge"
+  (condition "A.Type == 'via' && B.Layer == 'Edge.Cuts'")
+  (constraint physical_hole_clearance (min 0.5mm)))
+(rule "Factory silkscreen width"
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
+  (constraint text_thickness (min 0.15mm)))
+(rule "Factory silkscreen height"
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
+  (constraint text_height (min 1.0mm)))
+"""
+
+# Constraint names the allowlist admits for factory and kct-managed rule
+# files; the parity tests must show none of them ever reaches the report.
+ADMITTED_FACTORY_CONSTRAINTS = (
+    "silk_clearance",
+    "physical_hole_clearance",
+    "text_thickness",
+    "text_height",
+    "diff_pair_gap",
+    "diff_pair_uncoupled",
+    "skew",
+    "via_count",
+    "disallow",
+)
+
+# The kct-managed router diff-pair vocabulary (#6443, admitted by #8973):
+# ``diff_pair_gap`` (one rule per coupled pair) plus the pair limits
+# ``diff_pair_uncoupled``, ``skew`` and ``via_count``, shaped on what
+# netclass_dru.py actually writes. A pair KiCad recognises by suffix
+# (CLK_P/CLK_N) is selected with ``A.inDiffPair`` and gets all three limits,
+# ``skew`` carrying ``(within_diff_pairs)``; a router-recorded pair no KiCad
+# suffix recognises (X_POS/X_NEG, #6429) is selected by net name and gets
+# only the bare ``skew`` and ``via_count`` -- KiCad never evaluates
+# ``diff_pair_gap`` or ``diff_pair_uncoupled`` for it, so neither is written.
+# ``skew`` and ``via_count`` each appear in two rules, pinning that a
+# repeated constraint name yields no duplicated report entry.
+FACTORY_PAIR_LIMIT_DRU = """(version 1)
+(rule "kct diff pair gap - CLK_P/CLK_N"
+  (condition "A.NetName == 'CLK_P' || A.NetName == 'CLK_N'")
+  (constraint diff_pair_gap (min 0.2mm)))
+(rule "kct diff pair uncoupled - CLK_P/CLK_N"
+  (condition "A.inDiffPair('CLK_')")
+  (constraint diff_pair_uncoupled (max 5mm)))
+(rule "kct diff pair skew - CLK_P/CLK_N"
+  (condition "A.inDiffPair('CLK_')")
+  (constraint skew (max 0.5mm) (within_diff_pairs)))
+(rule "kct diff pair vias - CLK_P/CLK_N"
+  (condition "A.inDiffPair('CLK_')")
+  (constraint via_count (max 4)))
+(rule "kct diff pair skew - X_POS/X_NEG"
+  (condition "A.NetName == 'X_POS' || A.NetName == 'X_NEG'")
+  (constraint skew (max 1mm)))
+(rule "kct diff pair vias - X_POS/X_NEG"
+  (condition "A.NetName == 'X_POS' || A.NetName == 'X_NEG'")
+  (constraint via_count (max 6)))
+"""
+
+# The kct-managed keepout vocabulary (#6039, admitted by #8973): one
+# ``disallow`` rule per rule area, shaped on keepout_dru.py's own rendering,
+# carrying both the two-item item list tests/test_keepout_dru.py pins and
+# the five-item wide form -- and the explicit ``(layer ...)`` clause a
+# single-copper-layer area earns.
+FACTORY_KEEPOUT_DRU = """(version 1)
+# BEGIN kct keepout rules (Issue #6039) -- managed, do not edit
+# Generated from the board's keepout rule areas, board-level (Issue #6039)
+# and footprint-embedded (Issue #6087).
+# kicad-cli 10.0.1 does not enforce rule areas on its own; these
+# explicit intersectsArea rules make `kicad-cli pcb drc` report them.
+(rule "kct keepout wall [00000000-0000-0000-0000-000000000004]"
+  (condition "A.intersectsArea('00000000-0000-0000-0000-000000000004')")
+  (constraint disallow track via))
+(rule "kct keepout fence [00000000-0000-0000-0000-000000000005]"
+  (layer "F.Cu")
+  (condition "A.intersectsArea('00000000-0000-0000-0000-000000000005')")
+  (constraint disallow track via pad zone footprint))
+# END kct keepout rules
+"""
+
 # Two pads and an escaping conductor: enough plotted mask and copper for the
 # per-object/full-layer parity comparison to be meaningful, small enough to
 # export twice without inflating the native gate's runtime.
@@ -65,6 +153,37 @@ PARITY_BODY = """(net 1 "N")
        (pad "2" smd roundrect (at 2 0) (size 1 1) (roundrect_rratio .25) (layers "F.Cu" "F.Mask")))
       (segment (start 10.9 9) (end 10.9 11) (width .1) (layer "F.Cu") (net 1)
        (uuid "00000000-0000-0000-0000-000000000099"))"""
+
+# PARITY_BODY plus the two features whose managed blocks the pair-limit and
+# keepout fixtures mirror (#8973): a KiCad-recognised diff pair
+# (CLK_P/CLK_N) beside a router-recorded one (X_POS/X_NEG, #6429), and two
+# keepout rule areas whose flags forbid a short (track via) and a wide
+# (track via pad zone footprint) item list. Auto-assigned source UUIDs
+# follow document order -- footprint 1, pads 2/3, zones 4/5 -- and the
+# keepout rules above reference those zone UUIDs exactly as keepout_dru.py
+# would render them.
+RULE_AREA_PAIR_BODY = """(net 0 "") (net 1 "N") (net 2 "CLK_P") (net 3 "CLK_N") (net 4 "X_POS") (net 5 "X_NEG")
+      (footprint "P" (layer "F.Cu") (at 10 10)
+       (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "N"))
+       (pad "2" smd roundrect (at 2 0) (size 1 1) (roundrect_rratio .25) (layers "F.Cu" "F.Mask")))
+      (segment (start 10.9 9) (end 10.9 11) (width .1) (layer "F.Cu") (net 1)
+       (uuid "00000000-0000-0000-0000-000000000099"))
+      (segment (start 12.5 9.2) (end 12.5 10.8) (width .1) (layer "F.Cu") (net 2)
+       (uuid "00000000-0000-0000-0000-0000000000a1"))
+      (segment (start 12.7 9.2) (end 12.7 10.8) (width .1) (layer "F.Cu") (net 3)
+       (uuid "00000000-0000-0000-0000-0000000000a2"))
+      (segment (start 13.5 9.2) (end 13.5 10.8) (width .1) (layer "F.Cu") (net 4)
+       (uuid "00000000-0000-0000-0000-0000000000a3"))
+      (segment (start 13.7 9.2) (end 13.7 10.8) (width .1) (layer "F.Cu") (net 5)
+       (uuid "00000000-0000-0000-0000-0000000000a4"))
+      (zone (net 0) (net_name "") (name "wall") (layers "F.Cu" "B.Cu")
+       (hatch edge 0.5) (keepout (tracks not_allowed) (vias not_allowed))
+       (polygon (pts (xy 14.5 9) (xy 15.5 9) (xy 15.5 11) (xy 14.5 11))))
+      (zone (net 0) (net_name "") (name "fence") (layers "F.Cu")
+       (hatch edge 0.5)
+       (keepout (tracks not_allowed) (vias not_allowed) (pads not_allowed)
+        (copperpour not_allowed) (footprints not_allowed))
+       (polygon (pts (xy 16 9) (xy 17 9) (xy 17 11) (xy 16 11))))"""
 
 
 def _dru_board(directory, body, rules=None, *, setup="(pad_to_mask_clearance .05)"):
@@ -118,20 +237,151 @@ def test_factory_silk_clearance_rules_leave_native_attribution_unchanged(tmp_pat
     assert (ruled.read_bytes(), rules.read_bytes()) == before
 
 
+def test_factory_fab_floor_rules_leave_native_attribution_unchanged(tmp_path, native_options):
+    """The kct-managed fab-floor constraints must not invalidate attribution.
+
+    Issue #8948: ``physical_hole_clearance``, ``text_thickness`` and
+    ``text_height`` are emitted by every shipped tier file and by kct's own
+    managed ``.kicad_dru`` block, so a board carrying them failed with
+    ``Native object rule context unsupported`` despite their being measured
+    minima over already-plotted material. Same proof pattern as the
+    ``silk_clearance`` case above.
+    """
+    plain = _dru_board(tmp_path / "plain", PARITY_BODY)
+    ruled = _dru_board(tmp_path / "ruled", PARITY_BODY, FACTORY_FAB_FLOOR_DRU)
+    rules = ruled.with_suffix(".kicad_dru")
+    before = (ruled.read_bytes(), rules.read_bytes())
+
+    plain_result = check_mask_to_copper(plain, POLICY, **native_options)
+    ruled_result = check_mask_to_copper(ruled, POLICY, **native_options)
+
+    assert plain_result.coverage == "complete", plain_result.reasons
+    assert ruled_result.coverage == "complete", ruled_result.reasons
+    for name in ADMITTED_FACTORY_CONSTRAINTS:
+        assert not any(name in reason for reason in ruled_result.reasons)
+    # Equivalent outcome, equivalent plotted material, equivalent attribution.
+    assert ruled_result.passed is plain_result.passed
+    assert (
+        ruled_result.geometry_provenance["export"]["layers_wkt"]
+        == plain_result.geometry_provenance["export"]["layers_wkt"]
+    )
+    assert _attribution(ruled_result) == _attribution(plain_result)
+    # The rule file is still bound into provenance and still left untouched --
+    # accepting the context is not the same as ignoring the sidecar.
+    assert (
+        ruled_result.binding.rules_sha256
+        == hashlib.sha256(FACTORY_FAB_FLOOR_DRU.encode()).hexdigest()
+    )
+    assert plain_result.binding.rules_sha256 is None
+    assert (ruled.read_bytes(), rules.read_bytes()) == before
+
+
+def test_factory_pair_limit_rules_leave_native_attribution_unchanged(tmp_path, native_options):
+    """The kct-managed diff-pair rules must not invalidate attribution.
+
+    Issue #8973: ``diff_pair_gap``, ``diff_pair_uncoupled``, ``skew`` and
+    ``via_count`` are written into the same managed ``.kicad_dru`` for every
+    router-coupled pair (#6443), so a board carrying them failed with
+    ``Native object rule context unsupported`` despite their being measured
+    minima/maxima over already-routed material. Same proof pattern as the
+    fab-floor case above; the body carries both a KiCad-recognised pair and
+    a router-recorded one, so both emitted rule shapes are exercised.
+    """
+    plain = _dru_board(tmp_path / "plain", RULE_AREA_PAIR_BODY)
+    ruled = _dru_board(tmp_path / "ruled", RULE_AREA_PAIR_BODY, FACTORY_PAIR_LIMIT_DRU)
+    rules = ruled.with_suffix(".kicad_dru")
+    before = (ruled.read_bytes(), rules.read_bytes())
+
+    plain_result = check_mask_to_copper(plain, POLICY, **native_options)
+    ruled_result = check_mask_to_copper(ruled, POLICY, **native_options)
+
+    assert plain_result.coverage == "complete", plain_result.reasons
+    assert ruled_result.coverage == "complete", ruled_result.reasons
+    for name in ("diff_pair_gap", "diff_pair_uncoupled", "skew", "via_count"):
+        assert not any(name in reason for reason in ruled_result.reasons)
+    # Equivalent outcome, equivalent plotted material, equivalent attribution.
+    assert ruled_result.passed is plain_result.passed
+    assert (
+        ruled_result.geometry_provenance["export"]["layers_wkt"]
+        == plain_result.geometry_provenance["export"]["layers_wkt"]
+    )
+    assert _attribution(ruled_result) == _attribution(plain_result)
+    # The rule file is still bound into provenance and still left untouched --
+    # accepting the context is not the same as ignoring the sidecar.
+    assert (
+        ruled_result.binding.rules_sha256
+        == hashlib.sha256(FACTORY_PAIR_LIMIT_DRU.encode()).hexdigest()
+    )
+    assert plain_result.binding.rules_sha256 is None
+    assert (ruled.read_bytes(), rules.read_bytes()) == before
+
+
+def test_full_managed_sidecar_with_keepouts_leaves_native_attribution_unchanged(
+    tmp_path, native_options
+):
+    """A keepout rule area's ``disallow`` rules must not invalidate attribution.
+
+    Issue #8973: ``disallow`` is not a dimensional minimum but a prohibition
+    on item *presence* inside a referenced rule area (#6039) -- DRC reports
+    items there; it never moves, resizes, removes or adds plotted geometry,
+    which is exactly what the parity below proves rather than asserts. The
+    board carries two rule areas (mirrored by the keepout block, short and
+    wide item lists both) and a router-coupled diff pair, and the sidecar
+    carries every factory and kct-managed block together the way a real
+    generated board's does, so the admitted names are exercised beside each
+    other, not only in isolation.
+    """
+    managed = (
+        FACTORY_SILK_DRU + FACTORY_FAB_FLOOR_DRU + FACTORY_PAIR_LIMIT_DRU + FACTORY_KEEPOUT_DRU
+    )
+    plain = _dru_board(tmp_path / "plain", RULE_AREA_PAIR_BODY)
+    ruled = _dru_board(tmp_path / "ruled", RULE_AREA_PAIR_BODY, managed)
+    rules = ruled.with_suffix(".kicad_dru")
+    before = (ruled.read_bytes(), rules.read_bytes())
+
+    plain_result = check_mask_to_copper(plain, POLICY, **native_options)
+    ruled_result = check_mask_to_copper(ruled, POLICY, **native_options)
+
+    assert plain_result.coverage == "complete", plain_result.reasons
+    assert ruled_result.coverage == "complete", ruled_result.reasons
+    for name in ADMITTED_FACTORY_CONSTRAINTS:
+        assert not any(name in reason for reason in ruled_result.reasons)
+    # Equivalent outcome, equivalent plotted material, equivalent attribution.
+    assert ruled_result.passed is plain_result.passed
+    assert (
+        ruled_result.geometry_provenance["export"]["layers_wkt"]
+        == plain_result.geometry_provenance["export"]["layers_wkt"]
+    )
+    assert _attribution(ruled_result) == _attribution(plain_result)
+    # The rule file is still bound into provenance and still left untouched --
+    # accepting the context is not the same as ignoring the sidecar.
+    assert ruled_result.binding.rules_sha256 == hashlib.sha256(managed.encode()).hexdigest()
+    assert plain_result.binding.rules_sha256 is None
+    assert (ruled.read_bytes(), rules.read_bytes()) == before
+
+
 @pytest.mark.parametrize(
     "constraint", ["zone_connection (with solid)", "thermal_relief_gap (min 0.3mm)"]
 )
 def test_geometry_altering_rule_context_still_fails_beside_silk_rules(
     tmp_path, native_options, constraint
 ):
-    """The allowlist addition is narrow: unsupported contexts still fail closed.
+    """The allowlist additions are narrow: unsupported contexts still fail closed.
 
     ``zone_connection`` and ``thermal_relief_gap`` genuinely change the filled
     shape native plotting produces, so they must keep being reported even when
-    the same rule file also carries accepted ``silk_clearance`` rules.
+    the same rule file also carries every accepted factory and kct-managed
+    constraint. Only the plot-shaping context is reported; the
+    geometry-neutral names beside it never appear (#8948, #8973).
     """
-    rules = FACTORY_SILK_DRU + f'(rule "Fab fill" (constraint {constraint}))\n'
-    path = _dru_board(tmp_path / "altering", PARITY_BODY, rules)
+    rules = (
+        FACTORY_SILK_DRU
+        + FACTORY_FAB_FLOOR_DRU
+        + FACTORY_PAIR_LIMIT_DRU
+        + FACTORY_KEEPOUT_DRU
+        + f'(rule "Fab fill" (constraint {constraint}))\n'
+    )
+    path = _dru_board(tmp_path / "altering", RULE_AREA_PAIR_BODY, rules)
 
     result = check_mask_to_copper(path, POLICY, **native_options)
 
@@ -139,7 +389,8 @@ def test_geometry_altering_rule_context_still_fails_beside_silk_rules(
     assert result.coverage == "incomplete"
     assert not result.passed
     assert f"Native object rule context unsupported: {name}" in result.reasons
-    assert not any("silk_clearance" in reason for reason in result.reasons)
+    for admitted in ADMITTED_FACTORY_CONSTRAINTS:
+        assert not any(admitted in reason for reason in result.reasons)
 
 
 def test_silk_rules_do_not_suppress_an_unsupported_native_graphic(tmp_path, native_options):
@@ -459,3 +710,225 @@ def test_uninventoried_native_target_cannot_hide_in_copper_union(
     assert result.coverage == "incomplete", result.to_dict()
     assert not result.passed
     assert any(identity in reason and "uninventoried" in reason for reason in result.reasons)
+
+
+# ---------------------------------------------------------------------------
+# Interpreter resolution and worker-launch wiring (Issue #8946), hermetic:
+# the native export and the worker subprocess are faked, so the command
+# plumbing is exercised on every host without any KiCad installation.
+# ---------------------------------------------------------------------------
+
+_PAD_BODY = """(footprint "P1" (layer "F.Cu")
+      (pad "1" thru_hole circle (at 0 0) (size 1.7 1.7) (drill 1.0)
+        (layers "*.Cu" "*.Mask")))"""
+
+_QUALIFIED_VERSION = "10.0.6"
+
+
+def _fake_native_launch(monkeypatch, tmp_path, native_version=_QUALIFIED_VERSION):
+    """Fake the export and the worker subprocess; capture the worker argv.
+
+    Returns ``(board, seen)`` where ``seen["cmd"]`` is the argv the native
+    per-object worker was launched with and the output file it was told to
+    write has been filled with a well-formed qualified payload.
+    """
+    import subprocess
+
+    from kicad_tools.validate import mask_copper_geometry as mcg
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+    from tests.test_mask_export_geometry import _board
+
+    board = _board(tmp_path / "board.kicad_pcb", _PAD_BODY)
+    digest = "a" * 64
+    monkeypatch.setattr(
+        mcg,
+        "inspect_exported_mask_geometry",
+        lambda *a, **k: ExportedMaskGeometry(
+            source_sha256=digest,
+            project_sha256=None,
+            rules_sha256=None,
+            native_version=native_version,
+            export_identity={},
+        ),
+    )
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        Path(cmd[-1]).write_text(
+            json.dumps(
+                {
+                    "schema": "kct.native-mask-objects.v1",
+                    "source_sha256": digest,
+                    "native_version": native_version,
+                    "errors": [],
+                    "objects": {},
+                    "max_error_mm": 0.0,
+                }
+            )
+        )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mcg.subprocess, "run", fake_run)
+    return board, seen
+
+
+def _forbid_discovery(monkeypatch):
+    def fail(*a, **k):
+        raise AssertionError("discovery must not run when the command is already resolved")
+
+    monkeypatch.setattr("kicad_tools.zones.placement_fill.find_kicad_python", fail)
+
+
+def test_native_worker_launches_under_explicit_command(monkeypatch, tmp_path):
+    """An explicit native_python_command wins unchanged, and provenance records it."""
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    board, seen = _fake_native_launch(monkeypatch, tmp_path)
+    _forbid_discovery(monkeypatch)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    command = ["/explicit/python3", "-I"]
+    result = inspect_attributed_mask_geometry(
+        board, native_python_command=command, scratch_dir=tmp_path
+    )
+    assert seen["cmd"][:2] == command
+    assert result.provenance["native_python_command"] == command
+
+
+def test_native_worker_launches_in_pinned_container(monkeypatch, tmp_path):
+    """With KCT_KICAD_DOCKER=1 the worker runs as --entrypoint python3 in the image.
+
+    One bind of the stage directory makes the staged worker, board, request
+    and output all visible at their host paths; the config home is the pinned
+    process-shared one.
+    """
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    board, seen = _fake_native_launch(monkeypatch, tmp_path)
+    _forbid_discovery(monkeypatch)
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(
+        "kicad_tools.validate.mask_copper_geometry.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.process_config_home", lambda: cfg)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain._synced_model_dir", lambda: None)
+    result = inspect_attributed_mask_geometry(board, scratch_dir=tmp_path)
+    cmd = seen["cmd"]
+    entry = cmd.index("--entrypoint")
+    assert cmd[entry + 1] == "python3"
+    stage = Path(cmd[-1]).parent
+    assert f"{stage}:{stage}" in cmd
+    assert f"KICAD_CONFIG_HOME={cfg}" in cmd
+    assert result.provenance["native_python_command"] == cmd[:-4]
+    assert [Path(p).parent for p in cmd[-4:]] == [stage] * 4
+
+
+def test_native_worker_discovers_pcbnew_interpreter(monkeypatch, tmp_path):
+    """Without an explicit command or docker, discovery probes a plain pcbnew import."""
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    board, seen = _fake_native_launch(monkeypatch, tmp_path)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: False)
+    probes = []
+
+    def fake_find(probe):
+        probes.append(probe)
+        return Path("/opt/kicad/bin/python3")
+
+    monkeypatch.setattr("kicad_tools.zones.placement_fill.find_kicad_python", fake_find)
+    result = inspect_attributed_mask_geometry(board, scratch_dir=tmp_path)
+    assert seen["cmd"][0] == "/opt/kicad/bin/python3"
+    assert probes == ["import pcbnew"]
+    assert result.provenance["native_python_command"] == ["/opt/kicad/bin/python3"]
+
+
+def test_unqualified_discovered_interpreter_still_fails_version_binding(monkeypatch, tmp_path):
+    """A weak pcbnew-only probe never widens what a report can claim."""
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    board, seen = _fake_native_launch(monkeypatch, tmp_path, native_version="9.0.1")
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: False)
+    monkeypatch.setattr(
+        "kicad_tools.zones.placement_fill.find_kicad_python",
+        lambda probe: Path("/opt/old/bin/python3"),
+    )
+    result = inspect_attributed_mask_geometry(board, scratch_dir=tmp_path)
+    assert any("qualified KiCad plot profile" in e for e in result.errors)
+
+
+def test_resolve_native_python_explicit_wins(monkeypatch, tmp_path):
+    from kicad_tools.validate.mask_copper_geometry import (
+        _resolve_native_python_command,
+    )
+
+    _forbid_discovery(monkeypatch)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    assert _resolve_native_python_command(["/explicit/python3"], tmp_path) == (
+        ["/explicit/python3"],
+        None,
+    )
+
+
+def test_resolve_native_python_container_argv(monkeypatch, tmp_path):
+    from kicad_tools.validate.mask_copper_geometry import (
+        _resolve_native_python_command,
+    )
+
+    _forbid_discovery(monkeypatch)
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(
+        "kicad_tools.validate.mask_copper_geometry.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.process_config_home", lambda: cfg)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain._synced_model_dir", lambda: None)
+    command, reason = _resolve_native_python_command(None, tmp_path / "stage")
+    assert reason is None
+    entry = command.index("--entrypoint")
+    assert command[entry + 1] == "python3"
+    assert f"{tmp_path / 'stage'}:{tmp_path / 'stage'}" in command
+    assert f"KICAD_CONFIG_HOME={cfg}" in command
+
+
+def test_resolve_native_python_container_needs_docker_binary(monkeypatch, tmp_path):
+    """KCT_KICAD_DOCKER=1 without a docker executable falls back to discovery."""
+    import kicad_tools.validate.mask_copper_geometry as mcg
+
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(mcg.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        "kicad_tools.zones.placement_fill.find_kicad_python",
+        lambda probe: Path("/found/python3"),
+    )
+    assert mcg._resolve_native_python_command(None, tmp_path) == (
+        ["/found/python3"],
+        None,
+    )
+
+
+def test_resolve_native_python_unavailable_reason_names_the_fix(monkeypatch, tmp_path):
+    from kicad_tools.validate.mask_copper_geometry import (
+        _resolve_native_python_command,
+    )
+
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: False)
+    monkeypatch.setattr("kicad_tools.zones.placement_fill.find_kicad_python", lambda probe: None)
+    command, reason = _resolve_native_python_command(None, tmp_path)
+    assert command is None
+    assert "ModuleNotFoundError" not in reason
+    assert "native_python_command" in reason
+    assert "KCT_KICAD_DOCKER" in reason
+    assert "Install KiCad" in reason

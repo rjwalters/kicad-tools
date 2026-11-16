@@ -2084,12 +2084,27 @@ def _plan_declared_loops(
                 stuck.discard(v)
                 comp.add(v)
                 work.append(v)
+        ordered = sorted(
+            comp,
+            key=lambda i: f"{model.nodes[i].a}->{model.nodes[i].b} {model.nodes[i].layers[0]}",
+        )
         plan.uncut_loops.append(
             {
-                "segments": sorted(
+                "segments": [
                     f"{model.nodes[i].a}->{model.nodes[i].b} {model.nodes[i].layers[0]}"
-                    for i in comp
-                ),
+                    for i in ordered
+                ],
+                # Structured twins of ``segments`` so the CLI report can quote
+                # sheet positions (#8954). The stored frame stays
+                # board-relative, like every library value.
+                "segment_ends": [
+                    {
+                        "a": list(model.nodes[i].a),
+                        "b": list(model.nodes[i].b),
+                        "layer": model.nodes[i].layers[0],
+                    }
+                    for i in ordered
+                ],
                 "min_width": round(min(_width(model, i) for i in comp), 6),
                 "reason": (
                     f"cutting would leave a branch narrower than the declared "
@@ -2667,11 +2682,16 @@ def audit_loops_left(
     as an uncut loop (with the audit's witness) on a net prune has not already
     reported one for, so a prune run that reports no remaining loops never
     disagrees with ``pcb current-paths-audit``.  Copper is never cut here.
+
+    The witness text is rendered board-relative (origin ``(0, 0)``) on purpose:
+    every other ``uncut_loops[].segments`` entry, the ``witness`` dict beside it
+    and prune's ``stubs_added`` ends are all board-relative, so one
+    sheet-absolute entry would mix frames inside a single report (#8928).
     """
     from kicad_tools.router.current_paths import (
         STATUS_AMBIGUOUS,
-        _describe_witness,
         resolve_current_path,
+        witness_text,
     )
 
     seen = {str(u.get("net")) for u in reported}
@@ -2687,7 +2707,7 @@ def audit_loops_left(
         out.append(
             {
                 "net": spec.net_name,
-                "segments": [_describe_witness(w).strip(" []").removeprefix("witness: ")],
+                "segments": [witness_text(w)],
                 "min_width": round(float(cast("float", w.get("width", 0.0))), 6),
                 "reason": (
                     "the current-path audit still sees a loop/parallel path that "

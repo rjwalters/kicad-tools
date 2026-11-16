@@ -309,6 +309,8 @@ kct pcb reinforce board.kicad_pcb --net VBUS                        # ends mode 
 kct pcb reinforce board.kicad_pcb --net VBUS --current-paths current_paths.json
 kct pcb reinforce board.kicad_pcb --net VBUS --end-offset 2.0 --dry-run --format json
 kct pcb reinforce board.kicad_pcb --net VBUS --anchor-mode spaced --spacing 15
+kct pcb reinforce board.kicad_pcb --net VBUS --min-wire-length 0   # no 15 mm minimum
+kct pcb reinforce board.kicad_pcb --net VBUS --strategy auto        # copy short legs, wire long ones
 ```
 
 Two placement modes:
@@ -345,6 +347,57 @@ Two placement modes:
   ends and every `--spacing` mm (default 15) along the run. `--spacing` is
   ignored, with a warning, in `ends` mode.
 
+**Minimum wire length (#8915).** `--min-wire-length MM` defaults to **15.0** in
+`ends` mode: a wire needs a through-hole at each end, and each hole needs both
+outer layers and the inner planes clear, so the two rarely fit on a shorter
+link. A leg below the minimum is reported `unanchored`, with a reason naming
+the minimum, and gets no anchors, no solder-mask opening and no wire-list
+entry. `--min-wire-length 0` restores the pre-#8915 behaviour (every leg is a
+candidate). `--min-run-length` is an accepted alias for the same value; when
+both are given the larger wins. `--anchor-mode spaced` has **no** default
+minimum, so its output is unchanged, but a value given on either flag still
+applies to it. `--format json` reports `min_wire_length_mm` (what was asked
+for, null when neither flag was given) and `min_wire_length_effective_mm`
+(what was enforced for this mode).
+
+Where a path declared `reinforcement_eligible` has only a leg below the
+minimum, it now carries no wire, so `kct check`'s `reinforcement_incomplete`
+rule reports that net's `a` (no anchor holes) and `b` (no continuous mask
+opening) sub-checks as **warnings**. Drop the declaration for a link too short
+to carry a wire, or pass `--min-wire-length 0`.
+
+**Strategy (#8916).** `--strategy {wire,parallel,auto}` chooses how each leg
+is reinforced; `wire` (the buttress wire above) is the default and unchanged.
+`parallel` gives every selected leg a same-net, same-width copy of its
+polyline, vertex for vertex, on the opposite outer layer (`F.Cu` <-> `B.Cu`),
+with no anchors and no mask opening. The copy is tied to the leg at both ends
+-- by the plated through-hole pad or through via the leg ends on, else by a
+stitching via (at the vertex of a free end or junction, or just past an SMD
+pad, never in it; the copy then starts at that via) -- and by stitching vias
+at a nominal 5 mm pitch, never closer than `kct stitch`'s same-net via
+spacing. The vias are the board's default via from the design rules (minimum
+drill, larger of minimum diameter and drill plus two annular rings). Every
+copy track is checked against other-net copper on the copy layer (class
+floors, `.kicad_dru` rules, `--voltage-map` creepage) and against other nets'
+holes (KiCad's 0.25 mm hole-to-copper clearance), and every via like an
+anchor (hole-to-hole included). A copy that does not fit whole is refused --
+the leg is `unanchored`, `refused_copies` names the obstacle net, the rule and
+where -- and nothing is written for it. A leg on an inner layer is refused
+(`copy_geometry`). The minimum wire length does not filter `parallel` legs.
+`auto` gives `parallel` to a leg shorter than the minimum wire length (15 mm
+by default; `--min-wire-length 0` makes every leg a wire) and `wire` to the
+rest. `parallel` and `auto` need `--anchor-mode ends`: with `spaced` they exit
+1 with an error, since spaced mode has no legs and no default minimum for
+`auto` to compare against. Each leg reports its `strategy` (text and
+`--format json`, which also adds `strategy`, `copies`, `copies_placed` and
+`refused_copies`, and per leg `copy_status`, `copy_reason` and `copy`). A re-run
+adds no copper: the copy is found as the leg's coincident twin (status
+`copy`). `path_ampacity` credits the pair as a parallel group on its summed
+cross-section; a stitching via that pins the two branches mid-run is not
+judged as a layer change there (nor by `reinforcement_incomplete`'s `d`), while
+a tie via where the copy starts still is -- it carries the copy's share of the
+current.
+
 **Wire list sidecar (#8744).** Each non-dry-run `ends` pass writes or updates
 `<board>.reinforcement.json` (next to the `-o` output when given), `version: 1`,
 one entry per leg: `net`, `layer`, `kind`, `path` (first declared current path,
@@ -352,7 +405,16 @@ else null; `paths` lists all), `leg_start`/`leg_end`, `anchors` (two `{x,y}`,
 sheet-absolute), `length_mm` (along the leg), `straight_line_mm` (between the
 anchors), `wire_gauge_awg`, `bare_diameter_mm`, `mask_opening` (null until
 #8743) and `status` (legs that are `too_short`/`unhandled` are listed with no
-anchors). Re-running replaces a wire with the same net + layer + leg ends,
+anchors; a leg skipped by `--min-wire-length` is **omitted entirely** — the
+owner wants no wire there, so it is not on the cut list, #8915). A leg
+reinforced by `--strategy parallel` is recorded whatever its length, with
+`strategy: "parallel"`, `copy_status`, `copy_layer`, `polyline`,
+`copy_segments`, `stitch_vias` and the via size; a record without `strategy`
+is a wire, so older sidecars read unchanged. `--clear` / `--replace` remove
+exactly the recorded copy tracks and stitching vias (under the same
+connectivity guard as anchors) and the record, and `reinforcement_incomplete`
+does not ask such a leg -- nor its copy -- for anchors or a mask opening, once
+it finds every recorded copy segment on the board. Re-running replaces a wire with the same net + layer + leg ends,
 keeps other nets' wires and never duplicates; output is sorted and has no
 timestamps. `spaced` mode has no legs and writes no sidecar. `--format json`
 embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
@@ -361,9 +423,11 @@ embeds the list as `wires`; `kct pcb reinforce BOARD --list-wires [--net NET]
 Declared current paths that do not resolve (moved/removed pad, ambiguous
 loop) are listed under `unresolved_paths` and warned about on stderr; they
 get no anchors and the exit code stays 0. `--format json` adds `anchor_mode`,
-`end_offset_mm`, `unresolved_paths` and `legs` (`net`, `layer`, `kind`,
+`end_offset_mm`, `min_wire_length_mm`, `min_wire_length_effective_mm`,
+`unresolved_paths` and `legs` (`net`, `layer`, `kind`,
 `length_mm`, `width_mm`, `anchors`, `status` in
-`full|partial|unanchored|too_short|unhandled`, `reason`, `paths`,
+`full|partial|unanchored|too_short|unhandled` (`parallel|copy` under
+`--strategy`, #8916), `reason`, `paths`,
 `polyline`) to the existing keys; coordinates are sheet-absolute.
 
 **Solder-mask opening (#8743).** In `ends` mode (default; `--no-mask-opening`

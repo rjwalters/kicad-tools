@@ -361,6 +361,45 @@ it worth benchmarking against `kct route`, particularly on the dense \
 boards where grid search runs out of time.\
 """
 
+[projects.weaveengine]
+name = "WeaveEngine"
+slug = "c28ba/WeaveEngine"
+repo_url = "https://github.com/c28ba/WeaveEngine"
+vcs = "github"
+category = "autorouter"
+relation = "peer"
+verdict = "ideas-adopted"
+# The LICENSE file is the GPLv3 text; the README's License section declares
+# "version 3 or (at your option) any later version". GitHub's detector reports
+# the deprecated "GPL-3.0", recorded below so `ecosystem_refresh.py` does not
+# report a phantom `license-changed`.
+license = "GPL-3.0-or-later"
+upstream_license_detected = "GPL-3.0"
+license_compat = "copyleft-ideas-only"
+language = "Python"
+stars = 71
+last_push = "2026-11-15"
+last_verified = "2026-11-16"
+research_docs = ["docs/research/weaveengine-topology-first-evaluation.md"]
+summary = """
+topology-first DSN/SES autorouter: a planar embedding of all nets is chosen \
+jointly before any geometry (which side of every pad and placed trace each \
+connection passes, so crossings are unrepresentable by construction), then \
+traces are drawn as taut clearance-bound curves. The triangulate-and-\
+string-pull half is one we already ship (mesh router, #4267); the \
+transferable delta is the global ordering step -- joint candidate selection, \
+airwire-separation and severance costs, regret ordering -- which our \
+evaluation (#8993) turned into follow-up issues against the epic #5509 \
+ordering class. No diff pairs, length matching, impedance or net-class \
+priority; pours delegated to KiCad; vias are its own documented weak \
+subsystem.\
+"""
+reeval_trigger = """
+A release that demonstrates steady multi-layer completion (its vias story \
+settled) on boards like our dense fleet cases would justify a black-box run \
+through `benchmarks/external/fleet_routers/` as a fourth adapter.\
+"""
+
 # ------------------------------------------------------------ design-as-code
 
 [projects.atopile]

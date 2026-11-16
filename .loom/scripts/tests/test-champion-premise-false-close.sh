@@ -79,15 +79,6 @@ CLAUDE_MD="$REPO_ROOT/CLAUDE.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_doc_contains() {
-    local file="$1" needle="$2" msg="$3"
-    if grep -qF -- "$needle" "$file"; then
-        pass "$msg"
-    else
-        fail "$msg (missing literal in $file: $needle)"
-    fi
-}
-
 # --- classify_recurring_findings(): the function under test -----------------
 #
 # Mirrors champion-issue-promo.md's "Premise-false close gate" bash block

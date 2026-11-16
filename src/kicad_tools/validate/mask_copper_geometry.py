@@ -26,6 +26,69 @@ from .mask_geometry import _validate_structure
 #: mask geometry from an unverified plot profile.
 QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6")
 
+#: Custom-rule constraint names this checker may reason about during native
+#: object attribution. Module-level so the non-native suite can pin membership
+#: directly (tests/test_mask_copper.py); admission is deliberate, argued, and
+#: parity-tested, never derived from what the ``.kicad_dru`` generator happens
+#: to emit. Every entry is a minimum/maximum a DRC run *measures* against
+#: already plotted material; none of them is an input to the plot itself, so
+#: native mask/copper object geometry is identical with and without the rule
+#: present. Constraints that do feed the plot -- zone fill shaping
+#: (``zone_connection``, ``thermal_relief_gap``, ``thermal_spoke_width``,
+#: ``min_resolved_spokes``) above all -- must stay out, and so must any
+#: constraint whose native context has not actually been exercised by a
+#: parity test. Do not widen this set to quiet a failing board.
+SAFE_RULE_CONSTRAINTS = frozenset(
+    {
+        "clearance",
+        "physical_clearance",
+        "edge_clearance",
+        "hole_clearance",
+        "hole_to_hole",
+        # Measured hole-to-edge minimum over already-plotted holes and outline; no mask/copper input (#8948).
+        "physical_hole_clearance",
+        "track_width",
+        "hole_size",
+        "via_diameter",
+        "annular_width",
+        # Silkscreen-to-object minimum, the rule ordinary factory
+        # ``.kicad_dru`` files ship (#5818). It is geometry-neutral for
+        # this checker twice over: it constrains silkscreen, which is
+        # neither a mask nor a copper layer, and it is a measured
+        # minimum rather than a plot input. Parity is pinned by
+        # tests/test_mask_copper_native.py.
+        "silk_clearance",
+        # Silkscreen text minima, silkscreen-scoped by their own conditions; silk_clearance's double argument applies verbatim (#8948).
+        "text_thickness",
+        "text_height",
+        # Measured minimum intra-pair gap the router laid each coupled pair
+        # at (#6443), one rule per pair. A DRC measurement over
+        # already-routed track material; the gap was an input to the router,
+        # not to the plot, and the rule recording it changes nothing the
+        # plotter emits. Parity-pinned by tests/test_mask_copper_native.py
+        # (#8973).
+        "diff_pair_gap",
+        # Pair-quality maxima the protocol table or the net class resolves
+        # (#6443): uncoupled length and skew are measured over the lengths
+        # of already-plotted track, and via_count counts vias that already
+        # exist. None of the three is a plot input. ``skew`` is emitted both
+        # bare and with ``(within_diff_pairs)``; both forms measure the same
+        # plotted lengths. Parity-pinned by tests/test_mask_copper_native.py
+        # (#8973).
+        "diff_pair_uncoupled",
+        "skew",
+        "via_count",
+        # A keepout prohibition (#6039), argued on its own terms: unlike
+        # every other entry it is not a dimensional minimum at all but a ban
+        # on item PRESENCE inside a referenced rule area. DRC reports items
+        # of the listed kinds there; the rule never moves, resizes, removes
+        # or adds any plotted object, so the plot is identical with or
+        # without it. Parity-pinned by tests/test_mask_copper_native.py
+        # (#8973).
+        "disallow",
+    }
+)
+
 
 @dataclass
 class AttributedMaskGeometry:
@@ -37,6 +100,53 @@ class AttributedMaskGeometry:
 
 def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
+
+
+#: The native per-object worker needs pcbnew only -- unlike the selective
+#: zone-fill probe, it uses neither wx nor the fill API. A candidate whose
+#: KiCad build is unqualified is still rejected later by the
+#: ``QUALIFIED_NATIVE_VERSIONS`` binding, so the weak probe never silently
+#: widens what a report can claim (#8946).
+_PCBNEW_PROBE = "import pcbnew"
+
+
+def _resolve_native_python_command(
+    native_python_command: list[str] | None, stage: Path
+) -> tuple[list[str] | None, str | None]:
+    """Resolve the interpreter argv for the native per-object worker.
+
+    Priority: an explicit ``native_python_command`` wins; then, when the
+    Docker fallback is enabled and docker is available, the pinned image's
+    ``python3`` (which imports pcbnew) with *stage* bind-mounted, so the
+    staged worker, board, request and output are all visible to the
+    container; then host discovery of an interpreter that passes
+    ``_PCBNEW_PROBE``. ``/usr/bin/python3`` is therefore used only when it
+    really imports pcbnew, never as a blind fallback.
+
+    Returns ``(argv, None)`` on success, or ``(None, reason)`` naming what to
+    install or configure.
+    """
+    if native_python_command:
+        return list(native_python_command), None
+    from kicad_tools.cli.kicad_toolchain import (
+        docker_fallback_enabled,
+        docker_kicad_cli_prefix,
+        process_config_home,
+    )
+    from kicad_tools.zones.placement_fill import find_kicad_python
+
+    if docker_fallback_enabled() and shutil.which("docker"):
+        return docker_kicad_cli_prefix([stage], process_config_home(), entrypoint="python3"), None
+    found = find_kicad_python(probe=_PCBNEW_PROBE)
+    if found is not None:
+        return [str(found)], None
+    return None, (
+        "Native per-object geometry unavailable: no Python interpreter with "
+        "pcbnew was found. Install KiCad (its bundled python3 provides "
+        "pcbnew), set KCT_KICAD_DOCKER=1 to run the worker in the pinned "
+        "kicad/kicad image (docker required), or set an explicit "
+        "native_python_command in the kct.mask-copper-request.v1 request."
+    )
 
 
 def inspect_attributed_mask_geometry(
@@ -121,39 +231,13 @@ def inspect_attributed_mask_geometry(
         # equivalent misclassification to fix.
         result.errors.extend(f"{e['feature']}: {e['reason']}" for e in exported.unsupported)
         # Native pcbnew LoadBoard has no exposed general DRC-expression loader.
-        # These rule constraints do not change plotted shape. Anything else is
-        # an explicit context gap, even if a whole-layer union happens to agree.
-        #
-        # Every entry is a minimum/maximum a DRC run *measures* against already
-        # plotted material; none of them is an input to the plot itself, so
-        # native mask/copper object geometry is identical with and without the
-        # rule present. Constraints that do feed the plot -- zone fill shaping
-        # (``zone_connection``, ``thermal_relief_gap``, ``thermal_spoke_width``,
-        # ``min_resolved_spokes``) above all -- must stay out, and so must any
-        # constraint whose native context has not actually been exercised by a
-        # parity test. Do not widen this set to quiet a failing board.
+        # Anything outside SAFE_RULE_CONSTRAINTS is an explicit context gap,
+        # even if a whole-layer union happens to agree; the set's admission
+        # criterion lives with the constant.
         if captured[".kicad_dru"]:
             rule_tree = parse_string("(rules " + captured[".kicad_dru"].decode() + ")")
-            safe = {
-                "clearance",
-                "physical_clearance",
-                "edge_clearance",
-                "hole_clearance",
-                "hole_to_hole",
-                "track_width",
-                "hole_size",
-                "via_diameter",
-                "annular_width",
-                # Silkscreen-to-object minimum, the rule ordinary factory
-                # ``.kicad_dru`` files ship (#5818). It is geometry-neutral for
-                # this checker twice over: it constrains silkscreen, which is
-                # neither a mask nor a copper layer, and it is a measured
-                # minimum rather than a plot input. Parity is pinned by
-                # tests/test_mask_copper_native.py.
-                "silk_clearance",
-            }
             for constraint in rule_tree.find_all("constraint"):
-                if constraint.get_string(0) not in safe:
+                if constraint.get_string(0) not in SAFE_RULE_CONSTRAINTS:
                     result.errors.append(
                         "Native object rule context unsupported: " + str(constraint.get_string(0))
                     )
@@ -214,7 +298,11 @@ def inspect_attributed_mask_geometry(
         request = stage / "request.json"
         request.write_text(json.dumps({"source_uuids": [f["source_uuid"] for f in inventory]}))
         output = stage / "objects.json"
-        command = list(native_python_command or ["/usr/bin/python3"])
+        command, unavailable = _resolve_native_python_command(native_python_command, stage)
+        if command is None:
+            assert unavailable is not None
+            result.errors.append(unavailable)
+            return result
         process = subprocess.run(
             [*command, str(staged_worker), str(board), str(request), str(output)],
             capture_output=True,
@@ -279,12 +367,32 @@ def inspect_attributed_mask_geometry(
                 margin_source = "board:pad_to_mask_clearance=" + str(board_margin.get_value(0))
             else:
                 margin_source = "native-default (no explicit object/footprint/board margin)"
+            # Source identity for triage messages (issue #9038): the owning
+            # footprint's Reference and the pad number, so a finding can say
+            # `pad:R1/1` instead of an opaque UUID. Additive to the internal
+            # object dict; the report schema does not carry it.
+            pad_ref = None
+            if feature["kind"].startswith("pad:"):
+                number = feature["node"].get_string(0)
+                reference = None
+                if parent_node is not None:
+                    reference = next(
+                        (
+                            child.get_string(1)
+                            for child in parent_node.iter_children()
+                            if child.name == "property" and child.get_string(0) == "Reference"
+                        ),
+                        None,
+                    )
+                if reference and number:
+                    pad_ref = f"{reference}/{number}"
             result.objects[identity] = {
                 **{k: v for k, v in feature.items() if k != "node"},
                 "net": item["net"],
                 "layers_geometry": geometries,
                 "margin_mm": item["margin_mm"],
                 "margin_source": margin_source,
+                "pad_ref": pad_ref,
             }
         # Verify source and all sidecar bytes (including their absence) after
         # both native operations. The author files themselves were never passed.

@@ -90,6 +90,55 @@ CHECK_STRAY = "stray"
 _Point = tuple[float, float]
 
 
+def _poly_total(poly: list[_Point]) -> float:
+    """Total arc length of a polyline."""
+    return sum(math.dist(a, b) for a, b in zip(poly, poly[1:], strict=False))
+
+
+def _arc_along(poly: list[_Point], p: _Point) -> float:
+    """Arc length of the polyline point nearest ``p``."""
+    best_t, best_d, walked = 0.0, float("inf"), 0.0
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:], strict=False):
+        dx, dy = x1 - x0, y1 - y0
+        seg2 = dx * dx + dy * dy
+        u = 0.0
+        if seg2 > 1e-18:
+            u = max(0.0, min(1.0, ((p[0] - x0) * dx + (p[1] - y0) * dy) / seg2))
+        d = math.hypot(p[0] - (x0 + u * dx), p[1] - (y0 + u * dy))
+        if d < best_d:
+            best_d, best_t = d, walked + u * math.sqrt(seg2)
+        walked += math.hypot(dx, dy)
+    return best_t
+
+
+def _poly_between(poly: list[_Point], t0: float, t1: float) -> list[_Point]:
+    """The polyline between arc lengths ``t0 <= t1`` (interpolated ends)."""
+    total = _poly_total(poly)
+    t0, t1 = max(0.0, min(total, t0)), max(0.0, min(total, t1))
+    if t1 - t0 <= 1e-9 or len(poly) < 2:
+        return [poly[0], poly[-1]]
+    out = [_point_at_arc_on(poly, t0)]
+    walked = 0.0
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:], strict=False):
+        walked += math.hypot(x1 - x0, y1 - y0)
+        if t0 + 1e-9 < walked < t1 - 1e-9:
+            out.append((x1, y1))
+    out.append(_point_at_arc_on(poly, t1))
+    return out
+
+
+def _point_at_arc_on(poly: list[_Point], t: float) -> _Point:
+    """Interpolate the point at arc length ``t`` along a polyline."""
+    walked = 0.0
+    for (x0, y0), (x1, y1) in zip(poly, poly[1:], strict=False):
+        seg_len = math.hypot(x1 - x0, y1 - y0)
+        if walked + seg_len >= t - 1e-9 and seg_len > 1e-12:
+            frac = max(0.0, min(1.0, (t - walked) / seg_len))
+            return (x0 + frac * (x1 - x0), y0 + frac * (y1 - y0))
+        walked += seg_len
+    return poly[-1]
+
+
 def reinforcement_waived_nets(entries: Iterable[Any]) -> frozenset[str]:
     """Nets whose ampacity waiver cites reinforcement.
 
@@ -148,14 +197,6 @@ class _WirePlan:
     located: dict[str, dict[str, list[Segment]]] = field(default_factory=dict)
     no_wire: list[PathResolution] = field(default_factory=list)
     skipped: list[PathResolution] = field(default_factory=list)
-
-
-_FLOAT_RE = re.compile(r"-?\d+\.\d{4,}")
-
-
-def _round_floats(text: str) -> str:
-    """Round float literals with more than 3 decimals to 3 dp (witness coordinates)."""
-    return _FLOAT_RE.sub(lambda m: f"{float(m.group()):.3f}", text)
 
 
 class ReinforcementIncompleteRule(DRCRule):
@@ -365,8 +406,12 @@ class ReinforcementIncompleteRule(DRCRule):
         )
 
     def _emit_skipped(self, results: DRCResults, pcb: PCB, res: PathResolution) -> None:
+        from kicad_tools.router.current_paths import describe_witness
+
         net = res.spec.net_name
-        reason = _round_floats(res.reason)
+        # ``reason`` is coordinate-free; the witness is quoted at the sheet
+        # position, like every other coordinate in this rule's text (#8928).
+        reason = res.reason + describe_witness(res.witness, (self._ox, self._oy))
         results.add(
             DRCViolation(
                 rule_id=self.rule_id,
@@ -385,10 +430,18 @@ class ReinforcementIncompleteRule(DRCRule):
         )
 
     def _on_path(self, pcb: PCB, res: PathResolution) -> _Point:
-        """A point on the path in sheet coordinates, rounded to 3 dp.
+        """A point on the path in board-relative coordinates, rounded to 3 dp.
 
         The resolved source/sink pad when there is one, else the start of the
-        net's first routed segment; the board origin only for a net with no copper.
+        net's first routed segment; board-relative ``(0, 0)`` -- which
+        absolutizes to the board origin -- only for a net with no copper.
+
+        This is a ``DRCViolation.location`` value, so it must NOT absolutize:
+        :meth:`~kicad_tools.validate.checker.DRCChecker._absolutize` adds
+        ``board_origin`` back exactly once for every rule-backed ``check_*``.
+        Calling :meth:`_abs` here shifted ``[no_wire]`` / ``[skipped]``
+        locations by one origin too many (Issue #8912). Use :meth:`_fmt` --
+        which does absolutize -- for message text instead.
         """
         end = res.source or res.sink
         if end is not None:
@@ -399,8 +452,7 @@ class ReinforcementIncompleteRule(DRCRule):
             if seg is None:
                 return (0.0, 0.0)
             pt = seg.start
-        x, y = self._abs(pt)
-        return (round(x, 3), round(y, 3))
+        return (round(pt[0], 3), round(pt[1], 3))
 
     # ------------------------------------------------------------- per net
 
@@ -464,6 +516,97 @@ class ReinforcementIncompleteRule(DRCRule):
                 if math.dist(a, ends[0]) < 0.05 and math.dist(b, ends[1]) < 0.05:
                     return bound
         return None
+
+    def _parallel_reinforced(self, pcb: PCB, leg: _Leg) -> bool:
+        """True when a placed parallel-copy record covers ``leg`` (Issue #8916).
+
+        The record is not taken on trust: the leg must lie on the recorded
+        polyline, on the record's leg layer or copy layer, AND the copy layer
+        must carry same-net copper along the span the record promises the
+        copy -- the recorded copy segments' extent, or, when every piece was
+        already on the board and none was recorded (a leg doubled by hand,
+        issue #8951), the whole polyline -- AND so must the original leg
+        (each piece of the recorded polyline on the record's leg layer).
+        Coverage along the length, not just the recorded pieces' endpoints,
+        also bites when an unrecorded piece of the copy goes missing. A wire
+        leg, a refused copy, or a copy or original someone deleted is checked
+        as a wire as before.
+        """
+        from kicad_tools.pcb.reinforcement_sidecar import is_parallel
+
+        tol = leg.width / 2.0 + ANCHOR_ON_LEG_SLACK_MM
+        for w in self.wires:
+            try:
+                if w.get("net") != leg.net or not is_parallel(w):
+                    continue
+                if w.get("copy_status") != "placed" or leg.layer not in (
+                    w["layer"],
+                    w["copy_layer"],
+                ):
+                    continue
+                poly = [(p["x"] - self._ox, p["y"] - self._oy) for p in w["polyline"]]
+                copy_layer = w["copy_layer"]
+                recs = [
+                    (
+                        (r["start"]["x"] - self._ox, r["start"]["y"] - self._oy),
+                        (r["end"]["x"] - self._ox, r["end"]["y"] - self._oy),
+                    )
+                    for r in w.get("copy_segments") or []
+                ]
+            except (KeyError, TypeError, AttributeError):
+                continue
+            if len(poly) < 2:
+                continue
+            if any(self._dist_to_polyline(poly, p) > tol for p in leg.points):
+                continue
+            netobj = pcb.get_net_by_name(leg.net)
+
+            def board_on(layer: str, _netobj=netobj) -> list[tuple[_Point, _Point]]:
+                return [
+                    (s.start, s.end)
+                    for s in pcb.segments
+                    if s.layer == layer
+                    and (
+                        s.net_name == leg.net
+                        or (_netobj is not None and s.net_number == _netobj.number)
+                    )
+                ]
+
+            # Where the copy must cover the polyline: the recorded segments'
+            # extent when some were written this pass -- a copy whose ends
+            # are tied by stitching vias deliberately stops short of the
+            # vertices -- else the whole polyline, the only promise there is
+            # when every piece predates the tool (an empty ``copy_segments``).
+            total = _poly_total(poly)
+            arcs = [_arc_along(poly, q) for rec in recs for q in rec]
+            t0, t1 = (min(arcs), max(arcs)) if arcs else (0.0, total)
+            if t1 - t0 <= 1e-9:
+                t0, t1 = 0.0, total
+            span = _poly_between(poly, t0, t1)
+            copy_present = self._polyline_covered(span, board_on(copy_layer))
+            # The original leg it doubles must still be there too: the
+            # recorded polyline covered by same-net copper on the record's leg
+            # layer along its length. A lone copy whose original was deleted is
+            # a plain leg again.
+            if copy_present and self._polyline_covered(poly, board_on(w["layer"])):
+                return True
+        return False
+
+    @staticmethod
+    def _polyline_covered(poly: list[_Point], lines: list[tuple[_Point, _Point]]) -> bool:
+        """True when every point along ``poly`` (sampled 0.5 mm) lies on one of ``lines``."""
+        if not lines:
+            return False
+        for (x0, y0), (x1, y1) in zip(poly, poly[1:], strict=False):
+            n = max(1, math.ceil(math.hypot(x1 - x0, y1 - y0) / 0.5))
+            for k in range(n + 1):
+                p = (x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n)
+                if all(
+                    ReinforcementIncompleteRule._dist_to_polyline([a, b], p) > 0.05
+                    for a, b in lines
+                ):
+                    return False
+        return True
 
     def _gauge(self, net: str, layer: str, points: list[_Point]) -> int:
         """Wire gauge from the sidecar: end-point match, else net+layer, else 16."""
@@ -529,10 +672,13 @@ class ReinforcementIncompleteRule(DRCRule):
         changes: dict[tuple[float, float], Any] = {}
         for res in resolutions:
             for change in res.layer_changes:
+                change_vias.extend(v[0] for v in change.vias)
+            # (d) judges only series layer changes: a stitching via inside
+            # doubled copper is not where the current leaves a layer (#8916).
+            for change in res.series_layer_changes:
                 changes.setdefault(
                     (round(change.position[0], 3), round(change.position[1], 3)), change
                 )
-                change_vias.extend(v[0] for v in change.vias)
 
         def is_change_via(p: _Point) -> bool:
             return any(math.dist(p, q) < 0.05 for q in change_vias)
@@ -558,6 +704,10 @@ class ReinforcementIncompleteRule(DRCRule):
         claimed: set[int] = set()
         drills_seen: set[float] = set()
         for leg in legs:
+            # Issue #8916: a leg reinforced by a parallel copy -- the original
+            # or the copy itself -- is not a wire: (a)-(c) do not apply to it.
+            if self._parallel_reinforced(pcb, leg):
+                continue
             drill = anchor_drill_for_awg(leg.gauge)
             drills_seen.add(round(drill, 4))
             self._check_leg(

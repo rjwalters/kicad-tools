@@ -85,13 +85,12 @@ Representative tools by category:
 **Terminal tools**:
 - `list_terminals` - List all active terminals
 - `get_terminal_output` - Read terminal output
-- `get_selected_terminal` - Get current terminal info
 - `send_terminal_input` - Execute commands in terminals
 - `create_terminal` / `configure_terminal` / `restart_terminal` - Manage terminal sessions
 
 **UI / state tools**:
-- `get_ui_state` - Comprehensive UI state (workspace, config, terminals) — this
-  replaced the removed per-file readers
+- `get_ui_state` - Comprehensive UI state (workspace, config, engine liveness) —
+  this replaced the removed per-file readers
 - `get_heartbeat` - Check whether the Loom app is running
 
 **Durable watches**: `register_watch` / `list_watches` / `remove_watch` — operator

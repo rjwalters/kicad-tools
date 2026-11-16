@@ -132,13 +132,23 @@ loom_cpu_inflight_sweeps() {
     bin="$(loom_locate_daemon_bin "$root" 2>/dev/null || true)"
     [[ -n "$bin" && -x "$bin" ]] || { echo 1; return 0; }
 
-    # Hard bound on the probe: this runs on the critical path of every spawn,
-    # and an unresponsive daemon must cost a few seconds, never the sweep.
-    local probe_secs="${LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS:-10}"
-    [[ "$probe_secs" =~ ^[0-9]+$ ]] && ((probe_secs >= 1)) || probe_secs=10
+    # The CLI owns the real bound: `loom-daemon status` sizes its own IPC
+    # round-trip budget from the registered-root count and host load
+    # (`cli::status::resolve_status_timeout`, #8224, capped at 45s). A fixed
+    # literal here that is SHORTER than that budget abandons the call while the
+    # daemon is still building the reply (the daemon then logs `Broken pipe`)
+    # and the spawn silently gets the undivided `1` budget (#13809). So this
+    # `bounded_run` is only a hang guard with margin ABOVE the CLI's maximum
+    # budget; an unresponsive daemon is still bounded by the CLI itself.
+    local probe_secs="${LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS:-60}"
+    [[ "$probe_secs" =~ ^[0-9]+$ ]] && ((probe_secs >= 1)) || probe_secs=60
 
+    # Request only the sections read below (#10787): concurrent spawns then
+    # share one scoped single-flight build instead of N full status reports.
+    # A daemon too old to know `--section` exits non-zero -> fail-safe `1`.
     local status_json
-    status_json="$(bounded_run "$probe_secs" "$bin" status --json 2>/dev/null || true)"
+    status_json="$(bounded_run "$probe_secs" "$bin" status --json \
+        --section in_flight,unregistered_locked 2>/dev/null || true)"
     [[ -n "$status_json" ]] || { echo 1; return 0; }
 
     # `in_flight` is the daemon's union across every managed root, so this is

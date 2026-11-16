@@ -188,10 +188,11 @@ class PathAmpacityRule(DRCRule):
         )
 
         audit = audit_current_paths(pcb, self.specs)
+        origin: tuple[float, float] = getattr(pcb, "board_origin", None) or (0.0, 0.0)
 
         for resolution in audit.resolutions:
             if resolution.status in (STATUS_UNRESOLVED, STATUS_AMBIGUOUS):
-                results.add(self._unresolved_violation(resolution))
+                results.add(self._unresolved_violation(resolution, origin))
                 continue
 
             spec = resolution.spec
@@ -201,7 +202,9 @@ class PathAmpacityRule(DRCRule):
             if spec.pulsed_a is not None and spec.pulse_duration_s is None:
                 results.add(self._unchecked_fusing_violation(spec))
 
-            for change in resolution.layer_changes:
+            # A stitching via inside doubled copper carries no series current
+            # (issue #8916); every other layer change is judged as before.
+            for change in resolution.series_layer_changes:
                 capacity_a = change.current_capacity_a()
                 if capacity_a < thermal.current_a:
                     results.add(self._layer_change_violation(spec, thermal, change, capacity_a))
@@ -347,10 +350,20 @@ class PathAmpacityRule(DRCRule):
             items=(spec.name, spec.net_name),
         )
 
-    def _unresolved_violation(self, resolution: PathResolution) -> DRCViolation:
+    def _unresolved_violation(
+        self, resolution: PathResolution, origin: tuple[float, float] = (0.0, 0.0)
+    ) -> DRCViolation:
+        """Report a path that could not be checked.
+
+        ``location`` is ``None``, so the message is this finding's only
+        coordinate surface: the witness is quoted at its sheet position
+        (``origin`` is ``PCB.board_origin``), never board-relative (#8928).
+        """
+        from kicad_tools.router.current_paths import describe_witness
+
         spec = resolution.spec
         status = resolution.status
-        reason = resolution.reason
+        reason = resolution.reason + describe_witness(resolution.witness, origin)
         return DRCViolation(
             rule_id=self.rule_id,
             severity="error",

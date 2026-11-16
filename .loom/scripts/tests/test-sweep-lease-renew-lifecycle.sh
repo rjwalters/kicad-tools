@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # test-sweep-lease-renew-lifecycle.sh - Lifecycle tests for sweep-lease-renew.sh
-# (#10229), split from test-sweep-lease-renew.sh to keep that suite under the
-# file-size ratchet.
+# (#10229), split from test-sweep-lease-renew.sh.
 #
 # The ownership and completion DECISIONS live in `loom-daemon lease renewer`
 # (unit-tested in loom-daemon/src/cli/lease_renewer/tests.rs). This suite pins

@@ -1,5 +1,8 @@
 """Source-qualified mask exposure and public coverage controls."""
 
+import re
+from pathlib import Path
+
 import pytest
 
 from kicad_tools.validate.mask_copper import MaskCopperAssessment, MaskCopperPolicy
@@ -57,7 +60,14 @@ def test_actual_cli_missing_policy_never_prints_or_serializes_pass(tmp_path, cap
     )
     data = json.loads(capsys.readouterr().out)
     assert not data["summary"]["passed"]
-    assert data["violations"] == []
+    # Issue #8914: a check that could not run no longer serializes as zero
+    # findings -- that silence was read as "kct sees no exposure here" in a
+    # rule-by-rule comparison against JLCDFM.  Info severity, so the verdict
+    # above is unchanged.
+    assert [(v["rule_id"], v["severity"]) for v in data["violations"]] == [
+        ("mask_to_copper_incomplete", "info")
+    ]
+    assert "policy" in data["violations"][0]["message"]
     assert data["mask_copper_assessments"][0]["coverage"] == "not_run"
     assert (
         json.loads(report.read_text())["mask_copper_assessments"] == data["mask_copper_assessments"]
@@ -105,6 +115,50 @@ def test_same_net_and_overlapped_neighbor_remain_independent():
     assert not result.passed
     assert result.measurements[0].conductor_uuid == other
     assert result.measurements[0].exposed_area_mm2 == pytest.approx(0.12, abs=0.000002)
+
+
+@pytest.mark.parametrize(
+    "conductor_x,exposed_area_mm2",
+    [(1.05, 0.01), (1.08, 0.004)],
+)
+def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
+    conductor_x, exposed_area_mm2
+):
+    """A same-net trace inside a pad's mask opening is an error (issues #8914, #8932).
+
+    This is the shape JLCDFM reports as danger-level "solder mask opening
+    exposing trace": a track passing an SMD pad of *its own net* within the
+    pad's mask margin, without overlapping the pad. It is measured exactly like
+    cross-net exposure -- the measurement loop never reads ``net``, whose only
+    gate is the ``MaskEscapeIntent`` path. Guards against a same-net exclusion
+    being reintroduced into that loop, which would silently drop the
+    measurement and the finding while still reporting complete coverage.
+    """
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, other = toy_geometry(conductor_x=conductor_x, overlap_owner=False)
+    result = assess_attributed_geometry(
+        geometry,
+        # Interim JLCPCB values written literally: a future threshold table
+        # must not silently move what this test asserts.
+        MaskCopperPolicy(
+            clearance_mm=0.09,
+            source="order",
+            process="process",
+            revision="rev",
+            warning_clearance_mm=0.15,
+        ),
+    )
+    assert result.coverage == "complete"
+    assert len(result.measurements) == 1
+    measurement = result.measurements[0]
+    assert measurement.conductor_uuid == other
+    assert measurement.disposition == "violation"
+    assert measurement.exposed_area_mm2 == pytest.approx(exposed_area_mm2, abs=0.000002)
+    assert [(v.rule_id, v.severity) for v in assessment_results(result).violations] == [
+        ("mask_to_copper", "error"),
+        ("mask_to_copper_openings", "info"),
+    ]
 
 
 @pytest.mark.parametrize("mode", ["valid", "stale", "wrong_uuid", "wrong_layer", "disconnected"])
@@ -289,6 +343,77 @@ def test_sidecar_and_plot_bindings_invalidate_escape_intent(field):
     assert result.measurements[0].disposition == "violation"
 
 
+def _managed_constraint_names() -> set[str]:
+    """Constraint names kct's writers emit into managed ``.kicad_dru`` text.
+
+    Sources are the four writers that build a board's managed ``.kicad_dru``:
+    ``dru_generator.py`` and the shipped tier files under
+    ``manufacturers/rules/`` (#8948), the router diff-pair block (#6443) and
+    the keepout block (#6039) -- the latter two derived by rendering the
+    same functions the writers call, in both pair shapes kct emits
+    (KiCad-recognised and router-recorded, #6429).
+    """
+    manufacturers = Path(__file__).resolve().parent.parent / "src" / "kicad_tools" / "manufacturers"
+    text = (manufacturers / "dru_generator.py").read_text(encoding="utf-8")
+    names = set(re.findall(r"\(constraint\s+([a-z_]+)", text))
+    for tier in sorted((manufacturers / "rules").glob("*.kicad_dru")):
+        names |= set(re.findall(r"\(constraint\s+([a-z_]+)", tier.read_text(encoding="utf-8")))
+    from kicad_tools.manufacturers.keepout_dru import KeepoutDruRule
+    from kicad_tools.manufacturers.netclass_dru import (
+        PairLimits,
+        render_pair_gap_rule,
+        render_pair_limit_rules,
+    )
+
+    rendered = [render_pair_gap_rule("A_P", "A_N", 0.2)]
+    rendered += render_pair_limit_rules(
+        PairLimits(p="A_P", n="A_N", uncoupled_mm=5.0, skew_mm=0.5, max_vias=4)
+    )
+    rendered += render_pair_limit_rules(PairLimits(p="X_POS", n="X_NEG", skew_mm=1.0, max_vias=6))
+    rendered.append(
+        KeepoutDruRule(
+            name="kct keepout all",
+            reference="u",
+            disallow=("track", "via", "pad", "zone", "footprint"),
+        ).render()
+    )
+    for chunk in rendered:
+        names |= set(re.findall(r"\(constraint\s+([a-z_]+)", chunk))
+    return names
+
+
+def test_rule_context_allowlist_admits_managed_vocabulary_and_rejects_plot_shaping():
+    """Pin the hoisted native rule-context allowlist without a native interpreter.
+
+    The whole constraint vocabulary kct writes into a managed ``.kicad_dru``
+    -- fab floors and tier files (#8948), diff-pair gap and pair limits
+    (#6443) and keepout ``disallow`` rules (#6039) -- must be admitted, so a
+    board carrying only kct's own output never reports ``Native object rule
+    context unsupported``. The expectation side is derived at test time from
+    the same writers, so a name newly emitted by any of them turns the first
+    assertion red until its geometry-neutrality is argued and parity-tested,
+    which is the friction the allowlist exists to enforce. The plot-shaping
+    zone-fill constraints and the mask/paste-shaping names must stay outside
+    either way.
+    """
+    from kicad_tools.validate.mask_copper_geometry import SAFE_RULE_CONSTRAINTS
+
+    emitted_by_kct = _managed_constraint_names()
+    assert emitted_by_kct, "managed derivation found no constraints; did sources move?"
+    assert emitted_by_kct <= SAFE_RULE_CONSTRAINTS
+    assert not SAFE_RULE_CONSTRAINTS & {
+        "zone_connection",
+        "thermal_relief_gap",
+        "thermal_spoke_width",
+        "min_resolved_spokes",
+        "bridged_mask",
+        "solder_mask_expansion",
+        "solder_mask_sliver",
+        "solder_paste_abs_margin",
+        "solder_paste_rel_margin",
+    }
+
+
 @pytest.mark.parametrize("change", ["missing", "coordinate", "layer", "duplicate"])
 def test_native_worker_data_validation_is_fail_visible(change):
     import json
@@ -418,8 +543,43 @@ def test_warning_tier_does_not_fail_verdict(gap, expected, passed):
     assert result.passed is passed
     severities = {v.severity for v in assessment_results(result).violations}
     assert severities <= (
-        {"warning"} if expected == "warning" else {"error"} if expected else set()
+        {"warning", "info"} if expected == "warning" else {"error", "info"} if expected else set()
     )
+
+
+@pytest.mark.parametrize(
+    ("coverage", "reasons"),
+    [
+        ("incomplete", ["native unavailable"]),
+        ("incomplete", []),
+        ("not_run", ["An explicit process-specific mask-to-copper policy is required"]),
+    ],
+)
+def test_incomplete_coverage_is_reported_as_a_finding(coverage, reasons):
+    """Issue #8914: "never ran" must not be indistinguishable from "found nothing"."""
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    found = assessment_results(
+        MaskCopperAssessment(coverage=coverage, reasons=list(reasons))
+    ).violations
+    assert [(v.rule_id, v.severity) for v in found] == [("mask_to_copper_incomplete", "info")]
+    assert coverage in found[0].message
+    for reason in reasons:
+        assert reason in found[0].message
+    if not reasons:
+        assert "no reason recorded" in found[0].message
+
+
+def test_complete_assessment_with_no_findings_reports_nothing():
+    """The other half of #8914: a run that did happen and found nothing stays silent."""
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(conductor_x=1.1 + 0.2)
+    policy = MaskCopperPolicy(0.09, "order", "process", "rev", warning_clearance_mm=0.15)
+    assessment = assess_attributed_geometry(geometry, policy)
+    assert assessment.coverage == "complete"
+    assert not assessment.measurements
+    assert not assessment_results(assessment).violations
 
 
 def test_warning_clearance_must_not_be_below_clearance():
@@ -536,3 +696,603 @@ def test_distance_prefilter_keeps_every_in_reach_pair_and_the_pair_count(near_ga
     assert result.evaluated_pairs == len(geometry.objects) - 1
     assert [m.conductor_uuid for m in result.measurements] == ([near] if measured else [])
     assert all(m.opening_uuids == (owner,) for m in result.measurements)
+
+
+# ---------------------------------------------------------------------------
+# Issue #8924: coverage.mask_to_copper must reflect the assessment's own
+# ``coverage``, never report ``checked`` for an assessment that could not
+# evaluate the board.
+# ---------------------------------------------------------------------------
+
+
+def _patch_assessment(monkeypatch, **kwargs):
+    """Make the checker's native call return a controlled assessment.
+
+    The row under test must not depend on whether *this host* has a qualified
+    KiCad plot profile: CI's pinned image reports ``10.0.6`` (qualified) while
+    a distro build reports ``10.0.6-10.0.6~ubuntu24.04.1`` (not qualified), so
+    a test that drove the real native path would assert opposite states on the
+    two. ``check_mask_to_copper`` is imported inside
+    :meth:`DRCChecker.check_mask_to_copper`, so patching the module attribute
+    takes effect at call time.
+    """
+
+    def fake(path, policy=None, intents=(), **native_options):
+        return MaskCopperAssessment(policy=policy, **kwargs)
+
+    monkeypatch.setattr("kicad_tools.validate.mask_copper.check_mask_to_copper", fake)
+
+
+def _run_mfr_check(tmp_path, capsys, *extra):
+    import json
+
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    main([str(board), "--drc-only", "--format", "json", "--mfr", "jlcpcb", *extra])
+    out = capsys.readouterr().out
+    return json.loads(out[out.index("{") :])
+
+
+@pytest.mark.parametrize(
+    ("coverage", "state"),
+    [("complete", "checked"), ("incomplete", "unknown"), ("not_run", "unknown")],
+)
+def test_coverage_row_follows_assessment_coverage(tmp_path, capsys, monkeypatch, coverage, state):
+    """AC1/AC2 + the ``not_run`` mapping: the row tracks ``assessment.coverage``."""
+    _patch_assessment(monkeypatch, coverage=coverage, reasons=["native unavailable"])
+    data = _run_mfr_check(tmp_path, capsys)
+
+    assert data["mask_copper_assessments"][0]["coverage"] == coverage
+    row = data["coverage"]["mask_to_copper"]
+    assert row["state"] == state
+    assert row["blocking"] is True
+    # Blocking propagation: an unevaluated blocking category must reach the
+    # summary gates read by ``kct readiness`` / ``/kct:tapeout``.
+    blocking_unknown = data["summary"]["coverage_blocking_unknown"]
+    assert ("mask_to_copper" in blocking_unknown) == (state == "unknown")
+
+
+def test_incomplete_row_carries_the_assessment_reasons(tmp_path, capsys, monkeypatch):
+    """Reason plumbing: the row explains itself from the assessment's reasons."""
+    _patch_assessment(
+        monkeypatch,
+        coverage="incomplete",
+        reasons=["F.Cu: Invalid region contour", "B.Cu: Invalid region contour"],
+    )
+    row = _run_mfr_check(tmp_path, capsys)["coverage"]["mask_to_copper"]
+
+    assert row["reason"] and "Invalid region contour" in row["reason"]
+    assert row["status"].startswith("unknown:")
+    assert "incomplete" in row["reason"]
+
+
+def test_checked_row_has_no_reason(tmp_path, capsys, monkeypatch):
+    _patch_assessment(monkeypatch, coverage="complete")
+    row = _run_mfr_check(tmp_path, capsys)["coverage"]["mask_to_copper"]
+
+    assert row == {"status": "checked", "state": "checked", "reason": None, "blocking": True}
+
+
+def test_coverage_row_keys_on_coverage_never_on_passed(tmp_path, capsys, monkeypatch):
+    """The regression test that separates a correct fix from one keyed on ``passed``.
+
+    ``assessment.passed`` is strictly stronger than ``coverage == "complete"``:
+    it also requires empty reasons and no violation/uncertain measurement.  A
+    board whose mask check ran fine and *found real violations* is a
+    ``checked`` row carrying error findings -- reporting ``unknown`` there
+    would invert the row's meaning.
+    """
+    from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+    violation = MaskCopperMeasurement(
+        opening_uuids=("00000000-0000-0000-0000-000000000001",),
+        conductor_uuid="00000000-0000-0000-0000-000000000002",
+        mask_side="F.Mask",
+        copper_layer="F.Cu",
+        location_mm=(1.0, 2.0),
+        clearance_mm=0.01,
+        exposed_area_mm2=0.5,
+        relation="overlap",
+        disposition="violation",
+        uncertainty_mm=0.0,
+        opening_kind="pad:rect",
+        mask_defined=False,
+        margin_provenance="native",
+    )
+    _patch_assessment(monkeypatch, coverage="complete", measurements=[violation])
+    data = _run_mfr_check(tmp_path, capsys, "--allow-incomplete")
+
+    assert data["mask_copper_assessments"][0]["passed"] is False
+    assert data["coverage"]["mask_to_copper"]["state"] == "checked"
+    assert "mask_to_copper" not in data["summary"]["coverage_blocking_unknown"]
+    errors = [
+        v
+        for v in data["violations"]
+        if v["rule_id"] == "mask_to_copper" and v["severity"] == "error"
+    ]
+    assert errors, "the violation must still surface as an error finding"
+
+
+def test_only_mask_to_copper_without_policy_is_unknown_not_checked(tmp_path, capsys):
+    """End-to-end ``not_run``: requested with no policy, so it never ran.
+
+    No monkeypatching -- ``--only mask_to_copper`` with no ``--mfr`` leaves the
+    request without a policy, and ``check_mask_to_copper`` refuses rather than
+    evaluating.  A *requested* check that never ran is not a pass.
+    """
+    import json
+
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    main([str(board), "--drc-only", "--format", "json", "--only", "mask_to_copper"])
+    out = capsys.readouterr().out
+    data = json.loads(out[out.index("{") :])
+
+    assert data["mask_copper_assessments"][0]["coverage"] == "not_run"
+    assert data["coverage"]["mask_to_copper"]["state"] == "unknown"
+    assert "policy" in data["coverage"]["mask_to_copper"]["reason"]
+
+
+def test_opt_in_skip_rows_are_unchanged(tmp_path, capsys):
+    """The pre-run ``skipped`` branches must not be touched by this change."""
+    import json
+
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+
+    def run(*extra):
+        main([str(board), "--drc-only", "--format", "json", *extra])
+        out = capsys.readouterr().out
+        return json.loads(out[out.index("{") :])["coverage"]["mask_to_copper"]
+
+    # Both land on the pre-run opt-in branch: ``--skip`` suppresses #8842's
+    # default request, so the category is never requested in the first place
+    # and the loop's opt-in ``continue`` fires before the ``--skip`` branch.
+    assert run()["status"] == "skipped:opt_in:--mask-copper-config"
+    assert (
+        run("--mfr", "jlcpcb", "--skip", "mask_to_copper")["status"]
+        == "skipped:opt_in:--mask-copper-config"
+    )
+
+
+def test_mask_copper_unknown_deduplicates_and_truncates_reasons():
+    """The live incomplete case has 19 reasons, 13 identical; reports land in files."""
+    from kicad_tools.validate import coverage as cov
+
+    repeated = ["F.Mask: unattributed native mask region"] * 13
+    result = cov.mask_copper_unknown("incomplete", [*repeated, "a", "b", "c", "d"])
+
+    assert result.state == cov.UNKNOWN and result.blocking
+    assert result.reason.count("unattributed native mask region") == 1
+    assert "(+2 more)" in result.reason
+    assert len(result.reason) < 200
+
+
+def test_mask_copper_unknown_tolerates_no_reasons():
+    from kicad_tools.validate import coverage as cov
+
+    result = cov.mask_copper_unknown("not_run", [])
+    assert result.state == cov.UNKNOWN and "not_run" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Issue #8949: the CLI's human-readable ``Mask-to-copper:`` stdout stanza
+# must collapse repeated reasons (one shared collapse rule with the
+# coverage row) and print one actionable remediation line.
+# ---------------------------------------------------------------------------
+
+
+def test_collapse_reasons_is_the_shared_dedup_truncate_rule():
+    """One collapse rule, two consumers: coverage row and stdout stanza."""
+    from kicad_tools.validate.coverage import collapse_reasons
+
+    repeated = ["F.Mask: unattributed native mask region"] * 13
+    collapsed = collapse_reasons([*repeated, "a", "b", "c", "d"], limit=3)
+    assert collapsed == ("F.Mask: unattributed native mask region; a; b (+2 more)")
+    # First-occurrence order is preserved.
+    assert collapsed.index("F.Mask") < collapsed.index("a")
+    # Exactly one reason: no spurious suffix.
+    assert collapse_reasons(["only"], limit=3) == "only"
+    # No reasons at all: a placeholder, never an empty string or "(+0 more)".
+    assert collapse_reasons([], limit=3) == "no reason reported"
+    assert "(+0 more)" not in collapse_reasons(["x", "x"], limit=5)
+
+
+def test_incomplete_assessment_carries_a_remediation_hint():
+    """AC: an incomplete assessment names what to configure, not just what failed."""
+    incomplete = MaskCopperAssessment(
+        coverage="incomplete", reasons=["F.Mask: unattributed native mask region"]
+    )
+    assert incomplete.remediation is not None
+    assert "KCT_KICAD_DOCKER" in incomplete.remediation
+    # A complete assessment needs no remediation; not_run and incomplete do
+    # (the dataclass default is ``not_run``, which is exactly "never ran").
+    assert MaskCopperAssessment(coverage="complete").remediation is None
+    assert MaskCopperAssessment().remediation is not None
+    # And the hint must never enter the serialized JSON payload: that dict
+    # is round-trip validated against kct.mask-copper-assessment.v1.
+    assert "remediation" not in incomplete.to_dict()
+
+
+def _run_mask_stdout(tmp_path, capsys, monkeypatch, reasons, *extra):
+    """Run a --drc-only human-format check with a controlled incomplete assessment."""
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    _patch_assessment(monkeypatch, coverage="incomplete", reasons=list(reasons))
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    main([str(board), "--drc-only", "--mfr", "jlcpcb", *extra])
+    return capsys.readouterr().out
+
+
+def _mask_stdout_stanza(out: str) -> str:
+    """The ``Mask-to-copper:`` stdout stanza, through its Remediation line.
+
+    Scoped because the ``mask_to_copper_incomplete`` info *finding* (which
+    ships the full un-collapsed reasons list inside its message, in the
+    violations table and the JSON report) repeats the same strings.
+    """
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Mask-to-copper:"))
+    stanza = []
+    for line in lines[start:]:
+        stanza.append(line)
+        if line.strip().startswith("Remediation:"):
+            break
+    else:
+        raise AssertionError("no Remediation line after the Mask-to-copper header")
+    return "\n".join(stanza)
+
+
+def test_stdout_collapses_repeated_reasons_and_shows_distinct_causes(tmp_path, capsys, monkeypatch):
+    """Hundreds of repeats collapse to one bounded line; distinct causes survive.
+
+    Mirrors the reporter's run: 13 repeats of one line plus enough distinct
+    causes to exceed the stdout bound, so both the collapse and the
+    ``(+N more)`` remainder are exercised.
+    """
+    repeated = ["F.Mask: unattributed native mask region"] * 13
+    distinct = [f"cause {i}" for i in range(9)]
+    out = _run_mask_stdout(tmp_path, capsys, monkeypatch, [*repeated, *distinct])
+    stanza = _mask_stdout_stanza(out)
+
+    headers = [line for line in stanza.splitlines() if line.startswith("Mask-to-copper:")]
+    assert len(headers) == 1
+    assert "incomplete" in headers[0]
+    # The repeated reason appears exactly once inside the stanza.
+    assert stanza.count("F.Mask: unattributed native mask region") == 1
+    # Distinct causes up to the bound are visible, the remainder counted.
+    assert "cause 0" in stanza and "cause 7" not in stanza
+    assert "(+2 more)" in stanza
+
+
+def test_stdout_complete_assessment_has_no_placeholder_line(tmp_path, capsys, monkeypatch):
+    """Issue #8991: ``complete`` + no reasons prints only the header line."""
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    _patch_assessment(monkeypatch, coverage="complete", reasons=[])
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    main([str(board), "--drc-only", "--mfr", "jlcpcb"])
+    lines = capsys.readouterr().out.splitlines()
+    idx = next(i for i, ln in enumerate(lines) if ln.startswith("Mask-to-copper: complete"))
+    following = lines[idx + 1] if idx + 1 < len(lines) else ""
+    assert "no reason reported" not in following
+    assert "Remediation:" not in following
+    assert not any("no reason reported" in ln for ln in lines)
+
+
+def test_stdout_single_and_empty_reason_lists_stay_clean(tmp_path, capsys, monkeypatch):
+    """Edge cases: exactly one reason (no spurious count), no reasons at all."""
+    stanza = _mask_stdout_stanza(
+        _run_mask_stdout(tmp_path, capsys, monkeypatch, ["F.Cu: Invalid region contour"])
+    )
+    assert stanza.count("F.Cu: Invalid region contour") == 1
+    assert "(+" not in stanza
+    assert "Remediation:" in stanza
+
+    stanza = _mask_stdout_stanza(_run_mask_stdout(tmp_path, capsys, monkeypatch, []))
+    assert "no reason reported" in stanza
+    assert "Remediation:" in stanza
+
+
+# ---------------------------------------------------------------------------
+# Issue #9038: findings must be triageable (owner, copper kind, net relation)
+# and must not read as board defects while the assessment is incomplete.
+# ---------------------------------------------------------------------------
+
+
+_POLICY = MaskCopperPolicy(0.09, "order", "process", "rev")
+
+
+def _violation(**extra):
+    from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+    fields = {
+        "opening_uuids": ("00000000-0000-0000-0000-000000000001",),
+        "conductor_uuid": "00000000-0000-0000-0000-000000000002",
+        "mask_side": "F.Mask",
+        "copper_layer": "F.Cu",
+        "location_mm": (1.0, 2.0),
+        "clearance_mm": 0.01,
+        "exposed_area_mm2": 0.5,
+        "relation": "overlap",
+        "disposition": "violation",
+        "uncertainty_mm": 0.0,
+        "opening_kind": "pad:rect",
+        "mask_defined": False,
+        "margin_provenance": "native",
+    }
+    fields.update(extra)
+    return MaskCopperMeasurement(**fields)
+
+
+def _opening_geometry(pad, trace, *, pad_net="N", trace_net="N", trace_kind="segment"):
+    """A pad with a mask opening and one conductor, both shapes given directly."""
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+
+    owner, other = "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"
+    opening = box(-0.1, -0.1, 1.1, 1.1)
+    exported = ExportedMaskGeometry(
+        "a" * 64,
+        None,
+        None,
+        "10.0.5",
+        {},
+        layers={"F.Mask": opening, "F.Cu": unary_union([pad, trace])},
+    )
+    geometry = AttributedMaskGeometry(
+        exported,
+        {
+            owner: {
+                "kind": "pad:rect",
+                "net": pad_net,
+                "pad_ref": "R1/1",
+                "layers_geometry": {"F.Mask": opening, "F.Cu": pad},
+                "margin_mm": {"F.Mask": 0.1},
+            },
+            other: {
+                "kind": trace_kind,
+                "net": trace_net,
+                "layers_geometry": {"F.Cu": trace},
+                "margin_mm": {},
+            },
+        },
+    )
+    return geometry, owner, other
+
+
+def _mask_findings(results):
+    return [v for v in results.violations if v.rule_id == "mask_to_copper"]
+
+
+@pytest.mark.parametrize("coverage", ["incomplete", "not_run"])
+def test_incomplete_coverage_never_emits_error_severity_findings(coverage):
+    """Issue #9038 AC: until coverage is complete, findings stay warnings."""
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    assessment = MaskCopperAssessment(
+        coverage=coverage,
+        reasons=["native unavailable"],
+        policy=_POLICY,
+        measurements=[_violation()],
+    )
+    found = _mask_findings(assessment_results(assessment))
+    assert [(v.rule_id, v.severity) for v in found] == [("mask_to_copper", "warning")]
+    assert all("provisional: coverage incomplete" in v.message for v in found)
+
+
+def test_complete_coverage_keeps_error_severity_without_provisional_mark():
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    assessment = MaskCopperAssessment(
+        coverage="complete",
+        policy=_POLICY,
+        measurements=[_violation()],
+    )
+    found = _mask_findings(assessment_results(assessment))
+    assert [(v.rule_id, v.severity) for v in found] == [("mask_to_copper", "error")]
+    assert all("provisional" not in v.message for v in found)
+
+
+def test_incomplete_run_downgrades_geometry_measurements_to_provisional_warnings():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(overlap_owner=True)
+    geometry.errors.append("F.Mask: unattributed native mask region")
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    assert assessment.coverage == "incomplete"
+    found = _mask_findings(assessment_results(assessment))
+    assert found
+    assert all(v.severity == "warning" for v in found)
+    assert all("provisional: coverage incomplete" in v.message for v in found)
+
+
+def test_finding_message_names_owner_conductor_net_and_relation():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, owner, _ = toy_geometry(overlap_owner=True)
+    geometry.objects[owner]["pad_ref"] = "R1/1"
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    found = _mask_findings(assessment_results(assessment))
+    assert len(found) == 1
+    message = found[0].message
+    assert "opening pad:R1/1" in message
+    assert "exposed copper segment" in message
+    assert "net N" in message
+    assert "same-net own-pad entry" in message
+
+
+def test_finding_without_pad_ref_names_the_opening_kind_and_uuid():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(overlap_owner=True)
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    found = _mask_findings(assessment_results(assessment))
+    assert len(found) == 1
+    assert "opening pad:rect[00000000]" in found[0].message
+
+
+def test_own_pad_entry_and_pass_through_are_distinguished():
+    """The curator's rule: endpoint within the opening = own-pad entry."""
+    from shapely.geometry import box
+
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    # Trace terminates inside the opening (endpoint cap at x=0.5).
+    geometry, _, _ = _opening_geometry(box(0, 0, 1, 1), box(0.5, 0.4, 2.0, 0.6))
+    own = assess_attributed_geometry(geometry, _POLICY).measurements[0]
+    assert own.same_net is True and own.own_pad_entry is True
+
+    # Trace crosses the whole opening; both endpoints lie outside it.
+    geometry, _, _ = _opening_geometry(box(0, 0, 1, 1), box(-0.2, 0.4, 1.3, 0.6))
+    through = assess_attributed_geometry(geometry, _POLICY).measurements[0]
+    assert through.same_net is True and through.own_pad_entry is False
+
+    own_labels = [
+        v.message
+        for v in assessment_results(
+            assess_attributed_geometry(
+                _opening_geometry(box(0, 0, 1, 1), box(0.5, 0.4, 2.0, 0.6))[0], _POLICY
+            )
+        ).violations
+        if v.rule_id == "mask_to_copper"
+    ]
+    through_labels = [
+        v.message
+        for v in assessment_results(
+            assess_attributed_geometry(
+                _opening_geometry(box(0, 0, 1, 1), box(-0.2, 0.4, 1.3, 0.6))[0], _POLICY
+            )
+        ).violations
+        if v.rule_id == "mask_to_copper"
+    ]
+    assert "same-net own-pad entry" in own_labels[0]
+    assert "same-net pass-through" in through_labels[0]
+
+
+def test_via_inside_its_own_pad_opening_is_own_pad_entry():
+    """A via has no trace endpoint; its center stands in for one (documented)."""
+    from shapely.geometry import Point
+
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = _opening_geometry(
+        Point(0.5, 0.5).buffer(1.0), Point(0.5, 0.5).buffer(0.15), trace_kind="via"
+    )
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    assert assessment.measurements[0].conductor_kind == "via"
+    assert assessment.measurements[0].own_pad_entry is True
+    found = _mask_findings(assessment_results(assessment))
+    assert "same-net own-pad entry" in found[0].message
+
+
+def test_different_net_conductor_is_labelled_and_never_own_pad():
+    from shapely.geometry import box
+
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = _opening_geometry(box(0, 0, 1, 1), box(0.5, 0.4, 2.0, 0.6), trace_net="M")
+    measurement = assess_attributed_geometry(geometry, _POLICY).measurements[0]
+    assert measurement.same_net is False and measurement.own_pad_entry is None
+    found = _mask_findings(assessment_results(assess_attributed_geometry(geometry, _POLICY)))
+    assert "different-net" in found[0].message
+    assert "same-net" not in found[0].message
+
+
+def test_summary_reports_per_opening_counts():
+    """One pad with many findings reads as one opening (issue #9038 AC)."""
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    assessment = MaskCopperAssessment(
+        coverage="complete",
+        policy=_POLICY,
+        measurements=[
+            _violation(opening_uuids=("u1",), owner_ref="R1/1"),
+            _violation(
+                opening_uuids=("u1",),
+                conductor_uuid="00000000-0000-0000-0000-000000000003",
+                owner_ref="R1/1",
+            ),
+            _violation(
+                opening_uuids=("u2",),
+                conductor_uuid="00000000-0000-0000-0000-000000000004",
+                owner_ref="R2/1",
+                opening_kind="pad:circle",
+            ),
+        ],
+    )
+    summaries = [
+        v
+        for v in assessment_results(assessment).violations
+        if v.rule_id == "mask_to_copper_openings"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0].severity == "info"
+    assert "3 findings across 2 mask openings" in summaries[0].message
+    assert "pad:R1/1 x2" in summaries[0].message
+    assert "pad:R2/1 x1" in summaries[0].message
+
+
+def test_no_measurements_means_no_summary_finding():
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    assessment = MaskCopperAssessment(coverage="complete", policy=_POLICY)
+    assert not list(assessment_results(assessment).violations)
+
+
+def test_v1_payload_without_new_fields_loads_and_round_trips():
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
+    payload = {
+        "schema": "kct.mask-copper-assessment.v1",
+        "coverage": "complete",
+        "reasons": [],
+        "policy": None,
+        "binding": None,
+        "measurements": [
+            {
+                "opening_uuids": ["00000000-0000-0000-0000-000000000001"],
+                "conductor_uuid": "00000000-0000-0000-0000-000000000002",
+                "mask_side": "F.Mask",
+                "copper_layer": "F.Cu",
+                "location_mm": [1.0, 2.0],
+                "clearance_mm": 0.01,
+                "exposed_area_mm2": 0.5,
+                "relation": "overlap",
+                "disposition": "violation",
+                "uncertainty_mm": 0.0,
+                "opening_kind": "pad:rect",
+                "mask_defined": False,
+                "margin_provenance": "native",
+            }
+        ],
+        "intent_audit": [],
+        "geometry_provenance": {},
+        "evaluated_pairs": 0,
+    }
+    assessment = MaskCopperAssessment.from_dict(payload)
+    measurement = assessment.measurements[0]
+    assert measurement.owner_net is None
+    assert measurement.conductor_net is None
+    assert measurement.conductor_kind is None
+    assert measurement.same_net is None
+    assert measurement.own_pad_entry is None
+    assert measurement.owner_ref is None
+    reloaded = MaskCopperAssessment.from_dict(assessment.to_dict())
+    assert reloaded.measurements[0].to_dict() == measurement.to_dict()

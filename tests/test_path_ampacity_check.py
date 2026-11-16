@@ -613,3 +613,57 @@ class TestDoubledCopper:
         pcb.add_trace(("J1", "1"), ("J2", "1"), width=3.5, layer="B.Cu", net="NET1")
         rule = PathAmpacityRule(specs=[_trunk_spec(15.0)])
         assert rule.check(pcb, _design_rules_2oz()).errors
+
+
+# --------------------------------------------------------------------------
+# A width-swap via between doubled stretches (Issue #8950 part b)
+# --------------------------------------------------------------------------
+
+
+def _width_swap_pcb(*, swap: bool) -> PCB:
+    """Two doubled stretches meeting at one shared via (Issue #8950 (b)).
+
+    Both sides of the via are doubled copper (wide on one layer, narrow on
+    the other). With ``swap`` the split flips across the via -- wide F.Cu /
+    narrow B.Cu, then narrow F.Cu / wide B.Cu -- so current must cross
+    layers at the via to follow the wider copper. Without it the same split
+    continues through the via, which is the benign stitching shape.
+    """
+    wide, narrow = 5.0, 2.0
+    f_second, b_second = (narrow, wide) if swap else (wide, narrow)
+    pcb = PCB.create(width=200, height=100, center=False)
+    _add_pad_footprint(pcb, ref="J1", x=20, y=50, net="NET1")
+    _add_pad_footprint(pcb, ref="J2", x=44, y=50, net="NET1")
+    pcb.add_via(32, 50, size=0.6, drill=0.3, net="NET1")
+    pcb.add_trace((20, 50), (32, 50), width=wide, layer="F.Cu", net="NET1")
+    pcb.add_trace((32, 50), (44, 50), width=f_second, layer="F.Cu", net="NET1")
+    pcb.add_trace((20, 50), (32, 50), width=narrow, layer="B.Cu", net="NET1")
+    pcb.add_trace((32, 50), (44, 50), width=b_second, layer="B.Cu", net="NET1")
+    return pcb
+
+
+class TestWidthSwapVia:
+    def test_width_swap_at_a_shared_via_is_judged(self) -> None:
+        """The swap via carries real redistribution current, so it stays a
+        series layer change and is judged on the path's current."""
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        pcb = _width_swap_pcb(swap=True)
+        resolution = resolve_current_path(pcb, _trunk_spec(15.0))
+        (change,) = resolution.series_layer_changes
+        assert change.count == 1 and change.position == pytest.approx((32.0, 50.0))
+        errors = PathAmpacityRule(specs=[_trunk_spec(15.0)]).check(pcb, _design_rules_2oz()).errors
+        assert len(errors) == 1
+        assert "changes layer" in errors[0].message and "1 via(s)" in errors[0].message
+
+    def test_matching_split_through_the_shared_via_stays_silent(self) -> None:
+        """The control: same split on both sides, so the via only equalises
+        the two branches -- no series layer change, no finding."""
+        from kicad_tools.router.current_paths import resolve_current_path
+
+        pcb = _width_swap_pcb(swap=False)
+        resolution = resolve_current_path(pcb, _trunk_spec(15.0))
+        assert resolution.series_layer_changes == ()
+        assert (
+            PathAmpacityRule(specs=[_trunk_spec(15.0)]).check(pcb, _design_rules_2oz()).errors == []
+        )

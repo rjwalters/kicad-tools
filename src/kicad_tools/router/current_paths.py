@@ -244,8 +244,10 @@ __all__ = [
     "ThermalDesignCurrent",
     "UnmodeledCopper",
     "LayerChange",
+    "MinimumWidth",
     "audit_current_paths",
     "current_paths_sidecar_candidates",
+    "describe_witness",
     "discover_current_paths_sidecar",
     "dump_current_path_specs",
     "load_current_path_specs",
@@ -254,12 +256,19 @@ __all__ = [
     "reinforcement_path_resolutions",
     "resolve_current_path",
     "unmodeled_copper",
+    "witness_text",
 ]
 
 # Coordinate rounding for graph-node identity. Matches the tolerance
 # ``pcb/reinforce.py::_chain_polylines`` already uses to re-match router
 # segments back to schema segments.
 _COORD_DECIMALS = 6
+
+# Rounding for :attr:`MinimumWidth.position`, matching the 4 decimals
+# ``_layer_changes`` already rounds :attr:`LayerChange.position` to.
+# Coarser than node identity on purpose: a reported position is a figure a
+# human reads off a board, not a graph key.
+_POSITION_DECIMALS = 4
 
 # Slack on pad-extent containment (:func:`_pad_covers`), in mm. Absorbs
 # floating-point error in the pad-center/rotation transform only -- it is far
@@ -803,6 +812,44 @@ class ParallelGroup:
         return "parallel group " + " + ".join(parts)
 
 
+def _segment_midpoint(segment: Segment) -> tuple[float, float]:
+    """Midpoint of ``segment`` in **board** coordinates (mm).
+
+    Board coordinates, like every other position this module reports
+    (:attr:`LayerChange.position`, the ambiguity witness): a consumer that
+    prints sheet coordinates adds the board origin itself (#8798).
+    """
+    (x1, y1), (x2, y2) = segment.start, segment.end
+    return (
+        round((x1 + x2) / 2.0, _POSITION_DECIMALS),
+        round((y1 + y2) / 2.0, _POSITION_DECIMALS),
+    )
+
+
+@dataclass(frozen=True)
+class MinimumWidth:
+    """The narrowest copper on a resolved path (issue #8917).
+
+    Attributes:
+        width_mm: The narrowest width along the whole path. A deliberately
+            doubled stretch (:class:`ParallelGroup`) contributes its
+            **summed** width -- the same expression ``path_ampacity``
+            prints for that group -- not one branch's width, so a 2 x 1.0 mm
+            run counts as 2.0 mm rather than 1.0 mm.
+        layer: Copper layer of the element that set ``width_mm``. For a
+            parallel group, the layer of its narrowest branch's pinch
+            segment.
+        position: Midpoint of that segment, in **board** coordinates (mm).
+        parallel_group: True when ``width_mm`` is a group's summed width,
+            so a reader never mistakes it for one trace's width.
+    """
+
+    width_mm: float
+    layer: str
+    position: tuple[float, float]
+    parallel_group: bool = False
+
+
 @dataclass(frozen=True)
 class LayerChange:
     """One layer change on a resolved path, with the vias that carry it.
@@ -838,6 +885,16 @@ class LayerChange:
         return sum(via_barrel_current_capacity(v[1]) for v in self.vias)
 
 
+#: Clearance allowance (mm) in the packed tie-row gap bound of
+#: :func:`_layer_changes` (#8950): two neighbouring row vias may sit at most
+#: an average pad diameter plus this apart. Rows are placed by ``reinforce``
+#: at the same-net minimum centre spacing (pad + clearance, floored by
+#: hole-to-hole), so any real clearance value fits under this bound, while
+#: the distributed stitching pitch of ``STITCH_PITCH_MM = 5.0`` mm stays
+#: well outside it.
+_TIE_ROW_GAP_CLEARANCE_MM = 0.5
+
+
 def _layer_changes(
     pcb: PCB,
     net_name: str,
@@ -849,9 +906,14 @@ def _layer_changes(
     A same-net via is a layer-change via when path segments on two different
     layers both touch it. Only vias that are *proved parallel* share a
     change: the members of one ``_ViaArray`` (already established by
-    ``resolve_current_path``) are one change whose capacity is summed. Every
-    other layer-change via is its own change, in path order -- vias in series
-    each carry the full path current, however close together they sit.
+    ``resolve_current_path``) are one change whose capacity is summed, and so
+    is a packed tie row -- a maximal run of layer-change vias that sits on
+    continuous path copper of both joined layers, close enough together to
+    act as one structure, with a via where a parallel branch begins or ends
+    among them (#8950). Both layers' copper runs over the whole row, so the
+    transfer is distributed across the barrels, not series through one.
+    Every other layer-change via is its own change, in path order -- vias in
+    series each carry the full path current, however close together they sit.
     """
     net = pcb.get_net_by_name(net_name)
     array_of: dict[tuple[float, float], int] = {
@@ -870,10 +932,87 @@ def _layer_changes(
         layers = list(dict.fromkeys(layer for _, layer in touching))
         if len(layers) >= 2:
             found.append((min(i for i, _ in touching), via, layers[0], layers[1]))
+
+    def _row_terminus(item: tuple[int, Via, str, str]) -> bool:
+        """True when a parallel branch begins or ends at this via (#8950).
+
+        Geometric proxy: on exactly one joined layer every touching path
+        segment stops at the via (the branch's copper ends there) while the
+        other layer's copper passes through it.
+        """
+        via, layers = item[1], (item[2], item[3])
+        all_end: dict[str, bool] = {}
+        passes: dict[str, bool] = {}
+        for seg in segments:
+            if point_to_segment_distance(*via.position, *seg.start, *seg.end) > 0.01:
+                continue
+            if seg.layer not in layers or not via_spans_layer(via.layers, seg.layer):
+                continue
+            at_end = (
+                min(math.dist(via.position, seg.start), math.dist(via.position, seg.end)) <= 0.01
+            )
+            all_end[seg.layer] = all_end.get(seg.layer, True) and at_end
+            passes[seg.layer] = passes.get(seg.layer, False) or not at_end
+        ending = [layer for layer in layers if all_end.get(layer, False)]
+        return len(ending) == 1 and passes.get(
+            next(layer for layer in layers if layer not in ending), False
+        )
+
+    def _row_link(a: tuple[int, Via, str, str], b: tuple[int, Via, str, str]) -> bool:
+        """True when vias ``a``/``b`` could sit in one packed tie row.
+
+        Same layer pair, centres within the packed-row gap bound (an average
+        pad plus a clearance allowance -- well under the distributed stitch
+        pitch), and one path segment on each joined layer touching both vias,
+        so both layers' copper runs continuously between them.
+        """
+        if {a[2], a[3]} != {b[2], b[3]}:
+            return False
+        if math.dist(a[1].position, b[1].position) > (
+            (a[1].size + b[1].size) / 2.0 + _TIE_ROW_GAP_CLEARANCE_MM
+        ):
+            return False
+        return all(
+            any(
+                seg.layer == layer
+                and point_to_segment_distance(*a[1].position, *seg.start, *seg.end) <= 0.01
+                and point_to_segment_distance(*b[1].position, *seg.start, *seg.end) <= 0.01
+                for seg in segments
+            )
+            for layer in (a[2], a[3])
+        )
+
+    singles = [
+        (n, item) for n, item in enumerate(found) if _node_key(item[1].position) not in array_of
+    ]
+    rows: list[list[tuple[int, tuple[int, Via, str, str]]]] = []
+    row_of: dict[int, int] = {}
+    run: list[tuple[int, tuple[int, Via, str, str]]] = []
+    ordered = sorted(singles, key=lambda kv: (kv[1][0], kv[1][1].position))
+    for entry in ordered:
+        if run and _row_link(run[-1][1], entry[1]):
+            run.append(entry)
+            continue
+        if len(run) >= 2 and any(_row_terminus(item) for _, item in run):
+            rows.append(run)
+        run = [entry]
+    if len(run) >= 2 and any(_row_terminus(item) for _, item in run):
+        rows.append(run)
+    for rid, row in enumerate(rows):
+        for n, _ in row:
+            row_of[n] = rid
     groups: dict[object, list[tuple[int, Via, str, str]]] = {}
     for n, item in enumerate(found):
         idx = array_of.get(_node_key(item[1].position))
-        groups.setdefault(("array", idx) if idx is not None else ("via", n), []).append(item)
+        row_id = row_of.get(n)
+        groups.setdefault(
+            ("array", idx)
+            if idx is not None
+            else ("row", row_id)
+            if row_id is not None
+            else ("via", n),
+            [],
+        ).append(item)
     changes = []
     for c in sorted(groups.values(), key=lambda c: min(m[0] for m in c)):
         c.sort(key=lambda m: m[0])
@@ -904,6 +1043,10 @@ class PathResolution:
             reachable from them -- current could split across parallel
             branches, so a single linear path cannot be trusted).
         reason: Human-readable explanation. Empty only when resolved.
+            Prose only -- it never quotes a coordinate (Issue #8928), so it
+            is the same in every frame. A surface that wants to name the
+            loop appends :func:`describe_witness` of :attr:`witness` with
+            the origin it reports in.
         source: The resolved source endpoint, when resolvable.
         sink: The resolved sink endpoint, when resolvable.
         segments: The ordered copper segments covering this path. Only
@@ -927,7 +1070,9 @@ class PathResolution:
     layer_changes: tuple[LayerChange, ...] = ()
     #: For a loop/parallel ambiguity (issue #8368): the closing edge that
     #: proves the cycle, as ``{"kind": "segment"|"via", "layer", "start",
-    #: "end"}`` / ``{"kind": "via", "position"}``. Empty otherwise.
+    #: "end"}`` / ``{"kind": "via", "position"}``, board-relative, plus
+    #: ``"blocking_branches"`` when a doubled group failed to qualify.
+    #: Rendered by :func:`describe_witness`. Empty otherwise.
     witness: dict[str, object] = field(default_factory=dict)
     #: Doubled-copper groups the resolution relied on to clear a cycle
     #: (issue #8790). Their segments are part of ``segments``.
@@ -936,6 +1081,134 @@ class PathResolution:
     @property
     def ok(self) -> bool:
         return self.status == STATUS_RESOLVED
+
+    @property
+    def min_width(self) -> MinimumWidth | None:
+        """Narrowest copper on this path, or ``None`` when not resolved (#8917).
+
+        ``None`` -- never ``0`` -- for an ``unresolved``/``ambiguous`` path and
+        for a resolved path with no segments: ``segments`` is populated only
+        when the status is ``resolved``, so there is nothing to measure.
+
+        Deliberately doubled copper is measured as one conductor, mirroring
+        how ``path_ampacity`` judges it: a :class:`ParallelGroup` contributes
+        a single candidate, its **summed** width
+        ``sum(min(seg.width for seg in branch) for branch in branches)`` --
+        the same expression that rule's own message prints -- while every
+        ungrouped segment contributes its own width. So a stretch doubled on
+        two layers at 1.0 mm enters as 2.0 mm, not twice as 1.0 mm.
+
+        ``sense_taps`` are excluded by construction: a Kelvin sense tap is
+        never part of ``segments``, so thin sense copper off an endpoint pad
+        cannot become the reported minimum.
+
+        Ties resolve to the first candidate in path order (and, within a
+        group, to its first narrowest branch's first narrowest segment, as
+        :meth:`ParallelGroup.describe` reports each branch).
+        """
+        if self.status != STATUS_RESOLVED:
+            return None
+
+        group_index: dict[int, int] = {
+            id(seg): i for i, group in enumerate(self.parallel_groups) for seg in group.segments
+        }
+
+        def _group_candidate(group: ParallelGroup) -> MinimumWidth:
+            # The summed-width expression ``path_ampacity`` prints for this
+            # group, so the audit and the check never report two different
+            # "summed width" figures for one group.
+            width = sum(min(seg.width for seg in branch) for branch in group.branches)
+            branch = min(group.branches, key=lambda b: min(seg.width for seg in b))
+            pinch = min(branch, key=lambda seg: seg.width)
+            return MinimumWidth(
+                width_mm=width,
+                layer=pinch.layer,
+                position=_segment_midpoint(pinch),
+                parallel_group=True,
+            )
+
+        candidates: list[MinimumWidth] = []
+        seen: set[int] = set()
+        for seg in self.segments:
+            index = group_index.get(id(seg))
+            if index is None:
+                candidates.append(
+                    MinimumWidth(
+                        width_mm=seg.width,
+                        layer=seg.layer,
+                        position=_segment_midpoint(seg),
+                    )
+                )
+            elif index not in seen:
+                seen.add(index)
+                candidates.append(_group_candidate(self.parallel_groups[index]))
+        # Defensive: a group whose segments are all absent from ``segments``
+        # would otherwise go unmeasured.
+        candidates += [
+            _group_candidate(group)
+            for i, group in enumerate(self.parallel_groups)
+            if i not in seen and group.branches
+        ]
+
+        if not candidates:
+            return None
+        return min(candidates, key=lambda c: c.width_mm)
+
+    @property
+    def series_layer_changes(self) -> tuple[LayerChange, ...]:
+        """``layer_changes`` without the stitching vias inside doubled copper (#8916).
+
+        A via that pins two branches of a :class:`ParallelGroup` together
+        part-way along the run carries no series current: the path does not
+        leave one layer for the other there, it continues on both. Such a via
+        is recognised by geometry, never by size: every path segment touching
+        it belongs to a parallel group and, on each layer it joins, the copper
+        passes THROUGH it (the via sits inside a segment, or two segments end
+        on it) with the same width on both sides -- a width swap across the
+        via means the branches' shares change there, so redistribution
+        current crosses the barrel and the via stays judged (#8950). A via
+        where a branch starts or ends -- the tie at an SMD end of a doubled
+        run, say -- is a real layer change: the copy's share of the current
+        crosses it, and it stays in this list.
+
+        ``layer_changes`` itself is unchanged, so an audit still lists every
+        via that joins two layers.
+        """
+        grouped = {id(seg) for group in self.parallel_groups for seg in group.segments}
+        if not grouped:
+            return self.layer_changes
+        tol = 0.01
+
+        def stitching(position: tuple[float, float], layers: tuple[str, str]) -> bool:
+            half_edges: dict[str, int] = {}
+            widths: dict[str, set[float]] = {}
+            for seg in self.segments:
+                if point_to_segment_distance(*position, *seg.start, *seg.end) > tol:
+                    continue
+                if id(seg) not in grouped:
+                    return False
+                at_end = min(math.dist(position, seg.start), math.dist(position, seg.end)) <= tol
+                half_edges[seg.layer] = half_edges.get(seg.layer, 0) + (1 if at_end else 2)
+                widths.setdefault(seg.layer, set()).add(round(seg.width, 2))
+            if not all(half_edges.get(layer, 0) >= 2 for layer in layers):
+                return False
+            # A via whose layer's width split swaps across it (wide in /
+            # narrow out) redistributes real current between the branches,
+            # so it is not a benign stitch even though every touching
+            # segment is grouped and copper passes through on both layers
+            # (#8950). Benign requires the copper's width to be the same on
+            # both sides of the via on every joined layer, which for the
+            # canonical shapes (one through segment, or two ending segments
+            # of equal width) reduces to: one width per joined layer.
+            return all(len(widths.get(layer, ())) <= 1 for layer in layers)
+
+        return tuple(
+            change
+            for change in self.layer_changes
+            if not all(
+                stitching(pos, (change.from_layer, change.to_layer)) for pos, _, _ in change.vias
+            )
+        )
 
 
 def _node_key(point: tuple[float, float]) -> tuple[float, float]:
@@ -1719,15 +1992,50 @@ def _reduce_parallel_groups(
     return groups
 
 
-def _describe_witness(witness: dict[str, object]) -> str:
+def _witness_point(point: object, origin: tuple[float, float]) -> str:
+    x, y = cast("list[float]", point)[:2]
+    return f"({x + origin[0]:.3f}, {y + origin[1]:.3f})"
+
+
+def witness_text(witness: dict[str, object], origin: tuple[float, float] = (0.0, 0.0)) -> str:
+    """The witness object alone, e.g. ``segment (x, y)->(x, y) on B.Cu`` (Issue #8928).
+
+    :attr:`PathResolution.witness` is board-relative, like every router
+    coordinate. ``origin`` is the frame the caller reports in: pass
+    ``PCB.board_origin`` to quote sheet positions (what the KiCad GUI shows),
+    or leave the default to quote board-relative ones. Coordinates are
+    formatted to 3 dp. Empty string for an empty witness.
+    """
     if not witness:
         return ""
     if witness.get("kind") == "segment":
-        start = tuple(cast("list[float]", witness["start"]))
-        end = tuple(cast("list[float]", witness["end"]))
-        return f" [witness: segment {start}->{end} on {witness['layer']}]"
-    position = tuple(cast("list[float]", witness["position"]))
-    return f" [witness: via barrel at {position}]"
+        start = _witness_point(witness["start"], origin)
+        end = _witness_point(witness["end"], origin)
+        return f"segment {start}->{end} on {witness['layer']}"
+    return f"via barrel at {_witness_point(witness['position'], origin)}"
+
+
+def describe_witness(witness: dict[str, object], origin: tuple[float, float] = (0.0, 0.0)) -> str:
+    """Render ``witness`` as the `` [witness: ...] [blocking branches: ...]`` suffix.
+
+    The one renderer for :attr:`PathResolution.witness` (Issue #8928).
+    :attr:`PathResolution.reason` carries no coordinates, so each surface that
+    reports an ambiguous path appends this with its own ``origin`` -- the
+    resolution itself stays frame-free. See :func:`witness_text` for the frame
+    and format. Empty string for an empty witness.
+    """
+    if not witness:
+        return ""
+    out = f" [witness: {witness_text(witness, origin)}]"
+    branches = cast("list[dict[str, object]]", witness.get("blocking_branches") or [])
+    if branches:
+        parts = [
+            f"{_witness_point(b['start'], origin)}->{_witness_point(b['end'], origin)}"
+            f" on {b['layer']}"
+            for b in branches
+        ]
+        out += f" [blocking branches: {'; '.join(parts)}]"
+    return out
 
 
 def _blocking_branches_witness(blockers: list[list[Segment]]) -> list[dict[str, object]]:
@@ -1739,18 +2047,6 @@ def _blocking_branches_witness(blockers: list[list[Segment]]) -> list[dict[str, 
         }
         for b in blockers
     ]
-
-
-def _describe_blockers(witness: dict[str, object]) -> str:
-    branches = cast("list[dict[str, object]]", witness.get("blocking_branches") or [])
-    if not branches:
-        return ""
-    parts = [
-        f"{tuple(cast('list[float]', b['start']))}->{tuple(cast('list[float]', b['end']))}"
-        f" on {b['layer']}"
-        for b in branches
-    ]
-    return f" [blocking branches: {'; '.join(parts)}]"
 
 
 def _pad_covers(pcb: PCB, ref: str, pad_number: str, point: tuple[float, float]) -> bool:
@@ -2055,8 +2351,6 @@ def resolve_current_path(pcb: PCB, spec: CurrentPathSpec) -> PathResolution:
                 "declared endpoints sit on a net whose routed copper contains a "
                 "loop/parallel return path reachable from them -- current split "
                 "between branches cannot be determined from a single resolved path"
-                + _describe_witness(witness)
-                + _describe_blockers(witness)
             ),
             source=source,
             sink=sink,
