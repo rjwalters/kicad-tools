@@ -562,6 +562,10 @@ def test_native_worker_launches_in_pinned_container(monkeypatch, tmp_path):
     cfg = tmp_path / "cfg"
     cfg.mkdir()
     monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(
+        "kicad_tools.validate.mask_copper_geometry.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
     monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.process_config_home", lambda: cfg)
     monkeypatch.setattr("kicad_tools.cli.kicad_toolchain._synced_model_dir", lambda: None)
     result = inspect_attributed_mask_geometry(board, scratch_dir=tmp_path)
@@ -634,6 +638,10 @@ def test_resolve_native_python_container_argv(monkeypatch, tmp_path):
     cfg = tmp_path / "cfg"
     cfg.mkdir()
     monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(
+        "kicad_tools.validate.mask_copper_geometry.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
     monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.process_config_home", lambda: cfg)
     monkeypatch.setattr("kicad_tools.cli.kicad_toolchain._synced_model_dir", lambda: None)
     command, reason = _resolve_native_python_command(None, tmp_path / "stage")
