@@ -10228,6 +10228,12 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             pad_edge_gap=float(
                 getattr(getattr(router, "rules", None), "min_via_pad_edge_gap", 0.0) or 0.0
             ),
+            # Issue #8974: weld vias keep out of the fab-view same-net pad
+            # slit band (the caller-resolved DesignRules scalar mirrors how
+            # pad_edge_gap is threaded here).
+            same_net_pad_gap_mm=float(
+                getattr(getattr(router, "rules", None), "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+            ),
             # Issue #8027: oracle copper keeps the --voltage-map pairwise gaps.
             pairwise_table=(
                 getattr(getattr(router, "rules", None), "pairwise_clearance", None)
@@ -11148,6 +11154,31 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     # those, not ``--trace-width``, are what actually width the emitted copper
     # for classified nets.
     args._mfr_min_trace_floor = floor
+
+    # Issue #8974: the same-net pad slit-band edge for this stackup, resolved
+    # ONCE here (the single place with manufacturer + layer count + copper
+    # weight in hand) and threaded into every ``DesignRules`` as the
+    # caller-resolved ``same_net_pad_gap_band_edge_mm`` -- mirroring
+    # ``mfr_clearance_floor`` above, NOT ``min_via_pad_edge_gap`` (whose
+    # ``__post_init__`` resolution is stackup-blind).  ``None`` (no dfm
+    # table / no stackup entry) keeps the band guard OFF rather than
+    # guessing an edge.
+    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
+
+    # None without ``--manufacturer``: nothing to resolve from, so the band
+    # guard stays OFF rather than guessing a fab -- the stitcher's
+    # ``pad_gap_edge`` gates the identical resolution on ``args.mfr``, and
+    # ``_resolve_route_clearance_floor`` returns None on this same
+    # no-profile path.  With a fab, ``layers``/``copper_outer`` fall back to
+    # the PROFILE defaults (4-layer / 1oz) exactly the way
+    # ``resolve_min_trace_width`` normalizes them -- the documented
+    # profile-default behavior of ``get_design_rules``, never a guessed
+    # stackup (issue #8974 review: no fab literal on the no-``--mfr`` path).
+    args._mfr_pad_gap_band_edge = (
+        _resolve_mfr_pad_gap_edge(str(manufacturer), layers or 4, copper_outer or 1.0)
+        if manufacturer
+        else None
+    )
 
     explicit_width = getattr(args, "trace_width", None)
     if explicit_width is None:
@@ -12535,6 +12566,8 @@ def route_with_layer_escalation(
         authored_min_clearance=getattr(args, "_authored_min_clearance", None),
         # Issue #6561: the stackup-aware fab floor for the pair gap.
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
+        # Issue #8974: the stackup-aware same-net pad slit-band edge.
+        same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -14099,6 +14132,8 @@ def route_with_rule_relaxation(
             authored_min_clearance=getattr(args, "_authored_min_clearance", None),
             # Issue #6561: the stackup-aware fab floor for the pair gap.
             mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
+            # Issue #8974: the stackup-aware same-net pad slit-band edge.
+            same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -16598,6 +16633,8 @@ def route_with_combined_escalation(
                 authored_min_clearance=getattr(args, "_authored_min_clearance", None),
                 # Issue #6561: the stackup-aware fab floor for the pair gap.
                 mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
+                # Issue #8974: the stackup-aware same-net pad slit-band edge.
+                same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -23629,6 +23666,8 @@ def _run_main_impl(args, parser, argv) -> int:
         authored_min_clearance=getattr(args, "_authored_min_clearance", None),
         # Issue #6561: the stackup-aware fab floor for the pair gap.
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
+        # Issue #8974: the stackup-aware same-net pad slit-band edge.
+        same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.

@@ -656,6 +656,47 @@ def same_net_pad_gap_acceptable(
     )
 
 
+def same_net_pad_gap_band_ring(
+    bbox: tuple[float, float, float, float],
+    via_size: float,
+    min_gap_mm: float,
+) -> Any:
+    """The region of via seats :func:`same_net_pad_gap_acceptable` rejects.
+
+    Issue #8974: the region form of the slit-band predicate, for rasterised
+    legality masks (:func:`kicad_tools.router.link_router.route_link`'s
+    via mask) that pre-ban the band instead of testing seats one point at
+    a time.  ``gap`` is measured to ``bbox`` exactly as the point predicate
+    measures it -- axis-aligned, ``hypot(dx, dy) - radius`` -- so ONE band
+    definition feeds both forms: a seat this ring covers is exactly a seat
+    the predicate rejects.  The predicate's 1e-9 float-noise epsilon is
+    finer than any rasteriser's cell, so the geometric boundary is the
+    shared band ``(0, min_gap_mm)``.
+
+    Args:
+        bbox: Same-net SMD pad bounding box ``(min_x, min_y, max_x, max_y)``.
+        via_size: Via pad (annulus) diameter in mm.
+        min_gap_mm: The fab-view pad-population error edge in mm.
+            ``<= 0`` yields an empty geometry (guard off).
+
+    Returns:
+        The shapely geometry of the rejected seat region.
+    """
+    from shapely.geometry import Polygon, box  # type: ignore[import-untyped]
+
+    if min_gap_mm <= 0:
+        return Polygon()
+    radius = via_size / 2
+    pad = box(*bbox)
+    # ``quad_segs=64`` keeps GEOS's arc approximation ~1e-5 mm inside the
+    # true disk, so the ring agrees with the point predicate finer than any
+    # rasterised mask can resolve (the default 8 segments sag ~1.5e-3 mm at
+    # the corners, which IS visible at mask resolution).
+    return pad.buffer(radius + min_gap_mm, quad_segs=64).difference(
+        pad.buffer(radius, quad_segs=64)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared segment-vs-foreign-via predicate (Issue #2998 / #3002)
 # ---------------------------------------------------------------------------

@@ -1391,6 +1391,17 @@ class PourLinkCloser:
     #: via keeps from every SMD pad (the router's ``min_via_pad_edge_gap``).
     #: ``0`` disables the guard.
     pad_edge_gap: float = 0.0
+    #: Issue #8974: ``run_stitch``'s ``same_net_pad_gap_mm`` -- the fab-view
+    #: same-net pad slit-band edge (the caller-resolved
+    #: ``DesignRules.same_net_pad_gap_band_edge_mm``, resolved from the
+    #: board's stackup by ``kct route`` exactly as ``pad_edge_gap`` is).
+    #: ``0`` disables the band guard.  The gating is per path: on the weld
+    #: path ``avoid_via_in_pad`` gates it exactly as the stitcher CLI's
+    #: ``--avoid-pad-overlap`` does (``stitch_cmd``'s ``run_stitch`` call);
+    #: the link-router rules (:class:`LinkRouteRules.same_net_pad_gap_mm`)
+    #: receive it unconditionally -- harmless there, since a via-in-pad seat
+    #: is one copper union (``gap <= 0``) the band accepts anyway.
+    same_net_pad_gap_mm: float = 0.0
     #: Issue #8027: the router's ``PairwiseClearanceTable`` (``--voltage-map``).
     #: ``pair_clearance(P, N)`` is raised to ``table.required_clearance(P, N)``
     #: so oracle copper keeps the same HV ΔV gap as the lattice search.  ``None``
@@ -1850,6 +1861,10 @@ class PourLinkCloser:
                 preferred_sites=self.preferred_sites,
                 avoid_sites=avoid or None,
                 pad_edge_gap=self.pad_edge_gap,
+                # Issue #8974: keep the weld's vias out of the fab-view
+                # same-net pad slit band (off when the caller resolved no
+                # stackup edge).
+                same_net_pad_gap_mm=self.same_net_pad_gap_mm,
             )
 
         force: frozenset[str] = frozenset()
@@ -1949,6 +1964,9 @@ class PourLinkCloser:
             clearance=self.clearance,
             via_size=self.via_size,
             via_drill=self.via_drill,
+            # Issue #8974: link vias keep out of the same-net pad slit band,
+            # exactly as the weld's run_stitch vias do.
+            same_net_pad_gap_mm=self.same_net_pad_gap_mm,
         )
         net_ids = {net.name: num for num, net in pcb.nets.items() if net.name}
         # Issue #6374: per pour net, the class-aware rules (``c(P, N)`` per
