@@ -416,9 +416,12 @@ class _DruConditionParser:
 
     Produces a closure ``matcher(a, b) -> bool`` over two item contexts
     (``A``/``B``), each a mapping of DRU property name -> value.  Anything
-    outside the modelled grammar raises :class:`_UnknownCondition`, which the
-    caller turns into "matches every pair" -- the fail-closed direction for a
-    lowering check.
+    outside the modelled grammar raises :class:`_UnknownCondition`, which
+    :func:`_rule_matches_pair` turns into ``False`` -- the rule's scope is
+    unknowable, so it is excluded from pair resolution rather than treated
+    as matching everything (over-approximating it would flag every
+    keepout/creepage rewrite as a loosening; the name-keyed comparison in
+    the same gate still catches a lowered or removed rule of that shape).
     """
 
     def __init__(self, text: str) -> None:

@@ -24,17 +24,18 @@ EXPECTED_STALE: dict[str, str] = {
     # boards whose recipes byte-reproduce it (01/05/06; the recipe-replay
     # tests pin the committed sidecar to the current emitter, so reverting
     # the DRU is not an option).  Board 06's evidence was re-pinned on the
-    # pinned toolchain; boards 01/05 could not be -- ``refresh_readiness.py``
-    # refuses on the same unaccepted physical_copper_gap/redundant-copper/
-    # silk warning floods board 07's entry cites (the #8399/#8938-era
-    # stalemate, reproduced with main's code on pristine main boards).
-    # That work owns the re-pin; remove these entries when it lands.
-    "01-voltage-divider": (
-        "Issue #8937/#8399: PR #8955 re-emitted the routed .kicad_dru "
-        "(zone-clearance rules, raised SMD floor); `refresh_readiness.py` refuses "
-        "to re-pin while physical_copper_gap/redundant-copper/silk warnings remain "
-        "unaccepted. The #8399 warning-flood work owns the re-pin."
-    ),
+    # pinned toolchain; board 01 followed at the review-fix stage: its saved
+    # copper was re-filled under the corrected block (native refill,
+    # divergent none), the copper Gerbers re-plotted, the bundle re-built
+    # and ``readiness.json`` re-pinned via ``refresh_readiness.py`` -- its
+    # two pre-existing same-net VOUT stitch-via slit findings are waived
+    # evidence-bound in ``voltage_divider_routed.kct-waivers.json`` (the
+    # #8938 mechanism; rerouting the pair as #8848 does retires the
+    # waiver).  Board 05 could not be re-pinned: its ``kct check`` refuses
+    # on the unaccepted physical_copper_gap/redundant-copper/silk warning
+    # flood board 07's entry cites (the #8399/#8938-era stalemate,
+    # reproduced with main's code on pristine main boards).  That work owns
+    # the re-pin; remove the entry when it lands.
     "05-bldc-motor-controller": (
         "Issue #8937/#8399: PR #8955 re-emitted the routed .kicad_dru "
         "(zone-clearance rules); `refresh_readiness.py` refuses to re-pin while "
