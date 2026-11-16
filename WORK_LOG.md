@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-16
 
+- **PR #9036**: fix: omit empty-reason placeholder for complete mask-to-copper stanza
+- **Issue #8991** (closed): kct check prints a spurious 'no reason reported' line under a complete mask-to-copper assessment
 - **PR #9026**: build(deps-dev): bump @types/node from 26.6.5 to 26.6.6 in /site in the npm-minor-patch group across 1 directory
 - **PR #9021**: fix(stitch): use pad-gap detection edge to match kct check on 2oz stackups
 - **Issue #9016** (closed): Stitcher passes error_edge_mm to the same-net pad-gap predicate whose contract now says detection_edge_mm
