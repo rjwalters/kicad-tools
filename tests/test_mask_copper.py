@@ -975,6 +975,23 @@ def test_stdout_collapses_repeated_reasons_and_shows_distinct_causes(tmp_path, c
     assert "(+2 more)" in stanza
 
 
+def test_stdout_complete_assessment_has_no_placeholder_line(tmp_path, capsys, monkeypatch):
+    """Issue #8991: ``complete`` + no reasons prints only the header line."""
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    _patch_assessment(monkeypatch, coverage="complete", reasons=[])
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    main([str(board), "--drc-only", "--mfr", "jlcpcb"])
+    lines = capsys.readouterr().out.splitlines()
+    idx = next(i for i, ln in enumerate(lines) if ln.startswith("Mask-to-copper: complete"))
+    following = lines[idx + 1] if idx + 1 < len(lines) else ""
+    assert "no reason reported" not in following
+    assert "Remediation:" not in following
+    assert not any("no reason reported" in ln for ln in lines)
+
+
 def test_stdout_single_and_empty_reason_lists_stay_clean(tmp_path, capsys, monkeypatch):
     """Edge cases: exactly one reason (no spurious count), no reasons at all."""
     stanza = _mask_stdout_stanza(
