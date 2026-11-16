@@ -72,6 +72,7 @@ Measured experiments on `kct route`; several record negative results.
 | [`--reserve-pour-only-passives` cross-board](reserve-pour-only-passives-cross-board.md) | Flag off/on on boards 03-07: closes board 05's last 2 pour links and changes no other board's outcome; the note recommends flipping the default with an opt-out (Issue #7794) |
 | [Board 05 unattended route](board-05-unattended-route.md) | `kct route` from scratch at seeds 42/7/1337: 37/37, both DRC engines 0 errors, LVS clean, byte-identical across seeds; which wall clocks stay live; the nightly gate (Issue #7834) |
 | [kct check vs kicad-cli lengths](kicad-length-bench-6725.md) | Per-net length and pair skew comparison |
+| [Detour-ratio fleet measurement](detour-ratio-fleet-measurement-9003.md) | `kct route --report-detour-ratio` drawn vs alone-on-empty length over the fleet: median 1.001, 10.9% of 147 connections above 1.25x, max 3.7x -- a fat tail that warrants the targeted repair pass (Issue #9003) |
 
 ## Calibration notes
 

@@ -75,7 +75,7 @@ def endpoint_pair_distance(
     """Sum of both end distances under the better of the two orientations."""
     (a1, a2), (b1, b2) = a, b
 
-    def d(p, q):
+    def d(p: tuple[float, float], q: tuple[float, float]) -> float:
         return math.hypot(p[0] - q[0], p[1] - q[1])
 
     return min(d(a1, b1) + d(a2, b2), d(a1, b2) + d(a2, b1))
