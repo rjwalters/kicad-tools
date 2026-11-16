@@ -248,35 +248,50 @@ def test_pour_repair_finds_narrow_j1_escape(generate_design_mod, tmp_path, block
     else:
         assert after["connected"]
         assert not after["stranded_pads"]
-        assert "(via (at 112.325 58.063)" in pcb.read_text()
+        # Issue #8975: the escape's through-via seat keeps the same-net slit
+        # band (the pre-band seat at (112.325, 58.063) sat 0.065 mm from
+        # J1.B8's copper -- exactly the wedge notch the fab-view grading
+        # flags), so the corridor thread now lands one node farther out.
+        assert "(via (at 112.150 59.800)" in pcb.read_text()
 
         # Check the emitted witness against physical foreign trace copper,
         # independently of the repair's candidate selection and audit.
         import re
 
         from shapely.geometry import LineString, Point
+        from shapely.ops import unary_union
 
         emitted = pcb.read_text()
         net_id = re.search(r'\(net (\d+) "\+3V3"\)', emitted).group(1)
         vias = generate_design_mod._find_sexp_blocks(emitted, "\n  (via")
-        added_via = next(v for v in vias if f"(net {net_id})" in v and "(at 112.325 58.063)" in v)
+        added_via = next(v for v in vias if f"(net {net_id})" in v and "(at 112.150 59.800)" in v)
         center = tuple(map(float, re.search(r"\(at ([\d.-]+) ([\d.-]+)\)", added_via).groups()))
         diameter = float(re.search(r"\(size ([\d.]+)\)", added_via).group(1))
         via = Point(center).buffer(diameter / 2)
         segments = generate_design_mod._find_sexp_blocks(emitted, "\n\t(segment")
         segments += generate_design_mod._find_sexp_blocks(emitted, "\n  (segment")
-        added_stub = next(
-            s for s in segments if f"(net {net_id})" in s and "(start 112.000 57.500)" in s
-        )
-        stub_start = tuple(
-            map(float, re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", added_stub).groups())
-        )
-        stub_end = tuple(map(float, re.search(r"\(end ([\d.-]+) ([\d.-]+)\)", added_stub).groups()))
-        stub_width = float(re.search(r"\(width ([\d.]+)\)", added_stub).group(1))
-        assert stub_start == (112, 57.5)
-        assert stub_end == center
-        assert '(layer "F.Cu")' in added_stub
-        stub = LineString([stub_start, stub_end]).buffer(stub_width / 2)
+        # The escape chain: the +3V3 F.Cu segments linked from J1.B8's
+        # centre to the via (J1.A8's own repair stub starts elsewhere and
+        # never joins this walk).
+        chain_geoms = []
+        point = (112.0, 57.5)
+        remaining = [s for s in segments if f"(net {net_id})" in s and '(layer "F.Cu")' in s]
+        while point != center and remaining:
+            step = next(
+                s
+                for s in remaining
+                if tuple(map(float, re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", s).groups()))
+                == point
+            )
+            remaining.remove(step)
+            start = tuple(map(float, re.search(r"\(start ([\d.-]+) ([\d.-]+)\)", step).groups()))
+            end = tuple(map(float, re.search(r"\(end ([\d.-]+) ([\d.-]+)\)", step).groups()))
+            width = float(re.search(r"\(width ([\d.]+)\)", step).group(1))
+            chain_geoms.append(LineString([start, end]).buffer(width / 2))
+            point = end
+        assert point == center, "escape chain does not reach the through via"
+        assert chain_geoms
+        stub = unary_union(chain_geoms) if len(chain_geoms) > 1 else chain_geoms[0]
         checked = 0
         for segment in segments:
             if re.search(r"\(net (\d+)\)", segment).group(1) == net_id:

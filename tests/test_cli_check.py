@@ -751,6 +751,247 @@ class TestCheckMetaCheck:
 
 
 # ---------------------------------------------------------------------------
+# Issue #8949: the ``Overall:`` line must agree with the exit code when a
+# blocking category cannot run, name the category, and the stdout mask
+# stanza must collapse repeated reasons and print a remediation line.
+# ---------------------------------------------------------------------------
+
+
+def _patch_mask_assessment(monkeypatch, **kwargs):
+    """Make the checker's native mask call return a controlled assessment.
+
+    Same mechanics as ``tests/test_mask_copper.py::_patch_assessment``:
+    ``check_mask_to_copper`` is imported inside
+    :meth:`DRCChecker.check_mask_to_copper`, so patching the module
+    attribute takes effect at call time.
+    """
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
+    def fake(path, policy=None, intents=(), **native_options):
+        return MaskCopperAssessment(policy=policy, **kwargs)
+
+    monkeypatch.setattr("kicad_tools.validate.mask_copper.check_mask_to_copper", fake)
+
+
+def _overall_line(out: str) -> str:
+    return next(line for line in out.splitlines() if line.startswith("Overall:"))
+
+
+def _stage_board00_for_mask(tmp_path: Path) -> Path:
+    """Board 00 copy with schematic + manifest, so the meta sub-checks pass.
+
+    With every sub-check PASSED the baseline exit code is 0, so any
+    incompleteness a test then asserts must come from the (patched) mask
+    assessment -- not from missing schematic inputs.
+    """
+    if not BOARD_00_SCH.exists() or not BOARD_00_PCB.exists():
+        pytest.skip("board 00 artifacts missing; run generate_design.py")
+    pcb, _manifest = _stage_board00_copy(tmp_path)
+    return pcb
+
+
+class TestOverallMatchesExitCode:
+    """``Overall:`` line <-> exit-code pairing (issue #8949).
+
+    Each test asserts the *pairing* directly -- the printed verdict and
+    the process exit code must come from one source -- rather than
+    asserting each half separately.  ``--drc-only`` is excluded by
+    construction: it prints no ``Overall:`` line at all, so there is
+    nothing to pair (verified by ``test_drc_only_preserves_legacy_output``).
+    """
+
+    def test_incomplete_mask_names_the_category_and_exits_2(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """Default-applied incomplete mask check -> Overall INCOMPLETE, exit 2."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_for_mask(tmp_path)
+        _patch_mask_assessment(
+            monkeypatch,
+            coverage="incomplete",
+            reasons=["F.Mask: unattributed native mask region"],
+        )
+
+        result = main([str(pcb), "--mfr", "jlcpcb"])
+        assert result == 2
+        line = _overall_line(capsys.readouterr().out)
+        assert "PASSED" not in line
+        assert "INCOMPLETE" in line
+        # AC 1: the line names the blocking category.
+        assert "mask_to_copper" in line
+
+    def test_allow_incomplete_exits_0_but_the_line_stays_honest(
+        self, tmp_path: Path, capsys, monkeypatch
+    ):
+        """--allow-incomplete flips the exit code, never the honesty of the line."""
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_for_mask(tmp_path)
+        _patch_mask_assessment(
+            monkeypatch,
+            coverage="incomplete",
+            reasons=["F.Mask: unattributed native mask region"],
+        )
+
+        result = main([str(pcb), "--mfr", "jlcpcb", "--allow-incomplete"])
+        assert result == 0
+        line = _overall_line(capsys.readouterr().out)
+        assert "PASSED" not in line
+        assert "INCOMPLETE" in line
+        assert "mask_to_copper" in line
+
+    def test_failed_mask_still_reads_failed(self, tmp_path: Path, capsys, monkeypatch):
+        """A real mask violation keeps Overall FAILED; incompleteness never masks it."""
+        from kicad_tools.cli.check_cmd import main
+        from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+        pcb = _stage_board00_for_mask(tmp_path)
+        violation = MaskCopperMeasurement(
+            opening_uuids=("00000000-0000-0000-0000-000000000001",),
+            conductor_uuid="00000000-0000-0000-0000-000000000002",
+            mask_side="F.Mask",
+            copper_layer="F.Cu",
+            location_mm=(1.0, 2.0),
+            clearance_mm=0.01,
+            exposed_area_mm2=0.5,
+            relation="overlap",
+            disposition="violation",
+            uncertainty_mm=0.0,
+            opening_kind="pad:rect",
+            mask_defined=False,
+            margin_provenance="native",
+        )
+        _patch_mask_assessment(monkeypatch, coverage="complete", measurements=[violation])
+
+        result = main([str(pcb), "--mfr", "jlcpcb"])
+        assert result == 2
+        line = _overall_line(capsys.readouterr().out)
+        assert "FAILED" in line
+        assert "INCOMPLETE" not in line
+
+    def test_json_report_schema_is_unchanged(self, tmp_path: Path, capsys, monkeypatch):
+        """No new keys in ``meta_checks`` or the v1 mask assessment dict.
+
+        The ``overall`` *value* becomes honest (INCOMPLETE) -- that is the
+        fix -- but the structure machine consumers parse is byte-compatible:
+        no new keys, no schema bump.  The remediation hint deliberately
+        never enters ``MaskCopperAssessment.to_dict()``.
+        """
+        from kicad_tools.cli.check_cmd import main
+
+        pcb = _stage_board00_for_mask(tmp_path)
+        _patch_mask_assessment(
+            monkeypatch,
+            coverage="incomplete",
+            reasons=["F.Mask: unattributed native mask region"],
+        )
+
+        result = main([str(pcb), "--mfr", "jlcpcb", "--format", "json"])
+        assert result == 2
+        data = json.loads(capsys.readouterr().out)
+
+        meta = data["meta_checks"]
+        assert set(meta.keys()) == {
+            "drc",
+            "erc",
+            "lvs",
+            "manifest",
+            "overall",
+            "schematic_missing",
+        }
+        assert meta["overall"] == "INCOMPLETE"
+
+        assessment = data["mask_copper_assessments"][0]
+        assert set(assessment.keys()) == {
+            "schema",
+            "coverage",
+            "passed",
+            "reasons",
+            "policy",
+            "binding",
+            "measurements",
+            "intent_audit",
+            "geometry_provenance",
+            "evaluated_pairs",
+        }
+        assert assessment["schema"] == "kct.mask-copper-assessment.v1"
+        # The verdict / exit code pair machine consumers read stays coherent.
+        assert data["verdict"] == "incomplete"
+        assert data["exit_code"] == 2
+
+
+class TestMetaCheckResultCoverageIncomplete:
+    """The rollup flag mechanics (issue #8949): one flag, consulted by compute_overall."""
+
+    @staticmethod
+    def _result(**kwargs):
+        from kicad_tools.cli.check_cmd import MetaCheckResult, SubCheckResult
+
+        passed = SubCheckResult(status="PASSED", detail="ok")
+        return MetaCheckResult(
+            drc=passed,
+            erc=SubCheckResult(status="PASSED", detail="ok"),
+            lvs=SubCheckResult(status="PASSED", detail="ok"),
+            manifest=SubCheckResult(status="PASSED", detail="ok"),
+            **kwargs,
+        )
+
+    def test_flag_drives_incomplete(self):
+        result = self._result(coverage_incomplete=True, incomplete_categories=("mask_to_copper",))
+        result.compute_overall()
+        assert result.overall == "INCOMPLETE"
+
+    def test_failed_subcheck_still_wins_over_the_flag(self):
+        """A FAILED board never reads INCOMPLETE: incompleteness cannot mask failure."""
+        from kicad_tools.cli.check_cmd import SubCheckResult
+
+        result = self._result(coverage_incomplete=True)
+        result.drc = SubCheckResult(status="FAILED", detail="2 error(s)")
+        result.compute_overall()
+        assert result.overall == "FAILED"
+
+    def test_without_flag_all_passed_stays_passed(self):
+        result = self._result()
+        result.compute_overall()
+        assert result.overall == "PASSED"
+
+    def test_flag_not_serialized_into_json(self):
+        result = self._result(coverage_incomplete=True, incomplete_categories=("mask_to_copper",))
+        assert set(result.to_dict().keys()) == {
+            "drc",
+            "erc",
+            "lvs",
+            "manifest",
+            "overall",
+            "schematic_missing",
+        }
+
+
+def test_several_incomplete_assessments_roll_up_to_one_incomplete(tmp_path):
+    """Edge case: several incomplete assessments at once stay one INCOMPLETE.
+
+    The category is named once (not per assessment) and the verdict is
+    ``incomplete`` -- never masked, never duplicated.
+    """
+    from kicad_tools.cli.check_cmd import DRCResults, evaluate_check_verdict
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
+    results = DRCResults(
+        mask_copper_assessments=[
+            MaskCopperAssessment(coverage="incomplete", reasons=["first"]),
+            MaskCopperAssessment(coverage="incomplete", reasons=["second"]),
+        ],
+        rules_checked=1,
+    )
+    verdict = evaluate_check_verdict(tmp_path / "x.kicad_pcb", results, mask_copper_default=True)
+    assert verdict.verdict == "incomplete"
+    assert verdict.exit_code == 2
+    assert verdict.meta.coverage_incomplete is True
+    assert verdict.meta.incomplete_categories == ("mask_to_copper",)
+
+
+# ---------------------------------------------------------------------------
 # Issue #4616: full-fidelity LVS records under meta_checks.lvs
 # ---------------------------------------------------------------------------
 
