@@ -998,7 +998,7 @@ user-provisioned paths) have no issue state to consult and are unaffected.
 
 **What the #5919 post-mortem could and could not establish.** The ledger exists
 because this incident was *not* attributable from the evidence that existed at
-the time. Against `~/.loom/daemon.log` (+ rotations `.1`–`.5`, covering
+the time. Against `~/.loom/daemon.log` (+ day files `daemon.log.YYYY-MM-DD`, covering
 2026-08-01 → 2026-08-11) for the incident window — issue #5919 filed
 `2026-08-10T21:01:18Z`, PR #5942 opened `23:31:21Z`:
 
