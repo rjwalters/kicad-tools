@@ -883,6 +883,11 @@ def _run_prune_command(args, pcb_path: Path) -> int:
     # the library's plans and uncut loops stay board-relative.
     origin_x, origin_y, _sheet, _sheet_witness = _sheet_reporters(pcb)
 
+    # --region takes board-relative mm while every coordinate quoted below is
+    # sheet-absolute; twin the box so the report shows both frames (#8969).
+    # scope.region keeps echoing the argument verbatim (#8954).
+    region_sheet = _sheet(region[:2]) + _sheet(region[2:]) if region else None
+
     def _net(p) -> dict[str, Any]:
         return {
             "net": p.net_name or p.net_number,
@@ -937,7 +942,11 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         "nets": [_net(p) for p in res.accepted],
         "rejected_by_drc": [_net(p) for p in res.rejected],
         "uncut_loops": [_sheet_uncut_loop(u) for u in res.uncut_loops],
-        "scope": {"nets": nets, "region": list(region) if region else None},
+        "scope": {
+            "nets": nets,
+            "region": list(region) if region else None,
+            "region_sheet": region_sheet,
+        },
         "region_skipped": [_net(p) for p in res.region_skipped],
     }
     if output_format == "json":
@@ -946,6 +955,12 @@ def _run_prune_command(args, pcb_path: Path) -> int:
         print(f"PCB Prune {'(dry run)' if dry_run else ''}")
         print(f"  Input:  {pcb_path}")
         print(f"  DRC:    {res.drc_note}")
+        if region is not None and region_sheet is not None:
+            print(
+                f"  Region: ({region[0]}, {region[1]}) to ({region[2]}, {region[3]}) mm "
+                f"(board-relative) = ({region_sheet[0]}, {region_sheet[1]}) to "
+                f"({region_sheet[2]}, {region_sheet[3]}) mm sheet-absolute"
+            )
         print(f"  Segments removed: {res.stats['segments_removed']:,}")
         if res.stats.get("vias_removed"):
             print(f"  Vias removed:     {res.stats['vias_removed']:,}")

@@ -26,6 +26,44 @@ from .mask_geometry import _validate_structure
 #: mask geometry from an unverified plot profile.
 QUALIFIED_NATIVE_VERSIONS = ("10.0.5", "10.0.6")
 
+#: Custom-rule constraint names this checker may reason about during native
+#: object attribution. Module-level so the non-native suite can pin membership
+#: directly (tests/test_mask_copper.py); admission is deliberate, argued, and
+#: parity-tested, never derived from what the ``.kicad_dru`` generator happens
+#: to emit. Every entry is a minimum/maximum a DRC run *measures* against
+#: already plotted material; none of them is an input to the plot itself, so
+#: native mask/copper object geometry is identical with and without the rule
+#: present. Constraints that do feed the plot -- zone fill shaping
+#: (``zone_connection``, ``thermal_relief_gap``, ``thermal_spoke_width``,
+#: ``min_resolved_spokes``) above all -- must stay out, and so must any
+#: constraint whose native context has not actually been exercised by a
+#: parity test. Do not widen this set to quiet a failing board.
+SAFE_RULE_CONSTRAINTS = frozenset(
+    {
+        "clearance",
+        "physical_clearance",
+        "edge_clearance",
+        "hole_clearance",
+        "hole_to_hole",
+        # Measured hole-to-edge minimum over already-plotted holes and outline; no mask/copper input (#8948).
+        "physical_hole_clearance",
+        "track_width",
+        "hole_size",
+        "via_diameter",
+        "annular_width",
+        # Silkscreen-to-object minimum, the rule ordinary factory
+        # ``.kicad_dru`` files ship (#5818). It is geometry-neutral for
+        # this checker twice over: it constrains silkscreen, which is
+        # neither a mask nor a copper layer, and it is a measured
+        # minimum rather than a plot input. Parity is pinned by
+        # tests/test_mask_copper_native.py.
+        "silk_clearance",
+        # Silkscreen text minima, silkscreen-scoped by their own conditions; silk_clearance's double argument applies verbatim (#8948).
+        "text_thickness",
+        "text_height",
+    }
+)
+
 
 @dataclass
 class AttributedMaskGeometry:
@@ -168,39 +206,13 @@ def inspect_attributed_mask_geometry(
         # equivalent misclassification to fix.
         result.errors.extend(f"{e['feature']}: {e['reason']}" for e in exported.unsupported)
         # Native pcbnew LoadBoard has no exposed general DRC-expression loader.
-        # These rule constraints do not change plotted shape. Anything else is
-        # an explicit context gap, even if a whole-layer union happens to agree.
-        #
-        # Every entry is a minimum/maximum a DRC run *measures* against already
-        # plotted material; none of them is an input to the plot itself, so
-        # native mask/copper object geometry is identical with and without the
-        # rule present. Constraints that do feed the plot -- zone fill shaping
-        # (``zone_connection``, ``thermal_relief_gap``, ``thermal_spoke_width``,
-        # ``min_resolved_spokes``) above all -- must stay out, and so must any
-        # constraint whose native context has not actually been exercised by a
-        # parity test. Do not widen this set to quiet a failing board.
+        # Anything outside SAFE_RULE_CONSTRAINTS is an explicit context gap,
+        # even if a whole-layer union happens to agree; the set's admission
+        # criterion lives with the constant.
         if captured[".kicad_dru"]:
             rule_tree = parse_string("(rules " + captured[".kicad_dru"].decode() + ")")
-            safe = {
-                "clearance",
-                "physical_clearance",
-                "edge_clearance",
-                "hole_clearance",
-                "hole_to_hole",
-                "track_width",
-                "hole_size",
-                "via_diameter",
-                "annular_width",
-                # Silkscreen-to-object minimum, the rule ordinary factory
-                # ``.kicad_dru`` files ship (#5818). It is geometry-neutral for
-                # this checker twice over: it constrains silkscreen, which is
-                # neither a mask nor a copper layer, and it is a measured
-                # minimum rather than a plot input. Parity is pinned by
-                # tests/test_mask_copper_native.py.
-                "silk_clearance",
-            }
             for constraint in rule_tree.find_all("constraint"):
-                if constraint.get_string(0) not in safe:
+                if constraint.get_string(0) not in SAFE_RULE_CONSTRAINTS:
                     result.errors.append(
                         "Native object rule context unsupported: " + str(constraint.get_string(0))
                     )

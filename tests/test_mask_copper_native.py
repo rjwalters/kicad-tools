@@ -56,6 +56,36 @@ FACTORY_SILK_DRU = """(version 1)
   (constraint clearance (min 0.15mm)))
 """
 
+# The kct-managed fab-floor vocabulary (#8948): ``physical_hole_clearance``,
+# ``text_thickness`` and ``text_height``, the constraints every shipped tier
+# file and the managed ``.kicad_dru`` block carry on top of the silk rules
+# above. Shaped like the tier files themselves, and with
+# ``physical_hole_clearance`` deliberately appearing in two rules to pin that
+# a repeated constraint name yields no duplicated report entry.
+FACTORY_FAB_FLOOR_DRU = """(version 1)
+(rule "Factory hole to edge"
+  (condition "(A.Type == 'via' || A.Type == 'pad') && B.Layer == 'Edge.Cuts'")
+  (constraint physical_hole_clearance (min 0.4mm)))
+(rule "Factory via hole to edge"
+  (condition "A.Type == 'via' && B.Layer == 'Edge.Cuts'")
+  (constraint physical_hole_clearance (min 0.5mm)))
+(rule "Factory silkscreen width"
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
+  (constraint text_thickness (min 0.15mm)))
+(rule "Factory silkscreen height"
+  (condition "A.Type == 'text' && (A.Layer == 'F.Silkscreen' || A.Layer == 'B.Silkscreen')")
+  (constraint text_height (min 1.0mm)))
+"""
+
+# Constraint names the allowlist admits for factory rule files; the parity
+# tests must show none of them ever reaches the report.
+ADMITTED_FACTORY_CONSTRAINTS = (
+    "silk_clearance",
+    "physical_hole_clearance",
+    "text_thickness",
+    "text_height",
+)
+
 # Two pads and an escaping conductor: enough plotted mask and copper for the
 # per-object/full-layer parity comparison to be meaningful, small enough to
 # export twice without inflating the native gate's runtime.
@@ -118,19 +148,62 @@ def test_factory_silk_clearance_rules_leave_native_attribution_unchanged(tmp_pat
     assert (ruled.read_bytes(), rules.read_bytes()) == before
 
 
+def test_factory_fab_floor_rules_leave_native_attribution_unchanged(tmp_path, native_options):
+    """The kct-managed fab-floor constraints must not invalidate attribution.
+
+    Issue #8948: ``physical_hole_clearance``, ``text_thickness`` and
+    ``text_height`` are emitted by every shipped tier file and by kct's own
+    managed ``.kicad_dru`` block, so a board carrying them failed with
+    ``Native object rule context unsupported`` despite their being measured
+    minima over already-plotted material. Same proof pattern as the
+    ``silk_clearance`` case above.
+    """
+    plain = _dru_board(tmp_path / "plain", PARITY_BODY)
+    ruled = _dru_board(tmp_path / "ruled", PARITY_BODY, FACTORY_FAB_FLOOR_DRU)
+    rules = ruled.with_suffix(".kicad_dru")
+    before = (ruled.read_bytes(), rules.read_bytes())
+
+    plain_result = check_mask_to_copper(plain, POLICY, **native_options)
+    ruled_result = check_mask_to_copper(ruled, POLICY, **native_options)
+
+    assert plain_result.coverage == "complete", plain_result.reasons
+    assert ruled_result.coverage == "complete", ruled_result.reasons
+    for name in ADMITTED_FACTORY_CONSTRAINTS:
+        assert not any(name in reason for reason in ruled_result.reasons)
+    # Equivalent outcome, equivalent plotted material, equivalent attribution.
+    assert ruled_result.passed is plain_result.passed
+    assert (
+        ruled_result.geometry_provenance["export"]["layers_wkt"]
+        == plain_result.geometry_provenance["export"]["layers_wkt"]
+    )
+    assert _attribution(ruled_result) == _attribution(plain_result)
+    # The rule file is still bound into provenance and still left untouched --
+    # accepting the context is not the same as ignoring the sidecar.
+    assert (
+        ruled_result.binding.rules_sha256
+        == hashlib.sha256(FACTORY_FAB_FLOOR_DRU.encode()).hexdigest()
+    )
+    assert plain_result.binding.rules_sha256 is None
+    assert (ruled.read_bytes(), rules.read_bytes()) == before
+
+
 @pytest.mark.parametrize(
     "constraint", ["zone_connection (with solid)", "thermal_relief_gap (min 0.3mm)"]
 )
 def test_geometry_altering_rule_context_still_fails_beside_silk_rules(
     tmp_path, native_options, constraint
 ):
-    """The allowlist addition is narrow: unsupported contexts still fail closed.
+    """The allowlist additions are narrow: unsupported contexts still fail closed.
 
     ``zone_connection`` and ``thermal_relief_gap`` genuinely change the filled
     shape native plotting produces, so they must keep being reported even when
-    the same rule file also carries accepted ``silk_clearance`` rules.
+    the same rule file also carries every accepted factory constraint. Only
+    the plot-shaping context is reported; the geometry-neutral names beside it
+    never appear (#8948).
     """
-    rules = FACTORY_SILK_DRU + f'(rule "Fab fill" (constraint {constraint}))\n'
+    rules = (
+        FACTORY_SILK_DRU + FACTORY_FAB_FLOOR_DRU + f'(rule "Fab fill" (constraint {constraint}))\n'
+    )
     path = _dru_board(tmp_path / "altering", PARITY_BODY, rules)
 
     result = check_mask_to_copper(path, POLICY, **native_options)
@@ -139,7 +212,8 @@ def test_geometry_altering_rule_context_still_fails_beside_silk_rules(
     assert result.coverage == "incomplete"
     assert not result.passed
     assert f"Native object rule context unsupported: {name}" in result.reasons
-    assert not any("silk_clearance" in reason for reason in result.reasons)
+    for admitted in ADMITTED_FACTORY_CONSTRAINTS:
+        assert not any(admitted in reason for reason in result.reasons)
 
 
 def test_silk_rules_do_not_suppress_an_unsupported_native_graphic(tmp_path, native_options):
