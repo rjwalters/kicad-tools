@@ -16,6 +16,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-16
 
+- **PR #9046**: docs: correct board 07 finding count in 8974 changelog fragment to merged-tree delta
+- **Issue #9041** (closed): changelog.d/8974.fixed.md quotes the pre-merge 28 finding count; merged-tree delta is 23 to 0
+- **Issue #9017** (closed): Router: resolve pad_spacing detection edge and plumb it into kct route (#9011 plumbing)
 - **PR #9040**: fix: reject Gerber aperture macros named with reserved template names C/R/O/P
 - **Issue #8997** (closed): Gerber reader: a macro named C/R/O/P silently shadows the standard aperture template
 - **PR #9014**: feat: add --report-detour-ratio probe with alone-on-empty detour report
