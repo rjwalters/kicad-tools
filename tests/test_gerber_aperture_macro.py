@@ -187,6 +187,25 @@ def test_macro_defined_after_use_rejects():
         parse_gerber_geometry(source)
 
 
+@pytest.mark.parametrize("name", ["C", "R", "O", "P"])
+def test_macro_named_reserved_template_rejects_at_definition(name):
+    body = f"%AM{name}*\n1,1,5,0,0*%"
+    with pytest.raises(GerberGeometryError, match=f"reserved template name: {name}"):
+        parse_gerber_geometry(HEADER + body + f"%ADD10{name},0.5*%D10*X0Y0D03*M02*")
+
+
+@pytest.mark.parametrize("name", ["C", "R", "O", "P"])
+def test_reserved_name_macro_rejects_even_never_instantiated(name):
+    with pytest.raises(GerberGeometryError, match=f"reserved template name: {name}"):
+        parse_gerber_geometry(HEADER + f"%AM{name}*1,1,5,0,0*%" + "M02*")
+
+
+def test_lowercase_macro_name_is_not_reserved():
+    source = HEADER + "%AMc*1,1,5,0,0*%" + "%ADD10c,0.5*%D10*X0Y0D03*M02*"
+    image = parse_gerber_geometry(source)
+    assert image.geometry.area == pytest.approx(math.pi * 2.5**2)
+
+
 REGION_FREE_MACRO_COPPER = [
     ("02-charlieplex-led", "-F_Cu.gtl"),
     ("02-charlieplex-led", "-B_Cu.gbl"),
