@@ -1066,10 +1066,13 @@ def test_pad_spacing_cases_fixture_pins_severities():
 
     * pad<->track different-net 0.10 mm -> error (net-blind, pad band);
     * pad<->track same-net 0.10 mm -> error (deliberate since #8938);
-    * pad<->pad gap exactly at the 0.15 mm danger edge -> not reported
-      (the measured 0.14999999999999858 mm sits in the scan's 0.001 mm
-      tolerance dead-band, and band semantics put the edge itself outside
-      the error tier -- only a gap strictly below the edge errors);
+    * pad<->pad gap nominally at the 0.15 mm danger edge -> not reported
+      (suppression here is the scan tolerance dead-band alone: the
+      measured 0.14999999999999858 mm sits strictly below the edge, so
+      band semantics alone would call it an error -- only the exact
+      edge value is outside the error tier, pinned directly by
+      ``test_pad_band_edge_severity_boundaries``; a future TOLERANCE
+      change would flip this case to error);
     * pad<->pad 0.14 mm, just below the edge -> error;
     * pad+zone mix 0.10 mm -> info (zone-fill is never tiered, #8938);
     * pad<->pad 0.16 mm, above the detection edge -> not reported.
