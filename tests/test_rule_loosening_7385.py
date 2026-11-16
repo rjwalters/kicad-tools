@@ -607,6 +607,56 @@ def test_dru_floor_only_block_refused_against_authored_zone():
     }
 
 
+def test_dru_layer_scopes_match_real_layer_names():
+    """Inner layers are ``In1.Cu``, ``In2.Cu``, ... -- never ``In.Cu`` --
+    so an ``(layer inner)`` floor must match them and an ``(layer outer)``
+    floor must not (Issue #8937 review: the dotted prefix matched nothing,
+    which applied the outer floor to every inner layer)."""
+    from kicad_tools.core.rule_loosening import _rule_matches_layer
+
+    outer = {"layer": "outer"}
+    inner = {"layer": "inner"}
+    assert _rule_matches_layer(outer, "F.Cu")
+    assert _rule_matches_layer(outer, "B.Cu")
+    assert not _rule_matches_layer(outer, "In1.Cu")
+    assert not _rule_matches_layer(outer, "In22.Cu")
+    assert _rule_matches_layer(inner, "In1.Cu")
+    assert _rule_matches_layer(inner, "In22.Cu")
+    assert not _rule_matches_layer(inner, "F.Cu")
+    assert not _rule_matches_layer(inner, "B.Cu")
+
+
+_SPLIT_FLOOR = """(version 1)
+(rule "Clearance (outer)"
+  (layer outer)
+  (constraint clearance (min 0.15mm)))
+(rule "Clearance (inner)"
+  (layer inner)
+  (constraint clearance (min 0.1016mm)))
+"""
+
+_INNER_AUTHORED = {
+    "netclasses": {"Default": 0.15},
+    "zones": [["In1.Cu", "GND", 0.12]],
+}
+
+
+def test_dru_split_floor_refused_against_an_inner_zone_between_the_floors():
+    """The shipped 4-layer 2 oz shape (Issue #8836): outer floor 0.15,
+    inner 0.1016.  A zone authored between the two on ``In1.Cu`` must be
+    guarded -- the inner floor governs its layer, not the outer one (the
+    review's measured false-negative: the inverted matcher resolved
+    In1.Cu at 0.15 and the gate passed a 0.1016 refill of a 0.12 pour)."""
+    with pytest.raises(RuleLooseningError) as excinfo:
+        merge_dru_floors(None, _SPLIT_FLOOR, authored=_INNER_AUTHORED)
+    paths = {item.path for item in excinfo.value.loosenings}
+    assert {
+        "dru.resolved.track_track",
+        "dru.resolved.pad_zone.In1.Cu.GND",
+        "dru.resolved.via_zone.In1.Cu.GND",
+    } <= paths
+
+
 def test_dru_fixed_block_passes_and_passthrough_is_byte_identical():
     merged = merge_dru_floors(None, _FIXED_BLOCK, authored=_AUTHORED)
     assert "Zone clearance - GND (F.Cu)" in merged

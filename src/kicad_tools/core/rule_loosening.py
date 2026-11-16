@@ -522,10 +522,13 @@ def _rule_matches_layer(rule: Mapping[str, Any], layer: str | None) -> bool:
         return True
     if layer is None:
         return False
+    # Real KiCad inner layers are ``In1.Cu``, ``In2.Cu``, ... -- never
+    # ``In.Cu`` -- so the prefix test must not carry the dot (same spelling
+    # as ``router.board_clearance_rules._layer_matches``).
     if scope == "outer":
-        return bool(not layer.startswith("In.") and layer.endswith(".Cu"))
+        return bool(layer in ("F.Cu", "B.Cu"))
     if scope == "inner":
-        return bool(layer.startswith("In.") and layer.endswith(".Cu"))
+        return bool(layer.startswith("In") and layer.endswith(".Cu"))
     return bool(scope == layer)
 
 
@@ -698,7 +701,10 @@ def _dru_loosenings(before: Mapping[str, Any], after: Mapping[str, Any]) -> list
     scopes: set[str] = set()
     for rule in after_rules + before_rules:
         scope = rule.get("layer")
-        if isinstance(scope, str):
+        # Probe concrete copper layers only: an ``(layer outer)`` /
+        # ``(layer inner)`` scope is a class of layers, not a layer name,
+        # and as a probe it can never exercise the rule that carries it.
+        if isinstance(scope, str) and scope.endswith(".Cu"):
             scopes.add(scope)
     for layer, _net, _value in zones:
         scopes.add(layer)

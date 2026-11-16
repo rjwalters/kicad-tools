@@ -253,8 +253,8 @@ def test_netclass_clearance_cross_gate_fails_on_close_tracks(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _emitted(project: dict, zone_clearances) -> str:
-    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=1.0)
+def _emitted(project: dict, zone_clearances, copper_oz: float = 1.0) -> str:
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=copper_oz)
     return generate_project_dru(
         rules, project, manufacturer_id="jlcpcb", zone_clearances=zone_clearances
     )
@@ -279,6 +279,59 @@ def test_zone_rules_join_the_ascending_emission() -> None:
         "(A.Type == 'Zone' && A.NetName == 'GND') || "
         "(B.Type == 'Zone' && B.NetName == 'GND')" in text
     )
+
+
+def test_split_floor_profile_emits_inner_zone_rules_between_the_floors() -> None:
+    """The 4-layer 2 oz profile splits its floors (Issue #8836): outer
+    0.15, inner 0.1016.  The same authored 0.12 mm is *between* the two:
+    on the inner layer the inner floor governs, so the authored value must
+    be restored; on the outer layer 0.12 is below the outer floor, which
+    still binds it -- the review's measured gap had the outer floor decide
+    both, skipping the inner rule and refilling In1.Cu at 0.1016."""
+    text = _emitted(_project(), [("F.Cu", "GND", 0.12), ("In1.Cu", "GND", 0.12)], copper_oz=2.0)
+    assert "Zone clearance - GND (In1.Cu)" in text
+    assert "(min 0.12mm)" in text
+    assert "Zone clearance - GND (F.Cu)" not in text
+
+
+def test_split_floor_profile_still_skips_zones_at_or_below_their_own_floor() -> None:
+    """Redundant means at-or-below the floor of the zone's *own* layer:
+    0.08 is below the inner floor, 0.12 on F.Cu is below the outer floor,
+    and the unsplit 1 oz profile keeps its single floor for every layer."""
+    split = _emitted(_project(), [("In1.Cu", "PWR", 0.08), ("F.Cu", "PWR", 0.12)], copper_oz=2.0)
+    assert "PWR" not in split
+    unsplit = _emitted(_project(), [("In1.Cu", "PWR", 0.05)])
+    assert "PWR" not in unsplit
+
+
+def test_split_floor_emission_passes_the_fail_closed_gate() -> None:
+    """The review's end-to-end reproduction as a regression pin: with the
+    outer-floor-only arm the In1.Cu zone rule was skipped *and* the gate
+    passed (the two defects cancelled into a green suite).  With the
+    per-layer floor the rule is emitted and the authored baselines hold,
+    while the same profile emitted without the zone arm (mode 0's plain
+    block) resolves In1.Cu at the 0.1016 inner floor -- refused."""
+    from kicad_tools.core.rule_loosening import RuleLooseningError
+    from kicad_tools.manufacturers.dru_generator import merge_dru_floors
+
+    authored = {"netclasses": {"Default": 0.2}, "zones": [["In1.Cu", "GND", 0.12]]}
+    project = _project()
+    text = _emitted(project, [("In1.Cu", "GND", 0.12)], copper_oz=2.0)
+    assert "Zone clearance - GND (In1.Cu)" in text
+    assert "Zone clearance - GND (In1.Cu)" in merge_dru_floors(None, text, authored=authored)
+
+    rules = get_profile("jlcpcb").get_design_rules(layers=4, copper_oz=2.0)
+    plain = generate_project_dru(
+        rules,
+        project,
+        manufacturer_id="jlcpcb",
+        zone_clearances=[("In1.Cu", "GND", 0.12)],
+        preserve_board_rules="0",
+    )
+    assert "Zone clearance" not in plain
+    with pytest.raises(RuleLooseningError) as excinfo:
+        merge_dru_floors(None, plain, authored=authored)
+    assert "dru.resolved.pad_zone.In1.Cu.GND" in {item.path for item in excinfo.value.loosenings}
 
 
 def test_zone_reader_skips_zones_without_an_authored_clearance(tmp_path) -> None:

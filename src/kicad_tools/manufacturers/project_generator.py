@@ -1148,6 +1148,20 @@ def board_net_names(pcb_path: str | Path) -> set[str] | None:
     }
 
 
+def _zone_clearance_floor(rules: DesignRules, layer: str) -> float:
+    """The fab floor that governs a zone on ``layer`` (Issue #8937 review).
+
+    ``min_clearance_mm`` is the *outer*-layer floor; the 2 oz profiles split
+    the floors (#8836) and bind inner layers at ``min_inner_clearance_mm``
+    when it is set and lighter.  The zone arm must compare against the floor
+    that actually governs the zone's own layer, or a zone authored between
+    the two floors is skipped as "redundant" while no rule protects it.
+    """
+    if layer.startswith("In") and rules.min_inner_clearance_mm is not None:
+        return rules.min_inner_clearance_mm
+    return rules.min_clearance_mm
+
+
 def generate_project_dru(
     rules: DesignRules,
     project_data: dict,
@@ -1284,12 +1298,15 @@ def generate_project_dru(
                 )
             )
         # The zone arm: each zone's ``connect_pads`` clearance restored at
-        # ``max(fab floor, authored)``, so the floor still binds a zone
-        # authored below it (the bare zone exclusion the issue's Option 2
-        # proposed would have left such a zone unprotected).
+        # ``max(fab floor for its layer, authored)``, so the floor still
+        # binds a zone authored below it (the bare zone exclusion the
+        # issue's Option 2 proposed would have left such a zone
+        # unprotected).  The floor is per layer: the 2 oz profiles bind
+        # inner layers at ``min_inner_clearance_mm``, not the outer one.
         for layer, net, authored in zone_clearances or ():
-            clearance = max(dru_rules.min_clearance_mm, authored)
-            if mode == PRESERVE_MODE_STRICTER and clearance <= dru_rules.min_clearance_mm:
+            floor = _zone_clearance_floor(dru_rules, layer)
+            clearance = max(floor, authored)
+            if mode == PRESERVE_MODE_STRICTER and clearance <= floor:
                 continue
             emitted.append(
                 (
