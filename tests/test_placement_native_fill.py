@@ -379,3 +379,46 @@ def test_find_kicad_python_retries_cold_start_timeout(monkeypatch):
     monkeypatch.setattr(placement_fill.subprocess, "run", fake_run)
     assert placement_fill.find_kicad_python() is not None
     assert len(calls) == 2 and calls[0] > 5
+
+
+def test_find_kicad_python_probe_parameter_reaches_subprocess(monkeypatch):
+    """A custom probe replaces the whole ``-c`` expression, not just an assert."""
+    import subprocess
+
+    from kicad_tools.zones import placement_fill
+
+    cmds = []
+
+    def fake_run(cmd, **kw):
+        cmds.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(placement_fill.subprocess, "run", fake_run)
+    assert placement_fill.find_kicad_python(probe="import pcbnew") is None
+    assert cmds and all(cmd[2] == "import pcbnew" for cmd in cmds)
+
+
+def test_find_kicad_python_default_probe_is_fill_specific_and_unchanged():
+    from kicad_tools.zones import placement_fill
+
+    assert placement_fill._SELECTIVE_FILL_PROBE == (
+        "import sys, pcbnew; "
+        "__import__('wx') if sys.platform != 'linux' else None; "
+        "assert hasattr(pcbnew.ZONE, 'SetLayerSetAndRemoveUnusedFills')"
+    )
+    assert placement_fill.find_kicad_python.__defaults__ == (placement_fill._SELECTIVE_FILL_PROBE,)
+
+
+def test_find_kicad_python_returns_first_passing_candidate(monkeypatch):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from kicad_tools.zones import placement_fill
+
+    monkeypatch.setattr(
+        placement_fill.subprocess,
+        "run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+    assert placement_fill.find_kicad_python(probe="import pcbnew") == Path(sys.executable)
