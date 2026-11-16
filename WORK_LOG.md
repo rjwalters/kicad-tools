@@ -16,6 +16,10 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-16
 
+- **PR #9040**: fix: reject Gerber aperture macros named with reserved template names C/R/O/P
+- **Issue #8997** (closed): Gerber reader: a macro named C/R/O/P silently shadows the standard aperture template
+- **PR #9014**: feat: add --report-detour-ratio probe with alone-on-empty detour report
+- **Issue #9003** (closed): Router: detour-ratio report and targeted post-settle detour repair pass
 - **PR #8995**: feat: thread the same-net pad slit band into route-side via placement (#8974)
 - **Issue #8974** (closed): Route-side same-net pad slit band: thread the merged guard into the oracle weld and escape vias (#8962 producer 2)
 - **PR #9036**: fix: omit empty-reason placeholder for complete mask-to-copper stanza
