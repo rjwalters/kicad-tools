@@ -5,6 +5,14 @@
 *Raw per-connection rows: the run's `<output>.detour_ratio.json` sidecars;
 the pooled table below was aggregated from them.*
 
+*Measured at PR #9014 head `c8e4feca6`, before review fixes to the probe's
+state restore (`routing_failures` and other leaked state) and its
+reporting of partly failed multi-terminal nets. Those fixes change only
+what a probe failure leaves behind and how it is reported. No measured
+board had a probe-no-path row, but the old code dropped partial failures
+silently, so that zero is a lower bound. The numbers were not re-measured
+after the fix.*
+
 ## Method
 
 `kct route --report-detour-ratio` was run over the in-repo fleet boards with
@@ -67,6 +75,22 @@ Offenders concentrate in four boards (01: 1, 02: 4, 03: 4, 05: 7); boards
   and once without `--report-detour-ratio`; the written `.kicad_pcb` files
   are **byte-identical** (`cmp`). Board 03 exercises the negotiated driver
   with rip-up activity (its log shows iteration rip-up/re-route rounds).
+- Scope of that claim: the probe restores router state, not wall-clock
+  time. Its searches run before the real route and count against any
+  `--timeout` / wall deadline, so a run that a time limit cuts short can
+  differ with the flag on. The `cmp` runs above finished inside their
+  limits.
+- Review of PR #9014 found that the probe at `c8e4feca6` leaked its own
+  failure records (`routing_failures`), the failure-analysis cache and
+  budget, the Python-fallback memo and stage budget, and lazily built grid
+  state into the live run. A board where no probe search fails never
+  exercises the failure-path leaks, which is consistent with the `cmp`
+  checks passing on 01 and 03. The probe now snapshots and
+  restores every attribute of the router, pathfinder, grid and their
+  helper objects (`router/probe_state.py`), except the grid's
+  occupancy-generation counter, which only moves forward. A router-level test
+  (`test_unroutable_net_failure_records_identical`) pins identical failure
+  records and copper for a net that cannot route on the empty board.
 - The same identity is pinned as a test:
   `tests/test_detour_ratio_report_9003.py` (synthetic board, both the CLI
   negotiated path and the plain `route_all` path, plus a targeted-rip-up
@@ -82,16 +106,34 @@ Offenders concentrate in four boards (01: 1, 02: 4, 03: 4, 05: 7); boards
   both are opt-in-flag territory. They are the known blind spots of this
   measurement.
 
-## Verdict: fat tail -- the repair pass is warranted
+## Verdict: a borderline fat tail -- a targeted repair pass is worth trying
 
-The tail is **fat** by the issue's own criterion ("a non-trivial set of
-connections at multiples of their alone-cost"): 10.9% of connections sit
-above 1.25x, the extreme reaches 3.7x, and offenders concentrate in exactly
-the dense boards where an occupied short corridor is the plausible cause
-(03, 05) rather than scattering randomly. The bulk of the distribution is
-at cost (71% of connections at <= 1.05x), so a *targeted* repair pass -- not
-a global re-negotiation -- is the right shape, which is what the issue
-already specified.
+By the issue's criterion ("a non-trivial set of connections at multiples
+of their alone-cost") the tail is **fat, but only just**:
+
+- 16 of 147 measured connections (10.9%) sit above 1.25x, and they
+  concentrate in the dense boards (03, 05), where an occupied short
+  corridor is the plausible cause.
+- Only **2 of 147** are at 2x or more (3.7x and 2.1x). Most offenders sit
+  between 1.25x and 1.5x.
+- If every offender were repaired to its alone-cost, at most **91.7 mm**
+  of copper would be saved across the whole fleet. That is an upper bound.
+- The bulk of the distribution is at cost: 71% of connections are at or
+  below 1.05x.
+
+**Blind spot.** 37 of the 184 probed connections (20%) are `unmatched`:
+the settled route did not reproduce them, so they carry no ratio. Tap-in
+and Steiner reroutes, which are where avoidable detours could plausibly
+hide, would land in that bucket, so the measured tail may understate the
+real one. The unmatched rows could equally hold mostly at-cost
+connections, so the 10.9% offender rate could move in either direction.
+Boards 07 and 09 were not measured at all (below).
+
+So the evidence supports *trying* a targeted repair pass, not a global
+re-negotiation, which is the shape the issue already specified. It does
+not show that the pass will recover much copper. #9013's planner should
+weigh the small upper bound against the cost, and should shrink the
+`unmatched` blind spot before relying on these numbers as a baseline.
 
 Follow-up: the bounded post-settle repair pass (identify blockers, lift,
 reroute the offender, restore, keep only if `RouteScore.is_better_than`

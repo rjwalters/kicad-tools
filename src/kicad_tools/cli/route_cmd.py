@@ -8691,7 +8691,9 @@ def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
 
     Off by default (mirrors the ``_ripup_strategy`` attribute-on-router
     pattern above): without the flag no probe runs, no sidecar is written
-    and the run is byte-identical.  When passed, sets
+    and the run is byte-identical.  With it, routed output is still
+    identical unless a wall-clock limit cuts the run short (the probe's
+    searches count against ``--timeout``).  When passed, sets
     ``router.report_detour_ratio`` so ``route_all`` /
     ``route_all_negotiated`` run the read-only alone-on-empty probe
     pre-pass; the report itself is printed/written post-settle by
@@ -21325,8 +21327,11 @@ def _route_parser() -> argparse.ArgumentParser:
             "distribution summary and the worst offenders above ~1.25x, "
             "and write them to a stem-keyed <output>.detour_ratio.json "
             "sidecar. Roughly doubles search work (one extra A* per "
-            "connection). Diagnostic only: the probe is read-only and "
-            "never changes routed copper or the exit code (issue #9003). "
+            "connection). Diagnostic only: the probe restores all router "
+            "state it touches and never changes the exit code, so routed "
+            "copper is identical with and without the flag -- except when "
+            "a wall-clock limit (--timeout) cuts the run short, since the "
+            "probe's searches count against that limit (issue #9003). "
             "Grid engine only; a no-op on the mesh/lattice engines."
         ),
     )

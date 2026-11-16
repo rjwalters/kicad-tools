@@ -130,6 +130,11 @@ class DetourRatioSummary:
     matched: int = 0
     no_path: int = 0
     unmatched: int = 0
+    unmeasured: int = 0
+    """Rows that are neither matched, no-path nor unmatched yet carry no
+    ratio: a zero-length alone cost (both pads on the same spot), or a row
+    the settled route was never paired against.  Counted so that
+    ``probed == matched + no_path + unmatched + unmeasured`` always holds."""
     median: float | None = None
     p90: float | None = None
     p99: float | None = None
@@ -166,8 +171,9 @@ def summarize_detour_records(
     """Summarise detour records into the distribution the report prints.
 
     Ratios enter the distribution only when both sides measured and the
-    probe found a path; ``no_path`` and ``unmatched`` rows are counted and
-    reported but never silently dropped (issue #9003's edge-case rule).
+    probe found a path; ``no_path``, ``unmatched`` and ``unmeasured`` rows
+    are counted and reported but never silently dropped (issue #9003's
+    edge-case rule), and the four buckets always sum to ``probed``.
     ``unattributed_drawn_mm`` is settled copper no probe connection claimed
     (escape-stub hops and similar infrastructure fragments) -- reported in
     the totals, never charged to a connection's ratio.
@@ -181,10 +187,13 @@ def summarize_detour_records(
     for rec in recs:
         if rec.probe_no_path:
             summary.no_path += 1
-        elif rec.unmatched:
+            continue
+        if rec.unmatched:
             summary.unmatched += 1
+            continue
         ratio = rec.ratio
         if ratio is None:
+            summary.unmeasured += 1
             continue
         summary.matched += 1
         ratios.append(ratio)
@@ -216,6 +225,7 @@ def format_detour_report(summary: DetourRatioSummary) -> str:
         (
             f"  connections: {summary.probed} probed, {summary.matched} matched, "
             f"{summary.no_path} probe-no-path, {summary.unmatched} unmatched"
+            + (f", {summary.unmeasured} unmeasured" if summary.unmeasured else "")
         ),
     ]
     if summary.matched:
@@ -257,6 +267,11 @@ def format_detour_report(summary: DetourRatioSummary) -> str:
             f"  note: {summary.no_path} connection(s) found no path on the "
             "empty board and carry no ratio"
         )
+    if summary.unmeasured:
+        lines.append(
+            f"  note: {summary.unmeasured} connection(s) carry no ratio "
+            "(zero-length alone cost, or never paired with settled copper)"
+        )
     return "\n".join(lines)
 
 
@@ -291,6 +306,7 @@ def detour_ratio_payload(
             "matched": summary.matched,
             "no_path": summary.no_path,
             "unmatched": summary.unmatched,
+            "unmeasured": summary.unmeasured,
             "median": summary.median,
             "p90": summary.p90,
             "p99": summary.p99,

@@ -443,3 +443,280 @@ class TestSidecarContract:
         # No records -> returns before touching the filesystem.
         route_cmd._report_detour_ratio(tmp_path / "out.kicad_pcb", object())
         assert not (tmp_path / "out.detour_ratio.json").exists()
+
+
+# --- review regressions (PR #9014): failures, leaks, counts -----------------
+
+
+def _walled_board(extra_n1_pads: int = 0) -> str:
+    """Single-layer board where /N1's RA1 pad is walled in by /WALL pads.
+
+    RA1 cannot be reached on the empty board (no via escape on one layer),
+    so every /N1 edge touching it fails in the probe AND in the real run --
+    the case the original non-perturbation tests never exercised.
+    ``extra_n1_pads`` adds reachable /N1 pads, making /N1 multi-terminal
+    with a mix of routable and failing edges.
+    """
+    nets = ['(net 0 "")', '(net 1 "/N1")', '(net 2 "/WALL")']
+    parts = [
+        _fp("RA1", 10, 105.0, 110.0, _pad("1", 0, 0, 1, "/N1")),
+        _fp("RB1", 11, 125.0, 110.0, _pad("1", 0, 0, 1, "/N1")),
+    ]
+    for k in range(extra_n1_pads):
+        parts.append(_fp(f"RC{k + 1}", 30 + k, 125.0, 104.0 + 12.0 * k, _pad("1", 0, 0, 1, "/N1")))
+    ring = []
+    k = 0
+    for dx in (-0.5, 0.0, 0.5):
+        for dy in (-0.5, 0.0, 0.5):
+            if dx == 0.0 and dy == 0.0:
+                continue
+            k += 1
+            ring.append(_pad(str(k), dx, dy, 2, "/WALL"))
+    parts.append(_fp("W1", 20, 105.0, 110.0, " ".join(ring)))
+    parts.append(_fp("W2", 21, 115.0, 115.0, _pad("1", 0, 0, 2, "/WALL")))
+    return f"""(kicad_pcb (version 20240108) (generator "test") (generator_version "8.0")
+  (general (thickness 1.6))
+  (layers (0 "F.Cu" signal) (44 "Edge.Cuts" user))
+  (setup (pad_to_mask_clearance 0))
+  {chr(10).join(nets)}
+  (gr_rect (start 100 100) (end 130 120) (stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts"))
+{"".join(parts)})
+"""
+
+
+def _failure_signature(router) -> list:
+    return [
+        (
+            f.net,
+            str(f.failure_cause),
+            f.reason,
+            tuple(f.source_pad),
+            tuple(f.target_pad),
+            tuple(f.blocking_nets),
+        )
+        for f in router.routing_failures
+    ]
+
+
+def _state_fingerprint(router) -> dict:
+    """Every attribute of the router, pathfinder, grid and halo registry.
+
+    Containers fingerprint by content (shallow), arrays by bytes, nested
+    objects by identity.  A probe that leaves anything behind on these
+    objects -- a new lazy cache, a grown memo, a spent budget, a rebound
+    list -- changes this fingerprint.
+    """
+    import hashlib
+    import random as _random
+
+    import numpy as np
+
+    def fp(value):
+        if isinstance(value, np.ndarray):
+            return (
+                "nd",
+                value.shape,
+                hashlib.md5(np.ascontiguousarray(value).tobytes()).hexdigest(),
+            )
+        if isinstance(value, (int, float, str, bool, type(None))):
+            return value
+        if isinstance(value, _random.Random):
+            return ("rng", hash(value.getstate()))
+        if isinstance(value, dict):
+            return ("dict", tuple(sorted((repr(k), _ident(v)) for k, v in value.items())))
+        if isinstance(value, (list, tuple)):
+            return (type(value).__name__, tuple(_ident(v) for v in value))
+        if isinstance(value, (set, frozenset)):
+            return ("set", frozenset(_ident(v) for v in value))
+        return ("id", id(value))
+
+    def _ident(v):
+        if isinstance(v, (int, float, str, bool, type(None), tuple)):
+            return v
+        return id(v)
+
+    out = {}
+    objects = {
+        "auto": router,
+        "pathfinder": router.router,
+        "grid": router.grid,
+        "halo": getattr(router.grid, "_route_halo", None),
+    }
+    for label, obj in objects.items():
+        if obj is None:
+            continue
+        for name, value in vars(obj).items():
+            out[f"{label}.{name}"] = fp(value)
+    return out
+
+
+class TestProbeLeavesNoTrace:
+    @pytest.mark.parametrize("board", ["walled", "congested"])
+    def test_probe_leaves_no_attribute_trace(self, tmp_path: Path, board: str) -> None:
+        """Structural guard: the probe restores EVERY attribute it touched.
+
+        The original guard was a hand-kept save list that missed
+        ``routing_failures``, the failure-analysis cache/budget, the
+        Python-fallback memo/budget and lazily built grid state.  This test
+        does not list fields: it fingerprints every attribute of the
+        objects the search writes to, so a new ``route_net`` side effect
+        the restore misses fails here.
+        """
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        pcb = tmp_path / f"{board}.kicad_pcb"
+        pcb.write_text(_walled_board() if board == "walled" else _board(nets=4))
+        router, _ = load_pcb_for_routing(str(pcb), strategy="grid")
+        router.report_detour_ratio = True
+        router._prepare_routing()
+        router._install_grid_rule_area_keepouts()
+
+        before = _state_fingerprint(router)
+        router._probe_alone_on_empty_lengths()
+        after = _state_fingerprint(router)
+
+        assert router.detour_probe_records
+        moved = {
+            key
+            for key in set(before) | set(after)
+            if before.get(key, "<absent>") != after.get(key, "<absent>")
+        }
+        # The records are the probe's output; the #4794 occupancy
+        # generation must move FORWARD so occupancy-keyed caches miss.
+        assert moved == {"auto.detour_probe_records", "grid._occupancy_generation"}
+
+    @pytest.mark.parametrize("driver", ["route_all", "route_all_negotiated"])
+    def test_unroutable_net_failure_records_identical(self, tmp_path: Path, driver: str) -> None:
+        """A net that cannot route on the empty board (the Judge's repro).
+
+        Pre-fix, the probe's own ``RoutingFailure`` stayed on the live
+        router, so /N1's failure records doubled with the flag on -- and
+        every reader of ``routing_failures`` (via-conflict resolver gate,
+        rip-up off-grid exclusion, failed-nets summary, dominant-cause
+        classification) saw a failure from the empty board.
+        """
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        pcb = tmp_path / "walled.kicad_pcb"
+        pcb.write_text(_walled_board())
+        router_on, _ = load_pcb_for_routing(str(pcb), strategy="grid")
+        router_off, _ = load_pcb_for_routing(str(pcb), strategy="grid")
+        router_on.report_detour_ratio = True
+
+        if driver == "route_all":
+            router_on.route_all(suppress_no_timeout_warning=True)
+            router_off.route_all(suppress_no_timeout_warning=True)
+        else:
+            kwargs = {"max_iterations": 3, "per_net_timeout": 10.0, "timeout": 60.0}
+            router_on.route_all_negotiated(**kwargs)
+            router_off.route_all_negotiated(**kwargs)
+
+        # (a) the live run's failure records are unchanged by the probe.
+        # (The negotiated driver tracks its failures in its own state, so
+        # only the plain driver is guaranteed a non-empty list here.)
+        if driver == "route_all":
+            assert _failure_signature(router_off), "board must exercise a failure"
+        assert _failure_signature(router_on) == _failure_signature(router_off)
+        assert not any(r.net_name == "/N1" for r in router_off.routes), "/N1 must stay unrouted"
+        # (c) and so is the copper.
+        assert _route_signature(router_on) == _route_signature(router_off)
+        assert len(router_on.commit_journal) == len(router_off.commit_journal)
+        # (b) the unroutable net is reported as probe-no-path, not dropped.
+        n1 = [r for r in router_on.detour_probe_records if r.net_name == "/N1"]
+        assert n1 and all(r.probe_no_path and r.alone_mm is None for r in n1)
+
+    def test_partial_failure_on_multi_terminal_net_is_reported(self, tmp_path: Path) -> None:
+        """Failed edges of a partly routed multi-terminal net get rows.
+
+        Pre-fix a ``probe_no_path`` row appeared only when EVERY edge of a
+        net failed, so a 3-pad net that connected two pads on the empty
+        board and failed the third silently lost that edge.
+        """
+        from kicad_tools.router.io import load_pcb_for_routing
+
+        pcb = tmp_path / "walled3.kicad_pcb"
+        pcb.write_text(_walled_board(extra_n1_pads=1))
+        router, _ = load_pcb_for_routing(str(pcb), strategy="grid")
+        router.report_detour_ratio = True
+        router._prepare_routing()
+        router._probe_alone_on_empty_lengths()
+
+        n1 = [r for r in router.detour_probe_records if r.net_name == "/N1"]
+        measured = [r for r in n1 if not r.probe_no_path]
+        no_path = [r for r in n1 if r.probe_no_path]
+        assert measured, "the two reachable /N1 pads connect on the empty board"
+        assert no_path, "the walled-in /N1 pad's edge must be reported"
+        # Indices are unique and contiguous within the net.
+        assert sorted(r.connection_index for r in n1) == list(range(len(n1)))
+
+
+class TestSummaryBuckets:
+    def test_buckets_always_sum_to_probed(self) -> None:
+        recs = [
+            DetourConnectionRecord(net_name="A", connection_index=0, alone_mm=10.0, drawn_mm=11.0),
+            DetourConnectionRecord(
+                net_name="B", connection_index=0, alone_mm=None, probe_no_path=True
+            ),
+            DetourConnectionRecord(net_name="C", connection_index=0, alone_mm=5.0, unmatched=True),
+            # Zero-length alone cost: probed, but carries no ratio.
+            DetourConnectionRecord(net_name="D", connection_index=0, alone_mm=0.0, drawn_mm=1.0),
+            # Never paired (finalize not run): probed, no ratio.
+            DetourConnectionRecord(net_name="E", connection_index=0, alone_mm=4.0),
+        ]
+        summary = summarize_detour_records(recs)
+        assert (summary.matched, summary.no_path, summary.unmatched, summary.unmeasured) == (
+            1,
+            1,
+            1,
+            2,
+        )
+        assert summary.probed == (
+            summary.matched + summary.no_path + summary.unmatched + summary.unmeasured
+        )
+        payload = detour_ratio_payload(summary, recs)
+        assert payload["summary"]["unmeasured"] == 2
+        assert "2 unmeasured" in format_detour_report(summary)
+
+
+class TestAttributeStateSnapshot:
+    def test_restores_bindings_contents_new_attrs_and_rngs(self) -> None:
+        import random
+        from collections import Counter, deque
+
+        from kicad_tools.router.probe_state import AttributeStateSnapshot
+
+        class Obj:
+            pass
+
+        shared = [1, 2]
+        obj = Obj()
+        obj.items = shared
+        obj.rebound = [1]
+        obj.counts = Counter({"a": 1})
+        obj.seen = {1}
+        obj.queue = deque([1])
+        obj.budget = 0.0
+        obj.rng = random.Random(3)
+        obj.forward = 10
+
+        snap = AttributeStateSnapshot(obj, skip=("forward",))
+        expected_draw = random.Random(3).random()
+        obj.items.append(3)
+        obj.rebound = [f for f in obj.rebound if f != 1]
+        obj.counts["a"] += 5
+        obj.seen.add(2)
+        obj.queue.append(2)
+        obj.budget += 1.5
+        obj.rng.random()
+        obj.lazy_cache = {"x": 1}
+        obj.forward = 11
+        snap.restore()
+
+        assert obj.items is shared and shared == [1, 2]
+        assert obj.rebound == [1]
+        assert obj.counts == Counter({"a": 1})
+        assert obj.seen == {1} and list(obj.queue) == [1]
+        assert obj.budget == 0.0
+        assert obj.rng.random() == expected_draw
+        assert not hasattr(obj, "lazy_cache")
+        assert obj.forward == 11  # skipped: left as the probe left it

@@ -12667,29 +12667,51 @@ class Autorouter:
 
         The probe must leave NO trace on the live run, or the flag would
         silently change routed copper and the report would be worthless.
-        Every accumulator a normal search writes to is snapshotted and
-        restored (the routed output byte-identity this flag is contractually
-        held to rests on these guards):
+        ``route_net`` has many side effects (failure records, the
+        failure-analysis cache and budget, the Python-fallback memo and
+        stage budget, lazily built grid snapshots, the R-tree, the halo
+        registry, ...), and a hand-maintained save list missed
+        ``routing_failures`` (PR #9014 review).  So the guard is
+        structural: :class:`~kicad_tools.router.probe_state.AttributeStateSnapshot`
+        records EVERY attribute of the Autorouter, the pathfinder, the grid
+        and the helper objects the search writes to, and restores all of
+        them -- attributes created by the probe are deleted, rebound ones are
+        put back, container content is restored in place, RNGs are rewound.
+        On top of that:
 
         - ``commit_journal`` -- probe commits/rips are truncated away via
           :meth:`CommitJournal.mark` / :meth:`CommitJournal.truncate_to`
           (the #6320 discard-a-trial mechanism), keeping the
           ``.access_witness.json`` replay contract clean;
-        - grid occupancy and cost planes -- snapshotted and restored, on
-          top of the per-route unmark (belt and braces), with the #4794
-          occupancy-generation bump;
-        - the pathfinder's routed-segment registry and fill ratios --
-          cleared/reset (there is no committed copper to re-add at this
-          point);
-        - ``search_failures_by_net`` -- a probe's ``no_path`` must not
-          surface in the search-failures sidecar as the net's reason;
+        - every probe route is unmarked from the grid (so the C++ mirror,
+          the R-tree and the halo registry see the matching removal), and
+          the occupancy and cost planes are additionally restored from a
+          copy, with the #4794 occupancy-generation bump (the generation
+          counter itself is never rewound: caches keyed on it must miss).
+          The C++ grid wrapper is deliberately NOT snapshotted: its
+          Python-side sync keys mirror native state the snapshot cannot
+          rewind, and the per-route unmark already invalidates its stored
+          routes for a rebuild;
         - the sub-problem cache -- disabled for the probe: a probe solution
           stored under its signature would be served to the REAL run later,
           whose board is no longer empty -- a silent copper change;
         - decision recording -- disabled so probe rows never enter the
           decisions sidecar;
-        - ``self.routes`` / ``grid.routes`` -- restored to their pre-probe
-          content.
+        - the via-conflict resolver -- skipped while probing
+          (``_detour_probe_active``).  It moves or rips OTHER nets' copper;
+          on the alone-on-empty board the only such copper is fixed copper,
+          which a read-only probe must never edit.
+
+        What is NOT covered: wall-clock time.  The probe's searches run
+        before the real route and count against any wall-clock limit the
+        run is under (``--timeout``, the installed wall deadline), so a run
+        that a time limit cuts short can differ with the flag on.  Per-net
+        timeouts are per call and unaffected.
+
+        A failed connection is reported, never dropped: every edge whose
+        probe search failed (one ``RoutingFailure`` per failed edge, read
+        before the restore discards them) becomes a ``probe_no_path`` row,
+        including the partly failed edges of a multi-terminal net.
 
         A failure here is never fatal: the report is advisory, so an
         unexpected error degrades to empty records plus one warning line.
@@ -12707,26 +12729,32 @@ class Autorouter:
             DetourConnectionRecord,
             route_path_ends,
         )
-
-        if net_order is None:
-            net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
-        probe_nets = self._filter_pour_nets(list(net_order))
+        from kicad_tools.router.probe_state import (
+            AttributeStateSnapshot,
+            GlobalRngSnapshot,
+        )
 
         grid = self.grid
         pathfinder = self.router
         records: list[DetourConnectionRecord] = []
 
         journal_mark = self._commit_journal.mark()
-        routes_saved = list(self.routes)
-        grid_routes_saved = list(grid.routes)
-        cache_saved = self._sub_problem_cache
-        self._sub_problem_cache = None
-        decisions_saved = self.record_decisions
-        self.record_decisions = False
-        failures_saved: dict[int, int] | None = None
-        failures_store = getattr(pathfinder, "search_failures_by_net", None)
-        if isinstance(failures_store, dict):
-            failures_saved = dict(failures_store)
+        snapshots = [
+            AttributeStateSnapshot(self),
+            AttributeStateSnapshot(pathfinder),
+            # Issue #4794: the occupancy generation only moves forward.
+            AttributeStateSnapshot(grid, skip=("_occupancy_generation",)),
+        ]
+        for helper in (
+            getattr(grid, "_route_halo", None),
+            getattr(pathfinder, "_py_router", None),
+            getattr(self, "_subgrid_router", None),
+            getattr(self, "_via_manager", None),
+            getattr(self, "_congestion_estimator", None),
+        ):
+            if helper is not None:
+                snapshots.append(AttributeStateSnapshot(helper, copy_arrays=True))
+        rng_snapshot = GlobalRngSnapshot()
         planes: dict[str, np.ndarray] = {}
         for name in (
             "_blocked",
@@ -12739,11 +12767,20 @@ class Autorouter:
             arr = getattr(grid, name, None)
             if isinstance(arr, np.ndarray):
                 planes[name] = arr.copy()
+        self._sub_problem_cache = None
+        self.record_decisions = False
+        self._detour_probe_active = True
 
         try:
+            # Inside the snapshot: the priority sort fills lazy caches
+            # (component pitches, congestion estimator) that are restored.
+            if net_order is None:
+                net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
+            probe_nets = self._filter_pour_nets(list(net_order))
             model = self._kicad_length_model(grid.num_layers)
             for net in probe_nets:
                 start = len(self.routes)
+                failures_before = sum(1 for f in self.routing_failures if f.net == net)
                 try:
                     self.route_net(net)
                 except Exception as exc:  # noqa: BLE001 - a probe never fails a route
@@ -12752,25 +12789,36 @@ class Autorouter:
                         f"{self.net_names.get(net, net)} ({type(exc).__name__}: {exc})"
                     )
                 probed = self.routes[start:]
+                failed_edges = [f for f in self.routing_failures if f.net == net][failures_before:]
                 net_name = self.net_names.get(net, f"Net_{net}")
-                if probed:
-                    for idx, route in enumerate(probed):
-                        records.append(
-                            DetourConnectionRecord(
-                                net_name=net_name,
-                                connection_index=idx,
-                                alone_mm=model.route_length(route),
-                                endpoints=route_path_ends(route),
-                            )
-                        )
-                elif len(self.nets.get(net, [])) >= 2:
-                    # Routable net, but the alone-board search connected
-                    # nothing: report it as probe-no-path rather than
-                    # dropping the net from the measurement (issue #9003).
+                # Escape stubs (sub-grid retry) are pre-pass copper, not
+                # connections -- the drawn side excludes them too.
+                connections = [
+                    r for r in probed if r.segments and not getattr(r, "is_escape", False)
+                ]
+                net_rows_start = len(records)
+                for route in connections:
                     records.append(
                         DetourConnectionRecord(
                             net_name=net_name,
-                            connection_index=0,
+                            connection_index=len(records) - net_rows_start,
+                            alone_mm=model.route_length(route),
+                            endpoints=route_path_ends(route),
+                        )
+                    )
+                # Every edge the alone-board search failed is reported as
+                # probe-no-path rather than dropped -- including the failed
+                # edges of a multi-terminal net whose other edges routed
+                # (issue #9003).  A routable net that connected nothing and
+                # recorded no failure (an exception above) still gets one row.
+                no_path = len(failed_edges)
+                if not connections and not no_path and len(self.nets.get(net, [])) >= 2:
+                    no_path = 1
+                for _ in range(no_path):
+                    records.append(
+                        DetourConnectionRecord(
+                            net_name=net_name,
+                            connection_index=len(records) - net_rows_start,
                             alone_mm=None,
                             probe_no_path=True,
                         )
@@ -12788,22 +12836,14 @@ class Autorouter:
             )
             records = []
         finally:
-            # Restore every accumulator the probe could have touched (see
-            # the docstring for the enumeration and why each matters).
+            # Restore every attribute the probe could have touched (see the
+            # docstring), then the planes, then invalidate occupancy caches.
+            for snapshot in snapshots:
+                snapshot.restore()
+            rng_snapshot.restore()
             for name, saved in planes.items():
                 getattr(grid, name)[...] = saved
             grid.bump_occupancy_generation()  # Issue #4794
-            if hasattr(pathfinder, "clear_routed_segments"):
-                pathfinder.clear_routed_segments()
-            if hasattr(pathfinder, "update_layer_fill_ratios"):
-                pathfinder.update_layer_fill_ratios()
-            if failures_saved is not None and isinstance(failures_store, dict):
-                failures_store.clear()
-                failures_store.update(failures_saved)
-            self._sub_problem_cache = cache_saved
-            self.record_decisions = decisions_saved
-            self.routes[:] = routes_saved
-            grid.routes[:] = grid_routes_saved
             self._commit_journal.truncate_to(*journal_mark)
         self.detour_probe_records = records
 
@@ -26284,6 +26324,10 @@ class Autorouter:
             path inside the recursive ``route_net`` call.
         """
         if net not in self.nets:
+            return []
+        # Issue #9003: the read-only detour probe never edits other nets'
+        # copper (on its empty board that could only be fixed copper).
+        if getattr(self, "_detour_probe_active", False):
             return []
 
         # Issue #8414: ``per_net_timeout`` is what is LEFT of the caller's
