@@ -293,6 +293,12 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                 pass  # X2 metadata does not change the image.
             elif match := re.fullmatch(r"AM([A-Za-z0-9_+\-]+)\*(.+)", command, re.DOTALL):
                 name = match[1]
+                if name in {"C", "R", "O", "P"}:
+                    # Reserved standard template names: a macro must not shadow
+                    # the meaning of %ADDC/%ADDR/%ADDO/%ADDP (spec §4.5.2).
+                    raise GerberGeometryError(
+                        f"Aperture macro uses a reserved template name: {name}"
+                    )
                 if name in macros:
                     raise GerberGeometryError("Redefined aperture macro")
                 macros[name] = _parse_aperture_macro(name, match[2])
