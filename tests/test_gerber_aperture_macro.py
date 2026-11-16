@@ -238,9 +238,12 @@ def test_all_committed_solder_mask_layers_parse():
 
 
 @pytest.mark.parametrize(("board", "suffix"), REGION_CARRYING_MACRO_COPPER)
-def test_region_carrying_macro_layers_advance_to_region_errors(board, suffix):
-    with pytest.raises(GerberGeometryError, match="Invalid region contour"):
-        parse_gerber_geometry(_committed_layer(board, suffix))
+def test_region_carrying_macro_copper_layers_parse_after_region_repair(board, suffix):
+    # These layers carry self-touching region contours alongside macro flashes.
+    # The macro subset here parses past the aperture stage and main's #8947
+    # region repair resolves the contours, so the full layer now parses.
+    image = parse_gerber_geometry(_committed_layer(board, suffix)).geometry
+    assert image.area > 0
 
 
 def test_macro_primitive_rotation_matches_gerbonara(tmp_path):

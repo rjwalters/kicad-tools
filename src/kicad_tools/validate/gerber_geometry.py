@@ -312,6 +312,8 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                     raise GerberGeometryError("Nonfinite aperture")
                 if kind in macros:
                     # Macro apertures are flashed; width/hole only apply to draws.
+                    # nonpositive is False: the macro's own expansion rejects empty
+                    # geometry, and a draw must reach the macro-kind raise below.
                     apertures[number] = (
                         _expand_aperture_macro(
                             kind,
@@ -326,6 +328,7 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                         ),
                         kind,
                         0.0,
+                        False,
                         False,
                     )
                     continue
