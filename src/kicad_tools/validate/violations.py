@@ -55,6 +55,11 @@ class DRCViolation:
             (Issue #5946).
         stale_waiver_reason: The stale waiver's ``reason`` (present only when
             ``stale_waiver_hash`` is set).
+        fab_band: The fab band the finding was graded against, ``"trace"`` or
+            ``"pad"``, on a fab-band-graded ``physical_copper_gap`` finding
+            (Issue #8972).  ``None`` when the emitting site has no band
+            concept.  Labels the population only -- it never enters
+            :attr:`key`, so waiver identity is band-independent.
     """
 
     rule_id: str
@@ -73,6 +78,16 @@ class DRCViolation:
     # ``.kct_waivers.json`` instead of never seeing it.  ``None`` when the
     # emitting rule does not classify (``physical_copper_gap`` always does).
     same_net: bool | None = None
+    # Issue #8972: the fab band a ``physical_copper_gap`` finding was graded
+    # against -- ``"trace"`` or ``"pad"`` (the fab's ``trace_spacing`` /
+    # ``pad_spacing`` populations, issue #8938).  Like ``same_net`` this only
+    # labels the population so consumers (the fab-DFM parity attribution)
+    # can tell them apart without splitting the user-visible ``rule_id`` --
+    # ``DRCViolation.key`` embeds ``rule_id``, so an id split would break
+    # every existing ``.kct_waivers.json`` entry for this rule.  ``None``
+    # when the emitting site has no band concept (the legacy opt-in pass,
+    # the zone-fill ``info`` branch).
+    fab_band: str | None = None
     waived: bool = False
     waiver_reason: str | None = None
     waiver_issue: str | None = None
@@ -148,6 +163,9 @@ class DRCViolation:
             # Issue #8938: labels the same-net class without re-deriving it
             # from ``nets`` (and stays None for rules that do not classify).
             "same_net": self.same_net,
+            # Issue #8972: labels the fab band the finding was graded against
+            # (stays None for bandless emit sites); never part of ``key``.
+            "fab_band": self.fab_band,
             # Status distinguishes a waived finding from an active one at a
             # glance for JSON consumers.  Waived findings render as
             # ``"waived"`` regardless of their underlying ``severity`` (Issue

@@ -14,8 +14,10 @@ def read_native_gerber(path: Path, *, chord_error_mm: float = 0.000001):
     from gerbonara.graphic_primitives import Rectangle
     from gerbonara.rs274x import GerberFile
     from gerbonara.utils import MM
+    from shapely import make_valid
     from shapely.affinity import scale
     from shapely.geometry import GeometryCollection, Polygon
+    from shapely.ops import unary_union
 
     layer = GeometryCollection()
     for obj in GerberFile.open(path).objects:
@@ -45,7 +47,23 @@ def read_native_gerber(path: Path, *, chord_error_mm: float = 0.000001):
                 )
             shape = Polygon(vertices)
             if not shape.is_valid:
-                raise ValueError(f"Invalid independent oracle polygon in {path}")
+                # Mirror the production reader's repair for self-touching
+                # fill contours (issue #8947): keep the polygonal parts of
+                # make_valid and require the shoelace area to survive the
+                # repair, so the oracle stays an independent witness on the
+                # same inputs without rejecting legal KiCad output.
+                repaired = make_valid(shape)
+                parts = [
+                    part
+                    for part in getattr(repaired, "geoms", [repaired])
+                    if part.geom_type in {"Polygon", "MultiPolygon"}
+                ]
+                if not parts:
+                    raise ValueError(f"Invalid independent oracle polygon in {path}")
+                repaired = unary_union(parts)
+                if abs(repaired.area - shape.area) > 1e-9 * max(shape.area, 1.0):
+                    raise ValueError(f"Invalid independent oracle polygon in {path}")
+                shape = repaired
             if primitive.polarity_dark == obj.polarity_dark:
                 aperture = aperture.union(shape)
             else:
