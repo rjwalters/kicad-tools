@@ -5,6 +5,40 @@ expansion nor a mask-web width supplies a mask-to-copper process clearance
 requirement; ``default_request_for_manufacturer`` supplies an explicit, cited
 interim policy for manufacturers whose process limit has been observed
 (issue #8842).
+
+Finding message format (issue #9038)
+====================================
+
+Each ``mask_to_copper`` finding reads::
+
+    Mask-to-copper <relation>: <disposition>; [provisional: coverage incomplete;]
+    exposed area <A> mm²; assessment measurement <N>; opening <owner>;
+    exposed copper <kind> (net <net>); <net relation>
+
+``<owner>`` is ``pad:<ref>/<num>`` when the opening's owner pad could be
+identified from the source footprint reference and pad number, otherwise the
+opening's inventory kind with an eight-character UUID prefix (``pad:rect[4f2c1a9b]``,
+``merged_region[...]``). ``<kind>`` is the exposed conductor's inventory kind
+(``segment``, ``arc``, ``via``, ``pad:...``). ``<net relation>`` is one of
+
+- ``same-net own-pad entry`` -- the conductor shares the opening owner's net
+  and terminates inside the opening: for ``segment``/``arc`` conductors one of
+  the conductor's endpoints (the farthest-apart pair of boundary points of its
+  copper, i.e. the rounded track caps) lies within the opening; for a ``via``
+  its center stands in for an endpoint. This is a track entering or leaving its
+  own pad, the shape a fab reports when the exposure is the pad's own escape.
+- ``same-net pass-through`` -- same net, but no endpoint inside: the track
+  passes or bends across the opening without terminating there.
+- ``different-net`` -- the conductor's identified net differs from the
+  opening owner's.
+- (omitted) -- either net is unidentified or the opening is a merged region
+  with no single owner net.
+
+While ``assessment.coverage != "complete"`` the findings are provisional:
+severity is capped at ``warning`` (never ``error``) and each message carries
+``provisional: coverage incomplete``, so an incomplete run never inflates the
+error count. A closing ``mask_to_copper_openings`` info finding summarizes the
+measurements per opening, so one pad with many findings reads as one opening.
 """
 
 from __future__ import annotations
@@ -116,6 +150,14 @@ class MaskCopperMeasurement:
     margin_provenance: str
     rationale: str | None = None
     negative_expansion: bool = False
+    # Triage metadata (issue #9038). All optional so a v1 payload without
+    # them loads unchanged; None means "not determined at measurement time".
+    owner_net: str | None = None
+    conductor_net: str | None = None
+    conductor_kind: str | None = None
+    same_net: bool | None = None
+    own_pad_entry: bool | None = None
+    owner_ref: str | None = None
 
     def __post_init__(self):
         if self.disposition not in (
@@ -136,6 +178,12 @@ class MaskCopperMeasurement:
             or min(self.clearance_mm, self.exposed_area_mm2, self.uncertainty_mm) < 0
         ):
             raise ValueError("Invalid mask measurement units/value")
+        for value in (self.owner_net, self.conductor_net, self.conductor_kind, self.owner_ref):
+            if value is not None and not isinstance(value, str):
+                raise ValueError("Invalid mask measurement triage metadata")
+        for flag in (self.same_net, self.own_pad_entry):
+            if flag is not None and not isinstance(flag, bool):
+                raise ValueError("Invalid mask measurement triage metadata")
 
     def to_dict(self):
         return asdict(self)
@@ -243,6 +291,31 @@ def source_binding(geometry):
     )
 
 
+def _conductor_endpoints(copper):
+    """The two farthest-apart boundary points of a track conductor's copper.
+
+    A stroked track plots as a rounded capsule, so this pair is the track's
+    endpoint caps: the source segment's endpoints themselves are not carried
+    by the object geometry. O(n²) over the few boundary vertices; callers
+    cache per conductor. ``None`` for a degenerate (single-point) shape.
+    """
+    from shapely.geometry import MultiPoint  # type: ignore[import-untyped]
+
+    polygons = list(copper.geoms) if copper.geom_type == "MultiPolygon" else [copper]
+    points = [tuple(p) for polygon in polygons for p in polygon.exterior.coords]
+    if len(points) < 2:
+        return None
+    best_pair = (points[0], points[1])
+    best_square = -1.0
+    for position, first in enumerate(points):
+        for second in points[position + 1 :]:
+            square = (first[0] - second[0]) ** 2 + (first[1] - second[1]) ** 2
+            if square > best_square:
+                best_square = square
+                best_pair = (first, second)
+    return MultiPoint(best_pair)
+
+
 def assess_attributed_geometry(geometry, policy, intents=()):
     """Measure actual native mask against independently retained source copper.
 
@@ -250,8 +323,10 @@ def assess_attributed_geometry(geometry, policy, intents=()):
     mislabeled as penetration depth. Exact-limit measurements remain uncertain
     within the native/Gerber construction budget, and cannot certify a pass.
     """
+    # The shapely.geometry stubs error is consumed at the first import site
+    # (_conductor_endpoints above); a second ignore here would read as unused.
     from shapely import STRtree  # type: ignore[import-untyped]
-    from shapely.geometry import GeometryCollection, box  # type: ignore[import-untyped]
+    from shapely.geometry import GeometryCollection, box
     from shapely.ops import nearest_points, unary_union  # type: ignore[import-untyped]
 
     binding = source_binding(geometry)
@@ -398,6 +473,7 @@ def assess_attributed_geometry(geometry, policy, intents=()):
             conductors.append((identity, item, copper))
         conductor_ids = {entry[0] for entry in conductors}
         index = STRtree([entry[2] for entry in conductors]) if conductors else None
+        endpoint_cache: dict[str, Any] = {}
         for owners, opening, kind, margin, provenance in openings:
             if index is None:
                 continue
@@ -442,6 +518,42 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                 )
                 if intent:
                     disposition = "intentional"
+                # Triage metadata (issue #9038): who owns the opening, what
+                # copper is exposed, and whether the exposure is the pad's
+                # own escape or an unrelated crossing. Never gates the
+                # measurement itself -- the comparison set stays all objects.
+                owner_items = [geometry.objects[o] for o in owners]
+                owner_nets = sorted({o["net"] for o in owner_items if o["net"]})
+                conductor_net = item["net"] or None
+                same_net = (
+                    True
+                    if conductor_net and conductor_net in owner_nets
+                    else False
+                    if conductor_net and owner_nets
+                    else None
+                )
+                single_pad_owner = (
+                    kind != "merged_region"
+                    and len(owner_items) == 1
+                    and owner_items[0]["kind"].startswith("pad:")
+                )
+                owner_ref = owner_items[0].get("pad_ref") if single_pad_owner else None
+                own_pad_entry = None
+                if same_net and single_pad_owner and item["kind"] in ("segment", "arc", "via"):
+                    # Endpoint within the opening = the conductor terminates
+                    # at its own pad (own-pad entry); otherwise it merely
+                    # passes or bends through (pass-through). A via has no
+                    # endpoint; its center stands in for one (docstring).
+                    if item["kind"] == "via":
+                        endpoint = copper.centroid
+                    else:
+                        endpoint = endpoint_cache.get(identity)
+                        if endpoint is None:
+                            endpoint = _conductor_endpoints(copper)
+                            endpoint_cache[identity] = endpoint
+                    own_pad_entry = (
+                        bool(opening.intersects(endpoint)) if endpoint is not None else False
+                    )
                 point = (
                     intersection.representative_point()
                     if area > 0
@@ -470,6 +582,12 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                         provenance,
                         intent.rationale if intent else None,
                         margin < 0,
+                        owner_net=owner_nets[0] if len(owner_nets) == 1 else None,
+                        conductor_net=conductor_net,
+                        conductor_kind=item["kind"],
+                        same_net=same_net,
+                        own_pad_entry=own_pad_entry,
+                        owner_ref=owner_ref,
                     )
                 )
     return result
@@ -534,6 +652,21 @@ class MaskCopperRequest:
         return cls(policy, tuple(intents), native)
 
 
+def _opening_owner_label(measurement) -> str:
+    """Human name for a measurement's mask opening (issue #9038).
+
+    ``pad:<ref>/<num>`` when the owner pad's source identity is known,
+    otherwise the opening kind with an eight-character UUID prefix, because
+    that is the identity the ``items`` list carries.
+    """
+    if measurement.owner_ref:
+        return f"pad:{measurement.owner_ref}"
+    kind = measurement.opening_kind or "opening"
+    if measurement.opening_uuids:
+        return f"{kind}[{measurement.opening_uuids[0][:8]}]"
+    return kind
+
+
 def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
     from .violations import DRCResults, DRCViolation
 
@@ -564,24 +697,75 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
                 ),
             )
         )
+    # Issue #9038: an incomplete assessment still measures, but its findings
+    # are provisional -- the run's coverage may be incomplete for exactly the
+    # regions that produced them. They are capped at warning (never error) and
+    # the message says so, so an unfinished run cannot inflate the error count
+    # the way the 1059-finding consumer report did.
+    provisional = assessment.coverage != "complete"
     for index, measurement in enumerate(assessment.measurements):
         if measurement.disposition == "intentional":
             severity = "info"
-        elif measurement.disposition == "warning":
+        # Warning-disposition measurements and provisional (incomplete-run)
+        # findings share the warning ceiling: neither may read as an error.
+        elif measurement.disposition == "warning" or provisional:
             severity = "warning"
         else:
             severity = "error"
+        parts = [f"Mask-to-copper {measurement.relation}: {measurement.disposition}"]
+        if provisional:
+            parts.append("provisional: coverage incomplete")
+        parts.append(f"exposed area {measurement.exposed_area_mm2:.9g} mm²")
+        parts.append(f"assessment measurement {index}")
+        parts.append(f"opening {_opening_owner_label(measurement)}")
+        copper_desc = measurement.conductor_kind or "unknown copper"
+        if measurement.conductor_net:
+            parts.append(f"exposed copper {copper_desc} (net {measurement.conductor_net})")
+        else:
+            parts.append(f"exposed copper {copper_desc} (unnamed net)")
+        if measurement.same_net is True:
+            if measurement.own_pad_entry is True:
+                parts.append("same-net own-pad entry")
+            elif measurement.own_pad_entry is False:
+                parts.append("same-net pass-through")
+            else:
+                parts.append("same-net")
+        elif measurement.same_net is False:
+            parts.append("different-net")
         result.add(
             DRCViolation(
                 rule_id="mask_to_copper",
                 severity=severity,
-                message=f"Mask-to-copper {measurement.relation}: {measurement.disposition}; "
-                f"exposed area {measurement.exposed_area_mm2:.9g} mm²; assessment measurement {index}",
+                message="; ".join(parts),
                 location=measurement.location_mm,
                 layer=measurement.copper_layer,
                 actual_value=measurement.clearance_mm,
                 required_value=assessment.policy.clearance_mm if assessment.policy else None,
                 items=(*measurement.opening_uuids, measurement.conductor_uuid),
+            )
+        )
+    if assessment.measurements:
+        # Per-opening rollup (issue #9038): 1059 findings on one board read
+        # triageably only once they collapse to the handful of openings that
+        # produced them. Info, like the incomplete finding: never blocks.
+        counts: dict[tuple[str, ...], int] = {}
+        labels: dict[tuple[str, ...], str] = {}
+        for measurement in assessment.measurements:
+            key = tuple(measurement.opening_uuids)
+            counts[key] = counts.get(key, 0) + 1
+            labels.setdefault(key, _opening_owner_label(measurement))
+        ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        shown = [f"{labels[key]} x{count}" for key, count in ordered[:5]]
+        remaining = len(ordered) - len(shown)
+        suffix = f" (+{remaining} more openings)" if remaining > 0 else ""
+        result.add(
+            DRCViolation(
+                rule_id="mask_to_copper_openings",
+                severity="info",
+                message=(
+                    f"Mask-to-copper: {len(assessment.measurements)} findings across "
+                    f"{len(counts)} mask openings; per-opening: {', '.join(shown)}{suffix}"
+                ),
             )
         )
     return result

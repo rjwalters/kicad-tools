@@ -73,6 +73,33 @@ or incomplete coverage prevents a pass and returns exit code 2. The
 `--allow-incomplete` flag does not waive this assessment. Invalid requests are
 command errors.
 
+## Reading the findings
+
+Each `mask_to_copper` finding names both sides of the exposure:
+
+```text
+Mask-to-copper overlap: violation; exposed area 0.12 mm²; assessment measurement 7;
+opening pad:R1/1; exposed copper segment (net GND); same-net own-pad entry
+```
+
+`opening` is `pad:<reference>/<pad number>` when the owning pad is identified from
+the source, otherwise the opening's kind with a UUID prefix (as in the finding's
+`items`). `exposed copper` is the kind and net of the copper found inside or near
+the opening. The trailing relation distinguishes the classes a fab report uses:
+
+- `same-net own-pad entry` — the conductor shares the opening pad's net and
+  terminates inside the opening (for a track, an endpoint lies within it; for a
+  via, its center does): the pad's own escape, not a defect neighbour.
+- `same-net pass-through` — same net, but the track merely passes or bends across
+  the opening without terminating there.
+- `different-net` — the copper belongs to another net.
+
+While the assessment's coverage is incomplete, its findings are provisional: they
+are capped at warning severity and each message says `provisional: coverage
+incomplete`, so an unfinished run never inflates the error count. A closing
+`mask_to_copper_openings` info finding counts the findings per opening, so one pad
+with many findings reads as one opening.
+
 ## Declare a particular connected escape
 
 The owning pad is excluded only by its source UUID. Other copper remains eligible
