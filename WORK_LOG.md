@@ -16,6 +16,22 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-16
 
+- **PR #9012**: refactor: generalise the same-net slit-band predicate to pad-vs-trace segments
+- **PR #9010**: fix: admit kct's conditional managed .kicad_dru constraints to native mask attribution
+- **PR #9004**: docs: add WeaveEngine topology-first evaluation note and registry entry
+- **PR #8989**: fix: keep recipe pour-repair via annuli out of the same-net pad slit band
+- **PR #8986**: fix: adopt SMD end-tie vias at the tie arc on record-less parallel re-runs
+- **PR #8980**: fix(validate): expand KiCad 10's %AMRoundRect aperture macro in the Gerber reader
+- **PR #8978**: fix: discover a pcbnew-capable interpreter for the native mask worker
+- **PR #8955**: fix(dru): restore authored zone clearances the fab-floor rule replaced at refill
+- **Issue #8993** (closed): Evaluate c28ba/WeaveEngine (topology-first autorouter) for router ideas
+- **Issue #8976** (closed): Same-net pad-vs-trace copper slits on boards 06/07: attribute the population, then fix or document
+- **Issue #8975** (closed): Recipe repair-pass same-net pad slits: explain the skew-tuner/pour-refill coupling before a band fix
+- **Issue #8973** (closed): mask_to_copper still rejects kct's conditional managed .kicad_dru blocks
+- **Issue #8970** (closed): Record-less parallel re-run still accretes the two end-tie vias on an SMD-ended leg
+- **Issue #8959** (closed): Gerber reader rejects KiCad 10's %AMRoundRect aperture macro
+- **Issue #8946** (closed): mask_to_copper native helper runs under a python3 with no pcbnew
+- **Issue #8937** (closed): Managed .kicad_dru fab-floor clearance rule overrides larger zone and net-class clearances
 - **PR #8977**: fix: kct check verdict reads INCOMPLETE when a blocking category cannot run, with collapsed reasons and a remediation line
 - **PR #8967**: feat: size parallel-copy tie rows from declared current and judge width-swap vias
 - **Issue #8950** (closed): pcb reinforce parallel: tie-via arrays at SMD ends, and path_ampacity judging a width-swap via between doubled stretches
