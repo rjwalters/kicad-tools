@@ -3380,7 +3380,12 @@ def _emit_drc_sidecars(
             )
         else:
             from kicad_tools.manufacturers.dru_generator import merge_dru_floors
-            from kicad_tools.manufacturers.project_generator import generate_project_dru
+            from kicad_tools.manufacturers.project_generator import (
+                PRESERVE_MODE_OFF,
+                generate_project_dru,
+                preserve_board_rules_mode,
+            )
+            from kicad_tools.manufacturers.zone_clearance_dru import zone_clearance_targets
 
             dru_path = pcb_path.with_suffix(".kicad_dru")
             pro_path = pcb_path.with_suffix(".kicad_pro")
@@ -3391,6 +3396,21 @@ def _emit_drc_sidecars(
             existing_dru = dru_path.read_text(encoding="utf-8") if dru_path.exists() else None
             from kicad_tools.manufacturers.keepout_dru import apply_keepout_rules
 
+            # Issue #8937: zone ``connect_pads`` clearances feed the emitted
+            # block's zone arm and the loosening gate's authored baselines.
+            zone_targets = zone_clearance_targets(pcb_path) if pcb_path.exists() else []
+            authored_state = {
+                "netclasses": {
+                    str(cls.get("name")): cls.get("clearance")
+                    for cls in project_data.get("net_settings", {}).get("classes", [])
+                    if isinstance(cls.get("clearance"), (int, float))
+                    and not isinstance(cls.get("clearance"), bool)
+                },
+                "zones": [[layer, net, value] for layer, net, value in zone_targets],
+            }
+            allow_dru = (
+                ("*",) if preserve_board_rules_mode(project_data) == PRESERVE_MODE_OFF else ()
+            )
             merged_dru = merge_dru_floors(
                 existing_dru,
                 generate_project_dru(
@@ -3398,8 +3418,11 @@ def _emit_drc_sidecars(
                     project_data,
                     manufacturer_id=manufacturer_id,
                     net_classes=net_classes,
+                    zone_clearances=zone_targets,
                 ),
                 path=dru_path,
+                authored=authored_state,
+                allow=allow_dru,
             )
             # Issue #6039: per-rule-area keepout rules (kicad-cli < 10.0.6
             # does not enforce rule areas without them, #7198).
