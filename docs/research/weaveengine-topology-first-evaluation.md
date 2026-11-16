@@ -10,7 +10,7 @@
 
 WeaveEngine is a desktop/CLI autorouter that reads Specctra DSN and writes SES. Its distinctive commitment is **topology first**: build a planar map of the free board (a triangulation whose interior edges are capacity-bounded "gates"), decide for every connection *which side of every pad and every placed trace it passes* — a planar embedding, so crossings are impossible by construction — choosing that embedding for **all nets jointly** before anything is committed, then negotiate (PathFinder-style rip-up and reroute), and only then draw geometry as taut traces at rule clearances.
 
-Half of that we already ship: the mesh router (epic #4267, slice #4268) is the same "triangulate the board, pull the traces taut" geometry, behind `--strategy mesh`, default OFF. What we never built is the other half — the **global ordering step**: per-net route candidates generated and then chosen *jointly*, with cost terms that see the whole board (demand-aware congestion, airwire-separation, barrier closure) and a commit order driven by each net's cost of choice (regret). Our equivalents are indirect and expensive: net-order heuristics, `route_all_tuned` Monte Carlo over full-run order shuffles, and negotiated rip-up that discovers ordering damage only after it happens. That is exactly the decision shape epic #5509 and the perf items #8486/#8610 are about.
+Half of that we already ship: the mesh router (epic #4267, slice #4268) is the same "triangulate the board, pull the traces taut" geometry, behind `--route-engine mesh`, default OFF. What we never built is the other half — the **global ordering step**: per-net route candidates generated and then chosen *jointly*, with cost terms that see the whole board (demand-aware congestion, airwire-separation, barrier closure) and a commit order driven by each net's cost of choice (regret). Our equivalents are indirect and expensive: net-order heuristics, `route_all_tuned` Monte Carlo over full-run order shuffles, and negotiated rip-up that discovers ordering damage only after it happens. That is exactly the decision shape epic #5509 and the perf items #8486/#8610 are about.
 
 Its documented gaps are our documented strengths: no differential pairs, no length matching, no impedance control, net-class widths taken as given, no HV concept, pours delegated to KiCad. Our gaps are where its ideas point: a cheap joint plan before committing, and costs that predict blocked channels instead of discovering them.
 
@@ -28,7 +28,7 @@ Verdict per idea (detail below; "fit" is against our grid A\* + `Autorouter`/`Ro
 10. Racing variants, time limit, best-so-far output — **SKIP** (already covered: `route_all_tuned`, deterministic budgets).
 11. Geometry realisation refinements (teardrops, rounded corners, sliding vias, pad-exit windows) — **SKIP for now** (tied to their substrate; no failing case in our fleet benchmarks yet).
 
-**Net**: six follow-up issues filed, each `loom:triage`; four rejected ideas recorded with reasons. The registry entry lands as `verdict = "ideas-adopted"`, `license_compat = "copyleft-ideas-only"`.
+**Net**: six follow-up issues filed, each `loom:triage`; five rejected ideas recorded with reasons. The registry entry lands as `verdict = "ideas-adopted"`, `license_compat = "copyleft-ideas-only"`.
 
 ## How the topology-first plan works (as documented)
 
@@ -54,7 +54,7 @@ Read from the README's settings/limitations sections and the design doc. "They" 
 | HV / custom clearance rules | Partial `.kicad_dru` support: per-net clearance floors and width bounds from net/reference/area rules; no voltage-aware concept | `kct zones hv-keepout`, `board_clearance_rules.py`, `class_clearance_floors.py`, authored-clearance machinery | **We**, outright |
 | Copper pours | Delegated to KiCad: poured nets are not routed as traces; post-route fan-out places vias/stubs so the fill reaches every pad; a recent addition reserves a per-pour connectivity skeleton during routing so traces cannot cut the fill, with a fill estimator tuned against KiCad's filler | `auto_pour.py` inserts zones for power nets before routing; poured nets excluded from trace routing; zones exist as grid state; correctness delegated to the kicad-cli DRC cross-gate after refill | Roughly at parity on intent; **their skeleton idea is the adoptable delta** (idea 5) — we verify pour integrity after the fact, they preserve it during routing |
 | Signal integrity | None (their own limitation list: no impedance, no return paths, no crosstalk) | Stackup+physics width selection for target impedances in `Autorouter` | **We**, outright |
-| Any-angle geometry | Native: taut traces, arcs, teardrops | Grid + mesh/lattice strategies; mesh does any-angle via funnel string-pull (#4267), default OFF | Them, on their substrate; parity available to us via `--strategy mesh` for geometry |
+| Any-angle geometry | Native: taut traces, arcs, teardrops | Grid + mesh/lattice strategies; mesh does any-angle via funnel string-pull (#4267), default OFF | Them, on their substrate; parity available to us via `--route-engine mesh` for geometry |
 | Determinism / reproducibility | They document per-DSN byte-identical runs; KiCad's own DSN export is the nondeterministic step on their side | Strong determinism commitments (documented tie-breaking, deterministic budgets, #3881/#4730 lineage) | Parity in intent; not comparable without measurement |
 | Interface | DSN in / SES out (same lossy boundary as freerouting) | `.kicad_pcb` native, in place | **We** — the DSN round-trip is a lossy interchange boundary; `[projects.freerouting]` records why we keep manufacturing gates on the native artifact. WeaveEngine inherits that caveat wholesale |
 
@@ -84,7 +84,7 @@ Signal-integrity blind (no impedance, length matching, pairs, return paths, cros
 | 8 | Vias as sites inserted into a mutable planar map mid-search | **Skip** | Grid router places vias natively during search | Their own doc's weakest subsystem; nothing to borrow that our substrate doesn't already do better |
 | 9 | Recover DSN-lossy fields from sibling KiCad files | **Skip** | `benchmarks/external/fleet_routers/run.py` `dsn_audit` already enumerates DSN lossiness | We don't route through DSN; the harness already audits the boundary |
 | 10 | Racing variants / time limit / best-so-far output | **Skip** | `route_all_tuned`, `--deterministic-budget`, per-net iteration caps | Already covered by our own tuning machinery |
-| 11 | Taut-trace geometry refinements (teardrops, rounded corners, sliding vias, pad-exit windows) | **Skip for now** | Mesh strategy has funnel geometry; our grid output has its own tidying passes | Tied to their substrate; no failing case in our fleet benchmarks yet — revisit if `--strategy mesh` graduates |
+| 11 | Taut-trace geometry refinements (teardrops, rounded corners, sliding vias, pad-exit windows) | **Skip for now** | Mesh strategy has funnel geometry; our grid output has its own tidying passes | Tied to their substrate; no failing case in our fleet benchmarks yet — revisit if `--route-engine mesh` graduates |
 
 ## Per-idea detail, fit, and smallest next step
 
