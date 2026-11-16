@@ -3023,7 +3023,11 @@ def main(argv: list[str] | None = None) -> int:
         # above); the machine report already carries the full reasons list.
         for assessment in results.mask_copper_assessments:
             print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
-            print(f"  {collapse_reasons(assessment.reasons, limit=_MASK_STDOUT_REASON_LIMIT)}")
+            # Issue #8991: a ``complete`` assessment with nothing to report
+            # prints only the header; the "no reason reported" placeholder is
+            # kept for non-complete states (and for any reasons present).
+            if assessment.reasons or assessment.coverage != "complete":
+                print(f"  {collapse_reasons(assessment.reasons, limit=_MASK_STDOUT_REASON_LIMIT)}")
             remediation = assessment.remediation
             if remediation:
                 print(f"  Remediation: {remediation}")
