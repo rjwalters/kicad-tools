@@ -11165,9 +11165,19 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     # guessing an edge.
     from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
 
-    mfr_id = str(manufacturer) if manufacturer else "jlcpcb"
-    args._mfr_pad_gap_band_edge = _resolve_mfr_pad_gap_edge(
-        mfr_id, layers or 2, copper_outer or 1.0
+    # None without ``--manufacturer``: nothing to resolve from, so the band
+    # guard stays OFF rather than guessing a fab -- the stitcher's
+    # ``pad_gap_edge`` gates the identical resolution on ``args.mfr``, and
+    # ``_resolve_route_clearance_floor`` returns None on this same
+    # no-profile path.  With a fab, ``layers``/``copper_outer`` fall back to
+    # the PROFILE defaults (4-layer / 1oz) exactly the way
+    # ``resolve_min_trace_width`` normalizes them -- the documented
+    # profile-default behavior of ``get_design_rules``, never a guessed
+    # stackup (issue #8974 review: no fab literal on the no-``--mfr`` path).
+    args._mfr_pad_gap_band_edge = (
+        _resolve_mfr_pad_gap_edge(str(manufacturer), layers or 4, copper_outer or 1.0)
+        if manufacturer
+        else None
     )
 
     explicit_width = getattr(args, "trace_width", None)

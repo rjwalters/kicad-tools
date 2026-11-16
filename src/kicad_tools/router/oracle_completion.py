@@ -1395,8 +1395,12 @@ class PourLinkCloser:
     #: same-net pad slit-band edge (the caller-resolved
     #: ``DesignRules.same_net_pad_gap_band_edge_mm``, resolved from the
     #: board's stackup by ``kct route`` exactly as ``pad_edge_gap`` is).
-    #: ``0`` disables the band guard; ``avoid_via_in_pad`` gates it exactly
-    #: as the stitcher CLI's ``--avoid-pad-overlap`` does.
+    #: ``0`` disables the band guard.  The gating is per path: on the weld
+    #: path ``avoid_via_in_pad`` gates it exactly as the stitcher CLI's
+    #: ``--avoid-pad-overlap`` does (``stitch_cmd``'s ``run_stitch`` call);
+    #: the link-router rules (:class:`LinkRouteRules.same_net_pad_gap_mm`)
+    #: receive it unconditionally -- harmless there, since a via-in-pad seat
+    #: is one copper union (``gap <= 0``) the band accepts anyway.
     same_net_pad_gap_mm: float = 0.0
     #: Issue #8027: the router's ``PairwiseClearanceTable`` (``--voltage-map``).
     #: ``pair_clearance(P, N)`` is raised to ``table.required_clearance(P, N)``

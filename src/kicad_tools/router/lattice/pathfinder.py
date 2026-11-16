@@ -71,6 +71,7 @@ from ..pairplan.via_pair import ViaPair, via_pair_sites
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules, layer_permitted
+from ..via_clearance import same_net_pad_gap_acceptable
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_pt_dist, seg_seg_dist
@@ -2216,8 +2217,10 @@ class LatticePathfinder:
         # ``DesignRules.same_net_pad_gap_band_edge_mm``).  None/0 keeps the
         # band check off, so an unresolvable stackup changes nothing.
         band_edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
-        if band_edge_mm > 0:
-            from ..via_clearance import same_net_pad_gap_acceptable
+        # ``same_net_pad_gap_acceptable`` is imported at module level: the
+        # guard being off (None/0) changes the band check below, never the
+        # import (#8974 review: a use-guarded local import reads as if the
+        # name might not bind).
         if not self._escape_boundary.segment_clear(point, point, via_radius):
             return False
         own_clr = (

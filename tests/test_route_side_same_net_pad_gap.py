@@ -21,17 +21,33 @@ stackup never guesses an edge (AC 3).
 
 from __future__ import annotations
 
+import argparse
 import math
 
 import pytest
 
-from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
-from kicad_tools.router.core import RoutingGrid
-from kicad_tools.router.escape import EscapeRouter
-from kicad_tools.router.oracle_completion import PourLinkCloser
-from kicad_tools.router.primitives import Pad
-from kicad_tools.router.rules import DesignRules
-from kicad_tools.router.via_clearance import same_net_pad_gap_acceptable
+shapely = pytest.importorskip("shapely")
+
+from shapely.geometry import Point, box  # noqa: E402
+
+from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge  # noqa: E402
+from kicad_tools.router.core import RoutingGrid  # noqa: E402
+from kicad_tools.router.escape import EscapeRouter  # noqa: E402
+from kicad_tools.router.link_router import (  # noqa: E402
+    LinkRouteRules,
+    LinkTerminal,
+    _BoardModel,
+    _Item,
+    _via_site_blocker,
+    route_link,
+)
+from kicad_tools.router.oracle_completion import PourLinkCloser  # noqa: E402
+from kicad_tools.router.primitives import Pad  # noqa: E402
+from kicad_tools.router.rules import DesignRules  # noqa: E402
+from kicad_tools.router.via_clearance import (  # noqa: E402
+    same_net_pad_gap_acceptable,
+    same_net_pad_gap_band_ring,
+)
 
 VIA = 0.6
 DRILL = 0.3
@@ -248,6 +264,105 @@ def test_weld_forwards_band_edge_to_run_stitch(monkeypatch, tmp_path):
     assert seen.get("avoid_pad_overlap") == closer.avoid_via_in_pad
 
 
+# -- the link router rides the same predicate (no second band copy) -----------
+
+
+def _link_rules(edge: float) -> LinkRouteRules:
+    return LinkRouteRules(
+        trace_width=0.2,
+        clearance=0.2,
+        via_size=VIA,
+        via_drill=DRILL,
+        margin=2.0,
+        same_net_pad_gap_mm=edge,
+    )
+
+
+def _own_smd_item() -> _Item:
+    return _Item(
+        1,
+        {"F.Cu": box(-PAD_W / 2, -PAD_H / 2, PAD_W / 2, PAD_H / 2)},
+        is_pad=True,
+    )
+
+
+def _empty_link_model() -> _BoardModel:
+    return _BoardModel(
+        copper=["F.Cu", "B.Cu"],
+        items=[_own_smd_item()],
+        drills=[],
+        pad_geoms=[],
+        fills={},
+        outline=None,
+    )
+
+
+def test_via_site_blocker_rejects_the_band():
+    # ``_via_site_blocker`` delegates to the shared point predicate (bboxes),
+    # never a local gap loop -- the same seat the escape router rejects.
+    msg = _via_site_blocker(
+        _empty_link_model(), 1, (0.0, PAD_TOP + R + 0.0891), _link_rules(EDGE_1OZ)
+    )
+    assert msg is not None and "slit band" in msg
+
+
+def test_via_site_blocker_beyond_edge_is_clean():
+    assert (
+        _via_site_blocker(
+            _empty_link_model(), 1, (0.0, PAD_TOP + R + EDGE_1OZ + 0.05), _link_rules(EDGE_1OZ)
+        )
+        is None
+    )
+
+
+def test_via_site_blocker_overlapping_own_pad_is_band_clean():
+    # gap <= 0: one copper union, the band accepts (via-in-pad itself is
+    # other guards' business -- ``model.pad_geoms`` is empty here).
+    assert _via_site_blocker(_empty_link_model(), 1, (0.0, PAD_TOP), _link_rules(EDGE_1OZ)) is None
+
+
+def test_via_site_blocker_guard_off_when_edge_unresolved():
+    # The same in-band seat, accepted because the caller resolved no edge.
+    assert (
+        _via_site_blocker(_empty_link_model(), 1, (0.0, PAD_TOP + R + 0.0891), _link_rules(0.0))
+        is None
+    )
+
+
+def test_route_link_via_lands_outside_the_band():
+    # The A*'s via mask must not just work -- it must agree with the shared
+    # predicate: every via the search actually places is predicate-clean.
+    a = LinkTerminal("a", (10.0, 10.0), {"F.Cu": box(9.6, 9.6, 10.4, 10.4)})
+    b = LinkTerminal("b", (14.0, 10.0), {"B.Cu": box(13.6, 9.6, 14.4, 10.4)})
+    own_pad = _Item(1, {"F.Cu": box(9.6, 9.6, 10.4, 10.4)}, is_pad=True)
+    model = _BoardModel(
+        copper=["F.Cu", "B.Cu"],
+        items=[own_pad],
+        drills=[],
+        pad_geoms=[],
+        fills={},
+        outline=None,
+    )
+    route = route_link(None, 1, "GND", a, b, _link_rules(EDGE_1OZ), model=model)
+    assert route is not None and route.vias
+    for via_x, via_y in route.vias:
+        assert same_net_pad_gap_acceptable(via_x, via_y, VIA, [(9.6, 9.6, 10.4, 10.4)], EDGE_1OZ)
+
+
+def test_band_ring_matches_the_point_predicate():
+    # ``same_net_pad_gap_band_ring`` is the region form of the predicate:
+    # every sampled seat the ring covers is a seat the predicate rejects,
+    # and vice versa -- one band definition feeds the mask and the point
+    # re-checks (#8974 review: link_router must not hold its own copy).
+    ring = same_net_pad_gap_band_ring(PAD_BBOX, VIA, EDGE_1OZ)
+    for gx in range(-20, 21):
+        for gy in range(-45, 46):
+            x, y = gx * 0.02, gy * 0.02
+            rejected = not same_net_pad_gap_acceptable(x, y, VIA, [PAD_BBOX], EDGE_1OZ)
+            assert ring.covers(Point(x, y)) is rejected
+    assert same_net_pad_gap_band_ring(PAD_BBOX, VIA, 0.0).is_empty
+
+
 # -- the predicate stays the single band definition ---------------------------
 
 
@@ -261,3 +376,48 @@ def test_predicate_semantics_unchanged():
         0.0, PAD_TOP + R + EDGE_1OZ + 1e-6, VIA, [PAD_BBOX], EDGE_1OZ
     )
     assert math.isclose(_annulus_gap(PAD_TOP + R + 0.0891), 0.0891, abs_tol=1e-9)
+
+
+# -- the resolution point in route_cmd (no fab => guard off, no guess) --------
+
+
+def _route_args(**over):
+    """A minimal ``kct route`` args namespace for the resolution point.
+
+    ``layers="2"`` keeps ``_effective_layer_count_for_rules`` off the board
+    file, and the stackup probe swallows a missing board (Issue #6561's
+    broad except), so ``pcb_path`` never has to exist.
+    """
+    ns = argparse.Namespace(
+        manufacturer=None,
+        copper=None,
+        layers="2",
+        trace_width=None,
+        min_trace=None,
+    )
+    for key, value in over.items():
+        setattr(ns, key, value)
+    return ns
+
+
+def test_route_cmd_resolution_is_none_without_a_manufacturer():
+    # Finding 1 of the #8974 review: the old "jlcpcb" fallback turned the
+    # band guard ON for every no-``--mfr`` run, against a fab the operator
+    # never named.  With no manufacturer there is nothing to resolve from:
+    # None, mirroring ``_resolve_route_clearance_floor`` and the stitcher's
+    # ``args.mfr`` gate (AC 3).
+    from kicad_tools.cli.route_cmd import _apply_manufacturer_trace_width_floor
+
+    args = _route_args()
+    assert _apply_manufacturer_trace_width_floor(args, "unused.kicad_pcb", quiet=True) == 0
+    assert args._mfr_pad_gap_band_edge is None
+
+
+def test_route_cmd_resolution_engages_with_a_manufacturer():
+    # The guard still engages when the operator names a fab: jlcpcb
+    # 2layer_1oz resolves a real edge from the profile table.
+    from kicad_tools.cli.route_cmd import _apply_manufacturer_trace_width_floor
+
+    args = _route_args(manufacturer="jlcpcb")
+    assert _apply_manufacturer_trace_width_floor(args, "unused.kicad_pcb", quiet=True) == 0
+    assert args._mfr_pad_gap_band_edge == pytest.approx(EDGE_1OZ)
