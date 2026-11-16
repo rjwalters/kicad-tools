@@ -77,14 +77,72 @@ FACTORY_FAB_FLOOR_DRU = """(version 1)
   (constraint text_height (min 1.0mm)))
 """
 
-# Constraint names the allowlist admits for factory rule files; the parity
-# tests must show none of them ever reaches the report.
+# Constraint names the allowlist admits for factory and kct-managed rule
+# files; the parity tests must show none of them ever reaches the report.
 ADMITTED_FACTORY_CONSTRAINTS = (
     "silk_clearance",
     "physical_hole_clearance",
     "text_thickness",
     "text_height",
+    "diff_pair_gap",
+    "diff_pair_uncoupled",
+    "skew",
+    "via_count",
+    "disallow",
 )
+
+# The kct-managed router diff-pair vocabulary (#6443, admitted by #8973):
+# ``diff_pair_gap`` (one rule per coupled pair) plus the pair limits
+# ``diff_pair_uncoupled``, ``skew`` and ``via_count``, shaped on what
+# netclass_dru.py actually writes. A pair KiCad recognises by suffix
+# (CLK_P/CLK_N) is selected with ``A.inDiffPair`` and gets all three limits,
+# ``skew`` carrying ``(within_diff_pairs)``; a router-recorded pair no KiCad
+# suffix recognises (X_POS/X_NEG, #6429) is selected by net name and gets
+# only the bare ``skew`` and ``via_count`` -- KiCad never evaluates
+# ``diff_pair_gap`` or ``diff_pair_uncoupled`` for it, so neither is written.
+# ``skew`` and ``via_count`` each appear in two rules, pinning that a
+# repeated constraint name yields no duplicated report entry.
+FACTORY_PAIR_LIMIT_DRU = """(version 1)
+(rule "kct diff pair gap - CLK_P/CLK_N"
+  (condition "A.NetName == 'CLK_P' || A.NetName == 'CLK_N'")
+  (constraint diff_pair_gap (min 0.2mm)))
+(rule "kct diff pair uncoupled - CLK_P/CLK_N"
+  (condition "A.inDiffPair('CLK_')")
+  (constraint diff_pair_uncoupled (max 5mm)))
+(rule "kct diff pair skew - CLK_P/CLK_N"
+  (condition "A.inDiffPair('CLK_')")
+  (constraint skew (max 0.5mm) (within_diff_pairs)))
+(rule "kct diff pair vias - CLK_P/CLK_N"
+  (condition "A.inDiffPair('CLK_')")
+  (constraint via_count (max 4)))
+(rule "kct diff pair skew - X_POS/X_NEG"
+  (condition "A.NetName == 'X_POS' || A.NetName == 'X_NEG'")
+  (constraint skew (max 1mm)))
+(rule "kct diff pair vias - X_POS/X_NEG"
+  (condition "A.NetName == 'X_POS' || A.NetName == 'X_NEG'")
+  (constraint via_count (max 6)))
+"""
+
+# The kct-managed keepout vocabulary (#6039, admitted by #8973): one
+# ``disallow`` rule per rule area, shaped on keepout_dru.py's own rendering,
+# carrying both the two-item item list tests/test_keepout_dru.py pins and
+# the five-item wide form -- and the explicit ``(layer ...)`` clause a
+# single-copper-layer area earns.
+FACTORY_KEEPOUT_DRU = """(version 1)
+# BEGIN kct keepout rules (Issue #6039) -- managed, do not edit
+# Generated from the board's keepout rule areas, board-level (Issue #6039)
+# and footprint-embedded (Issue #6087).
+# kicad-cli 10.0.1 does not enforce rule areas on its own; these
+# explicit intersectsArea rules make `kicad-cli pcb drc` report them.
+(rule "kct keepout wall [00000000-0000-0000-0000-000000000004]"
+  (condition "A.intersectsArea('00000000-0000-0000-0000-000000000004')")
+  (constraint disallow track via))
+(rule "kct keepout fence [00000000-0000-0000-0000-000000000005]"
+  (layer "F.Cu")
+  (condition "A.intersectsArea('00000000-0000-0000-0000-000000000005')")
+  (constraint disallow track via pad zone footprint))
+# END kct keepout rules
+"""
 
 # Two pads and an escaping conductor: enough plotted mask and copper for the
 # per-object/full-layer parity comparison to be meaningful, small enough to
@@ -95,6 +153,37 @@ PARITY_BODY = """(net 1 "N")
        (pad "2" smd roundrect (at 2 0) (size 1 1) (roundrect_rratio .25) (layers "F.Cu" "F.Mask")))
       (segment (start 10.9 9) (end 10.9 11) (width .1) (layer "F.Cu") (net 1)
        (uuid "00000000-0000-0000-0000-000000000099"))"""
+
+# PARITY_BODY plus the two features whose managed blocks the pair-limit and
+# keepout fixtures mirror (#8973): a KiCad-recognised diff pair
+# (CLK_P/CLK_N) beside a router-recorded one (X_POS/X_NEG, #6429), and two
+# keepout rule areas whose flags forbid a short (track via) and a wide
+# (track via pad zone footprint) item list. Auto-assigned source UUIDs
+# follow document order -- footprint 1, pads 2/3, zones 4/5 -- and the
+# keepout rules above reference those zone UUIDs exactly as keepout_dru.py
+# would render them.
+RULE_AREA_PAIR_BODY = """(net 0 "") (net 1 "N") (net 2 "CLK_P") (net 3 "CLK_N") (net 4 "X_POS") (net 5 "X_NEG")
+      (footprint "P" (layer "F.Cu") (at 10 10)
+       (pad "1" smd rect (at 0 0) (size 1 1) (layers "F.Cu" "F.Mask") (net 1 "N"))
+       (pad "2" smd roundrect (at 2 0) (size 1 1) (roundrect_rratio .25) (layers "F.Cu" "F.Mask")))
+      (segment (start 10.9 9) (end 10.9 11) (width .1) (layer "F.Cu") (net 1)
+       (uuid "00000000-0000-0000-0000-000000000099"))
+      (segment (start 12.5 9.2) (end 12.5 10.8) (width .1) (layer "F.Cu") (net 2)
+       (uuid "00000000-0000-0000-0000-0000000000a1"))
+      (segment (start 12.7 9.2) (end 12.7 10.8) (width .1) (layer "F.Cu") (net 3)
+       (uuid "00000000-0000-0000-0000-0000000000a2"))
+      (segment (start 13.5 9.2) (end 13.5 10.8) (width .1) (layer "F.Cu") (net 4)
+       (uuid "00000000-0000-0000-0000-0000000000a3"))
+      (segment (start 13.7 9.2) (end 13.7 10.8) (width .1) (layer "F.Cu") (net 5)
+       (uuid "00000000-0000-0000-0000-0000000000a4"))
+      (zone (net 0) (net_name "") (name "wall") (layers "F.Cu" "B.Cu")
+       (hatch edge 0.5) (keepout (tracks not_allowed) (vias not_allowed))
+       (polygon (pts (xy 14.5 9) (xy 15.5 9) (xy 15.5 11) (xy 14.5 11))))
+      (zone (net 0) (net_name "") (name "fence") (layers "F.Cu")
+       (hatch edge 0.5)
+       (keepout (tracks not_allowed) (vias not_allowed) (pads not_allowed)
+        (copperpour not_allowed) (footprints not_allowed))
+       (polygon (pts (xy 16 9) (xy 17 9) (xy 17 11) (xy 16 11))))"""
 
 
 def _dru_board(directory, body, rules=None, *, setup="(pad_to_mask_clearance .05)"):
@@ -187,6 +276,90 @@ def test_factory_fab_floor_rules_leave_native_attribution_unchanged(tmp_path, na
     assert (ruled.read_bytes(), rules.read_bytes()) == before
 
 
+def test_factory_pair_limit_rules_leave_native_attribution_unchanged(tmp_path, native_options):
+    """The kct-managed diff-pair rules must not invalidate attribution.
+
+    Issue #8973: ``diff_pair_gap``, ``diff_pair_uncoupled``, ``skew`` and
+    ``via_count`` are written into the same managed ``.kicad_dru`` for every
+    router-coupled pair (#6443), so a board carrying them failed with
+    ``Native object rule context unsupported`` despite their being measured
+    minima/maxima over already-routed material. Same proof pattern as the
+    fab-floor case above; the body carries both a KiCad-recognised pair and
+    a router-recorded one, so both emitted rule shapes are exercised.
+    """
+    plain = _dru_board(tmp_path / "plain", RULE_AREA_PAIR_BODY)
+    ruled = _dru_board(tmp_path / "ruled", RULE_AREA_PAIR_BODY, FACTORY_PAIR_LIMIT_DRU)
+    rules = ruled.with_suffix(".kicad_dru")
+    before = (ruled.read_bytes(), rules.read_bytes())
+
+    plain_result = check_mask_to_copper(plain, POLICY, **native_options)
+    ruled_result = check_mask_to_copper(ruled, POLICY, **native_options)
+
+    assert plain_result.coverage == "complete", plain_result.reasons
+    assert ruled_result.coverage == "complete", ruled_result.reasons
+    for name in ("diff_pair_gap", "diff_pair_uncoupled", "skew", "via_count"):
+        assert not any(name in reason for reason in ruled_result.reasons)
+    # Equivalent outcome, equivalent plotted material, equivalent attribution.
+    assert ruled_result.passed is plain_result.passed
+    assert (
+        ruled_result.geometry_provenance["export"]["layers_wkt"]
+        == plain_result.geometry_provenance["export"]["layers_wkt"]
+    )
+    assert _attribution(ruled_result) == _attribution(plain_result)
+    # The rule file is still bound into provenance and still left untouched --
+    # accepting the context is not the same as ignoring the sidecar.
+    assert (
+        ruled_result.binding.rules_sha256
+        == hashlib.sha256(FACTORY_PAIR_LIMIT_DRU.encode()).hexdigest()
+    )
+    assert plain_result.binding.rules_sha256 is None
+    assert (ruled.read_bytes(), rules.read_bytes()) == before
+
+
+def test_full_managed_sidecar_with_keepouts_leaves_native_attribution_unchanged(
+    tmp_path, native_options
+):
+    """A keepout rule area's ``disallow`` rules must not invalidate attribution.
+
+    Issue #8973: ``disallow`` is not a dimensional minimum but a prohibition
+    on item *presence* inside a referenced rule area (#6039) -- DRC reports
+    items there; it never moves, resizes, removes or adds plotted geometry,
+    which is exactly what the parity below proves rather than asserts. The
+    board carries two rule areas (mirrored by the keepout block, short and
+    wide item lists both) and a router-coupled diff pair, and the sidecar
+    carries every factory and kct-managed block together the way a real
+    generated board's does, so the admitted names are exercised beside each
+    other, not only in isolation.
+    """
+    managed = (
+        FACTORY_SILK_DRU + FACTORY_FAB_FLOOR_DRU + FACTORY_PAIR_LIMIT_DRU + FACTORY_KEEPOUT_DRU
+    )
+    plain = _dru_board(tmp_path / "plain", RULE_AREA_PAIR_BODY)
+    ruled = _dru_board(tmp_path / "ruled", RULE_AREA_PAIR_BODY, managed)
+    rules = ruled.with_suffix(".kicad_dru")
+    before = (ruled.read_bytes(), rules.read_bytes())
+
+    plain_result = check_mask_to_copper(plain, POLICY, **native_options)
+    ruled_result = check_mask_to_copper(ruled, POLICY, **native_options)
+
+    assert plain_result.coverage == "complete", plain_result.reasons
+    assert ruled_result.coverage == "complete", ruled_result.reasons
+    for name in ADMITTED_FACTORY_CONSTRAINTS:
+        assert not any(name in reason for reason in ruled_result.reasons)
+    # Equivalent outcome, equivalent plotted material, equivalent attribution.
+    assert ruled_result.passed is plain_result.passed
+    assert (
+        ruled_result.geometry_provenance["export"]["layers_wkt"]
+        == plain_result.geometry_provenance["export"]["layers_wkt"]
+    )
+    assert _attribution(ruled_result) == _attribution(plain_result)
+    # The rule file is still bound into provenance and still left untouched --
+    # accepting the context is not the same as ignoring the sidecar.
+    assert ruled_result.binding.rules_sha256 == hashlib.sha256(managed.encode()).hexdigest()
+    assert plain_result.binding.rules_sha256 is None
+    assert (ruled.read_bytes(), rules.read_bytes()) == before
+
+
 @pytest.mark.parametrize(
     "constraint", ["zone_connection (with solid)", "thermal_relief_gap (min 0.3mm)"]
 )
@@ -197,14 +370,18 @@ def test_geometry_altering_rule_context_still_fails_beside_silk_rules(
 
     ``zone_connection`` and ``thermal_relief_gap`` genuinely change the filled
     shape native plotting produces, so they must keep being reported even when
-    the same rule file also carries every accepted factory constraint. Only
-    the plot-shaping context is reported; the geometry-neutral names beside it
-    never appear (#8948).
+    the same rule file also carries every accepted factory and kct-managed
+    constraint. Only the plot-shaping context is reported; the
+    geometry-neutral names beside it never appear (#8948, #8973).
     """
     rules = (
-        FACTORY_SILK_DRU + FACTORY_FAB_FLOOR_DRU + f'(rule "Fab fill" (constraint {constraint}))\n'
+        FACTORY_SILK_DRU
+        + FACTORY_FAB_FLOOR_DRU
+        + FACTORY_PAIR_LIMIT_DRU
+        + FACTORY_KEEPOUT_DRU
+        + f'(rule "Fab fill" (constraint {constraint}))\n'
     )
-    path = _dru_board(tmp_path / "altering", PARITY_BODY, rules)
+    path = _dru_board(tmp_path / "altering", RULE_AREA_PAIR_BODY, rules)
 
     result = check_mask_to_copper(path, POLICY, **native_options)
 
