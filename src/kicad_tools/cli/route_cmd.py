@@ -6360,6 +6360,12 @@ def run_post_route_drc(
     # reporting a false FAILED on legal tier-gated geometry (e.g. via-in-pad).
     _write_fab_profile_sidecar(output_path, manufacturer, quiet=quiet)
 
+    # Issue #9003: the detour-ratio report + sidecar, when the run opted in
+    # with --report-detour-ratio.  A no-op otherwise (the probe pre-pass
+    # never ran, so the router holds no records).  Prints even under
+    # --quiet, matching --report-stage-quality's explicit-opt-in rule.
+    _report_detour_ratio(output_path, router)
+
     # Issue #3919: emit the ``.kicad_pro`` + ``.kicad_dru`` constraint
     # sidecars from the manufacturer profile *before* the geometric DRC
     # cross-check below, so ``kicad-cli pcb drc`` auto-loads the intended
@@ -8678,6 +8684,60 @@ def _apply_ripup_strategy(router: "Autorouter", args) -> None:
     strategy = getattr(args, "ripup_strategy", "negotiated")
     if strategy and strategy != "negotiated":
         router._ripup_strategy = strategy
+
+
+def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
+    """Enable the ``--report-detour-ratio`` probe pre-pass (issue #9003).
+
+    Off by default (mirrors the ``_ripup_strategy`` attribute-on-router
+    pattern above): without the flag no probe runs, no sidecar is written
+    and the run is byte-identical.  When passed, sets
+    ``router.report_detour_ratio`` so ``route_all`` /
+    ``route_all_negotiated`` run the read-only alone-on-empty probe
+    pre-pass; the report itself is printed/written post-settle by
+    :func:`_report_detour_ratio`.  A no-op when the flag is absent, so
+    every attempt helper can call it unconditionally.
+    """
+    if getattr(args, "report_detour_ratio", False):
+        router.report_detour_ratio = True
+
+
+def _report_detour_ratio(output_path: Path, router: object | None) -> None:
+    """Print the detour-ratio report and write its sidecar (#9003).
+
+    A no-op unless the router ran the probe (flag off, or a mesh/lattice
+    run that never reaches the grid-engine pre-pass).  Like
+    ``--report-stage-quality``, printing is NOT cancelled by ``--quiet``:
+    a non-empty ``detour_probe_records`` means the user opted in
+    explicitly.  The sidecar write is best-effort on the established
+    post-route sidecar contract -- a blocked write warns and never fails
+    the route.
+    """
+    records = getattr(router, "detour_probe_records", None)
+    if not records:
+        return
+    finalize = getattr(router, "finalize_detour_probe_records", None)
+    if callable(finalize):
+        finalize()
+    from kicad_tools.analysis.detour_ratio import (
+        detour_ratio_payload,
+        format_detour_report,
+        summarize_detour_records,
+    )
+
+    summary = summarize_detour_records(
+        records,
+        unattributed_drawn_mm=float(getattr(router, "_detour_unattributed_drawn_mm", 0.0) or 0.0),
+    )
+    print(format_detour_report(summary))
+    out = Path(output_path)
+    sidecar = out.parent / f"{out.stem}.detour_ratio.json"
+    try:
+        import json
+
+        sidecar.write_text(json.dumps(detour_ratio_payload(summary, records), indent=2) + "\n")
+    except Exception as exc:  # noqa: BLE001 - a blocked write never fails a route
+        logger.warning("Could not save detour-ratio sidecar: %s", exc)
 
 
 def _apply_slack_corridor_widening(router: "Autorouter", args) -> None:
@@ -12997,6 +13057,7 @@ def route_with_layer_escalation(
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
+        _apply_detour_ratio_report(router, args)
         # Issue #6401: reserve pour-pad via sites before signal routing.
         _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (the single-attempt tail's
@@ -13607,6 +13668,7 @@ def route_with_layer_escalation(
     # one) and ``net-status --why`` fell back to geometry alone.
     _write_search_failures_sidecar(output_path, final_result.router)
     _write_route_decisions(output_path, final_result.router)
+    _report_detour_ratio(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -14205,6 +14267,7 @@ def route_with_rule_relaxation(
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
+        _apply_detour_ratio_report(router, args)
         # Issue #6401: reserve pour-pad via sites before signal routing.
         _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (see the layer-escalation path).
@@ -14590,6 +14653,7 @@ def route_with_rule_relaxation(
     # one) and ``net-status --why`` fell back to geometry alone.
     _write_search_failures_sidecar(output_path, final_result.router)
     _write_route_decisions(output_path, final_result.router)
+    _report_detour_ratio(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -16707,6 +16771,7 @@ def route_with_combined_escalation(
             _apply_escape_corridor_reservation(router, args)
             _apply_pad_access_invariant(router, args)
             _apply_ripup_strategy(router, args)
+            _apply_detour_ratio_report(router, args)
             # Issue #6401: reserve pour-pad via sites before signal routing.
             _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
             # Issue #5787: --order-method crossing (see layer-escalation path).
@@ -17131,6 +17196,7 @@ def route_with_combined_escalation(
     # one) and ``net-status --why`` fell back to geometry alone.
     _write_search_failures_sidecar(output_path, final_result.router)
     _write_route_decisions(output_path, final_result.router)
+    _report_detour_ratio(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -21251,6 +21317,20 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--report-detour-ratio",
+        action="store_true",
+        help=(
+            "Print advisory per-connection detour ratios (drawn copper vs "
+            "what the same search achieves alone on an empty board) with a "
+            "distribution summary and the worst offenders above ~1.25x, "
+            "and write them to a stem-keyed <output>.detour_ratio.json "
+            "sidecar. Roughly doubles search work (one extra A* per "
+            "connection). Diagnostic only: the probe is read-only and "
+            "never changes routed copper or the exit code (issue #9003). "
+            "Grid engine only; a no-op on the mesh/lattice engines."
+        ),
+    )
+    parser.add_argument(
         "--auto-pour",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -23766,6 +23846,7 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_escape_corridor_reservation(router, args)
     _apply_pad_access_invariant(router, args)
     _apply_ripup_strategy(router, args)
+    _apply_detour_ratio_report(router, args)
     # Issue #6401: reserve pour-pad via sites before signal routing.
     _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
 
@@ -25241,6 +25322,7 @@ def _run_main_impl(args, parser, argv) -> int:
         # one) and ``net-status --why`` fell back to geometry alone.
         _write_search_failures_sidecar(output_path, router)
         _write_route_decisions(output_path, router)
+        _report_detour_ratio(output_path, router)
 
     _rss.mark("post-save")
 
