@@ -190,10 +190,12 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # gate; a net whose slits the router stops leaving goes stale and forces its
 # entry out.  The router fix is tracked in #8957; delete entries there as
 # they go stale.
+# Issue #8975: the recipe repair pass now keeps its offset vias out of the
+# same-net slit band (#8957's predicate in ``_via_ok``), which drained the
+# pour-net population (+1V2, +3V3, +1V8) to zero -- those entries went
+# stale on the first post-fix regen (21 remain: MIPI_CLK+ 11, GND 6,
+# USB2_D- 3, PCIE_RX+ 1) and are deleted.
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "+1V2"): 8957,
-    ("physical_copper_gap", "+1V8"): 8957,
-    ("physical_copper_gap", "+3V3"): 8957,
     ("physical_copper_gap", "GND"): 8957,
     ("physical_copper_gap", "MIPI_CLK+"): 8957,
     ("physical_copper_gap", "PCIE_RX+"): 8957,
