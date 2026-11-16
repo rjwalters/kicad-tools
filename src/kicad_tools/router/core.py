@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
     from pathlib import Path
 
+    from kicad_tools.analysis.detour_ratio import DetourConnectionRecord
     from kicad_tools.explain.decisions import DecisionStore
     from kicad_tools.pcb.blocks.base import PCBBlock
     from kicad_tools.physics import Stackup, TransmissionLine
@@ -2249,6 +2250,18 @@ class Autorouter:
         # honours it by construction, instead of repeating the
         # ``--order-method`` silent-no-op mistake from #5787 step 2 (#5908).
         self._ripup_strategy: str = "negotiated"
+
+        # Issue #9003: ``--report-detour-ratio`` attribute-on-router pattern
+        # (mirrors ``_forced_net_order`` / ``_ripup_strategy`` above).  When
+        # True, ``route_all`` / ``route_all_negotiated`` run the read-only
+        # alone-on-empty probe pre-pass before any copper is committed and
+        # stash per-connection rows in ``detour_probe_records``; the CLI
+        # finalises (pairs drawn routes) and prints/writes the report after
+        # settle.  Default off: without the flag no probe runs and no
+        # sidecar is written.
+        self.report_detour_ratio: bool = False
+        self.detour_probe_records: list[DetourConnectionRecord] | None = None
+        self._detour_unattributed_drawn_mm: float = 0.0
 
         # Fine zones for multi-resolution escape routing (Issue #1828)
         # Set externally (e.g., from CLI's MultiResolutionGridPlan) before
@@ -11386,6 +11399,12 @@ class Autorouter:
                 max_workers=max_workers,
             )
 
+        # Issue #9003: ``--report-detour-ratio`` probe pre-pass, while the
+        # grid is still the empty board (see the negotiated driver's hook
+        # for the guard enumeration).  Reuses the net order computed above
+        # so report rows follow the run's own ordering.
+        self._probe_alone_on_empty_lengths(net_order)
+
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         escape_routes = self._run_subgrid_prepass()
 
@@ -12631,6 +12650,275 @@ class Autorouter:
         self.plan_region_graph = result.region_graph
         return result.plan
 
+    def _probe_alone_on_empty_lengths(self, net_order: list[int] | None = None) -> None:
+        """Pre-pass probe: every connection's alone-on-empty length (#9003).
+
+        ``--report-detour-ratio`` only.  Runs BEFORE any copper is committed
+        -- the grid at this point already is the empty board (pads, keepouts
+        and fixed copper only), which is exactly the substrate the metric's
+        denominator is defined on.  For each net the probe runs the SAME
+        per-net search the real route runs (:meth:`route_net` -> the
+        pathfinder A*) against that pristine grid, measures each produced
+        Route with the shared :class:`KicadLengthModel`
+        (``copper_order`` wired from :attr:`route_copper_order`), then
+        unmarks it.  Rows land in :attr:`detour_probe_records`;
+        :meth:`finalize_detour_probe_records` pairs the settled routes in
+        after the route.
+
+        The probe must leave NO trace on the live run, or the flag would
+        silently change routed copper and the report would be worthless.
+        ``route_net`` has many side effects (failure records, the
+        failure-analysis cache and budget, the Python-fallback memo and
+        stage budget, lazily built grid snapshots, the R-tree, the halo
+        registry, ...), and a hand-maintained save list missed
+        ``routing_failures`` (PR #9014 review).  So the guard is
+        structural: :class:`~kicad_tools.router.probe_state.AttributeStateSnapshot`
+        records EVERY attribute of the Autorouter, the pathfinder, the grid
+        and the helper objects the search writes to, and restores all of
+        them -- attributes created by the probe are deleted, rebound ones are
+        put back, container content is restored in place, RNGs are rewound.
+        On top of that:
+
+        - ``commit_journal`` -- probe commits/rips are truncated away via
+          :meth:`CommitJournal.mark` / :meth:`CommitJournal.truncate_to`
+          (the #6320 discard-a-trial mechanism), keeping the
+          ``.access_witness.json`` replay contract clean;
+        - every probe route is unmarked from the grid (so the C++ mirror,
+          the R-tree and the halo registry see the matching removal), and
+          the occupancy and cost planes are additionally restored from a
+          copy, with the #4794 occupancy-generation bump (the generation
+          counter itself is never rewound: caches keyed on it must miss).
+          The C++ grid wrapper is deliberately NOT snapshotted: its
+          Python-side sync keys mirror native state the snapshot cannot
+          rewind, and the per-route unmark already invalidates its stored
+          routes for a rebuild;
+        - the sub-problem cache -- disabled for the probe: a probe solution
+          stored under its signature would be served to the REAL run later,
+          whose board is no longer empty -- a silent copper change;
+        - decision recording -- disabled so probe rows never enter the
+          decisions sidecar;
+        - the via-conflict resolver -- skipped while probing
+          (``_detour_probe_active``).  It moves or rips OTHER nets' copper;
+          on the alone-on-empty board the only such copper is fixed copper,
+          which a read-only probe must never edit.
+
+        What is NOT covered: wall-clock time.  The probe's searches run
+        before the real route and count against any wall-clock limit the
+        run is under (``--timeout``, the installed wall deadline), so a run
+        that a time limit cuts short can differ with the flag on.  Per-net
+        timeouts are per call and unaffected.
+
+        A failed connection is reported, never dropped: every edge whose
+        probe search failed (one ``RoutingFailure`` per failed edge, read
+        before the restore discards them) becomes a ``probe_no_path`` row,
+        including the partly failed edges of a multi-terminal net.
+
+        A failure here is never fatal: the report is advisory, so an
+        unexpected error degrades to empty records plus one warning line.
+        """
+        if not getattr(self, "report_detour_ratio", False):
+            return
+        if getattr(self, "detour_probe_records", None) is not None:
+            # Already probed on this Autorouter (a re-entered driver); the
+            # first pre-pass saw the pristine grid and that is the metric.
+            return
+
+        import numpy as np
+
+        from kicad_tools.analysis.detour_ratio import (
+            DetourConnectionRecord,
+            route_path_ends,
+        )
+        from kicad_tools.router.probe_state import (
+            AttributeStateSnapshot,
+            GlobalRngSnapshot,
+        )
+
+        grid = self.grid
+        pathfinder = self.router
+        records: list[DetourConnectionRecord] = []
+
+        journal_mark = self._commit_journal.mark()
+        snapshots = [
+            AttributeStateSnapshot(self),
+            AttributeStateSnapshot(pathfinder),
+            # Issue #4794: the occupancy generation only moves forward.
+            AttributeStateSnapshot(grid, skip=("_occupancy_generation",)),
+        ]
+        for helper in (
+            getattr(grid, "_route_halo", None),
+            getattr(pathfinder, "_py_router", None),
+            getattr(self, "_subgrid_router", None),
+            getattr(self, "_via_manager", None),
+            getattr(self, "_congestion_estimator", None),
+        ):
+            if helper is not None:
+                snapshots.append(AttributeStateSnapshot(helper, copy_arrays=True))
+        rng_snapshot = GlobalRngSnapshot()
+        planes: dict[str, np.ndarray] = {}
+        for name in (
+            "_blocked",
+            "_net",
+            "_congestion",
+            "_congestion_counted",
+            "_history_cost",
+            "_present_cost_ema",
+        ):
+            arr = getattr(grid, name, None)
+            if isinstance(arr, np.ndarray):
+                planes[name] = arr.copy()
+        self._sub_problem_cache = None
+        self.record_decisions = False
+        self._detour_probe_active = True
+
+        try:
+            # Inside the snapshot: the priority sort fills lazy caches
+            # (component pitches, congestion estimator) that are restored.
+            if net_order is None:
+                net_order = sorted(self.nets.keys(), key=lambda n: self._get_net_priority(n))
+            probe_nets = self._filter_pour_nets(list(net_order))
+            model = self._kicad_length_model(grid.num_layers)
+            for net in probe_nets:
+                start = len(self.routes)
+                failures_before = sum(1 for f in self.routing_failures if f.net == net)
+                try:
+                    self.route_net(net)
+                except Exception as exc:  # noqa: BLE001 - a probe never fails a route
+                    flush_print(
+                        f"  Warning: detour probe failed for net "
+                        f"{self.net_names.get(net, net)} ({type(exc).__name__}: {exc})"
+                    )
+                probed = self.routes[start:]
+                failed_edges = [f for f in self.routing_failures if f.net == net][failures_before:]
+                net_name = self.net_names.get(net, f"Net_{net}")
+                # Escape stubs (sub-grid retry) are pre-pass copper, not
+                # connections -- the drawn side excludes them too.
+                connections = [
+                    r for r in probed if r.segments and not getattr(r, "is_escape", False)
+                ]
+                net_rows_start = len(records)
+                for route in connections:
+                    records.append(
+                        DetourConnectionRecord(
+                            net_name=net_name,
+                            connection_index=len(records) - net_rows_start,
+                            alone_mm=model.route_length(route),
+                            endpoints=route_path_ends(route),
+                        )
+                    )
+                # Every edge the alone-board search failed is reported as
+                # probe-no-path rather than dropped -- including the failed
+                # edges of a multi-terminal net whose other edges routed
+                # (issue #9003).  A routable net that connected nothing and
+                # recorded no failure (an exception above) still gets one row.
+                no_path = len(failed_edges)
+                if not connections and not no_path and len(self.nets.get(net, [])) >= 2:
+                    no_path = 1
+                for _ in range(no_path):
+                    records.append(
+                        DetourConnectionRecord(
+                            net_name=net_name,
+                            connection_index=len(records) - net_rows_start,
+                            alone_mm=None,
+                            probe_no_path=True,
+                        )
+                    )
+                # Unmark every probe route, on both grids and both lists,
+                # mirroring NegotiatedRouter.rip_up_nets.
+                for route in probed:
+                    grid.unmark_route_usage(route)
+                    grid.unmark_route(route)
+                del self.routes[start:]
+        except Exception as exc:  # noqa: BLE001 - a probe never fails a route
+            flush_print(
+                f"  Warning: detour-ratio probe skipped "
+                f"({type(exc).__name__}: {exc}); no report will be printed"
+            )
+            records = []
+        finally:
+            # Restore every attribute the probe could have touched (see the
+            # docstring), then the planes, then invalidate occupancy caches.
+            for snapshot in snapshots:
+                snapshot.restore()
+            rng_snapshot.restore()
+            for name, saved in planes.items():
+                getattr(grid, name)[...] = saved
+            grid.bump_occupancy_generation()  # Issue #4794
+            self._commit_journal.truncate_to(*journal_mark)
+        self.detour_probe_records = records
+
+    def finalize_detour_probe_records(self) -> None:
+        """Pair the settled routes into the probe records (#9003).
+
+        Called by the CLI after the route settled, before printing/writing
+        the report.  Escape stubs are pre-pass copper, not connections, and
+        are excluded from the drawn side -- but the real route ALSO emits
+        untagged infrastructure fragments beside the full connections
+        (escape-stub hop routes into dense-package escape endpoints,
+        intra-IC ties), so drawn routes are paired to probe connections by
+        their **path ends** (greedy nearest under
+        ``DETOUR_ENDPOINT_MATCH_TOLERANCE_MM``), never by list position: a
+        position-based pairing on an escape-routed board matches a 0.8mm
+        hop against a 25mm connection and reports a 0.03x ratio -- worse
+        than no measurement.
+
+        Drawn copper no probe connection claims is summed per net into
+        ``summary.unattributed_drawn_mm`` (reported, not silently dropped).
+        A probe connection the settled route did not reproduce (partial
+        route, or a pristine-vs-congested topology difference) is marked
+        ``unmatched`` and excluded from the distribution.
+        """
+        records = getattr(self, "detour_probe_records", None)
+        if not records:
+            return
+        from kicad_tools.analysis.detour_ratio import (
+            DETOUR_ENDPOINT_MATCH_TOLERANCE_MM,
+            endpoint_pair_distance,
+            route_path_ends,
+        )
+
+        by_net: dict[str, list[DetourConnectionRecord]] = {}
+        for rec in records:
+            if not rec.probe_no_path:
+                by_net.setdefault(rec.net_name, []).append(rec)
+        drawn_by_net: dict[str, list[Any]] = {}
+        for route in self.routes:
+            if getattr(route, "is_escape", False) or not route.segments:
+                continue
+            drawn_by_net.setdefault(route.net_name, []).append(route)
+        model = self._kicad_length_model(self.grid.num_layers)
+        leftover_mm = 0.0
+        for net_name, recs in by_net.items():
+            drawn = drawn_by_net.get(net_name, [])
+            # Greedy nearest-endpoint matching, smallest cost first.
+            candidates: list[tuple[float, int, int]] = []
+            for pi, rec in enumerate(recs):
+                if rec.endpoints is None:
+                    continue
+                for di, route in enumerate(drawn):
+                    ends = route_path_ends(route)
+                    if ends is None:
+                        continue
+                    cost = endpoint_pair_distance(rec.endpoints, ends)
+                    if cost <= DETOUR_ENDPOINT_MATCH_TOLERANCE_MM:
+                        candidates.append((cost, pi, di))
+            candidates.sort()
+            taken_p: set[int] = set()
+            taken_d: set[int] = set()
+            for _cost, pi, di in candidates:
+                if pi in taken_p or di in taken_d:
+                    continue
+                taken_p.add(pi)
+                taken_d.add(di)
+                recs[pi].drawn_mm = model.route_length(drawn[di])
+            for pi, rec in enumerate(recs):
+                if pi not in taken_p:
+                    rec.unmatched = True
+            for di, route in enumerate(drawn):
+                if di not in taken_d:
+                    leftover_mm += model.route_length(route)
+        self._detour_unattributed_drawn_mm = leftover_mm
+
     def _run_routing_plan_stage(self) -> None:
         """Build the routing plan ahead of a negotiated route (Issue #5520).
 
@@ -13008,6 +13296,12 @@ class Autorouter:
         # grid-untouching, and skipped when a plan already exists -- see
         # ``_run_routing_plan_stage``.
         self._run_routing_plan_stage()
+
+        # Issue #9003: ``--report-detour-ratio`` probe pre-pass.  Also
+        # report-only and grid-untouching (every accumulator restored --
+        # see ``_probe_alone_on_empty_lengths``); the grid here is still
+        # the empty board, which is the metric's denominator substrate.
+        self._probe_alone_on_empty_lengths()
 
         # Issue #1603: Sub-grid escape pre-pass for off-grid pads
         self._run_subgrid_prepass()
@@ -19870,6 +20164,13 @@ class Autorouter:
         # threading before two-phase routing begins.
         self._prepare_routing()
 
+        # Issue #9003: ``--report-detour-ratio`` probe pre-pass, before
+        # Phase A commits block copper or the global pass assigns corridor
+        # preferences -- the detailed grid here still carries only pads,
+        # keepouts and fixed copper.  A no-op when the caller already
+        # probed (``route_with_escape`` probes before its escape stubs).
+        self._probe_alone_on_empty_lengths()
+
         # Issue #5894: ``--ripup-strategy sequential-n1`` must reach THIS path
         # too, not only ``route_all_negotiated``.  ``kct route`` sends every
         # escape-routed board here (``route_with_escape`` ->
@@ -25494,6 +25795,11 @@ class Autorouter:
         self._install_grid_rule_area_keepouts()
         print("\n=== Routing with Escape Pattern Generation + Differential Pairs ===")
 
+        # Issue #9003: probe pre-pass while the grid is still pristine
+        # (mirrors ``route_with_escape``'s hook; the later two-phase hook
+        # becomes a no-op through the records guard).
+        self._probe_alone_on_empty_lengths()
+
         # Reset the one-shot escape guard for this run so a reused Autorouter
         # (e.g. across escalation attempts) starts clean.
         self._escapes_generated_this_run = False
@@ -25629,6 +25935,13 @@ class Autorouter:
         # its preamble, so install board keepout rule areas up front.
         self._install_grid_rule_area_keepouts()
         print("\n=== Routing with Escape Pattern Generation ===")
+
+        # Issue #9003: ``--report-detour-ratio`` probe pre-pass, before the
+        # escape pre-phase commits its stubs -- this is the last point at
+        # which the grid carries only pads, keepouts and fixed copper.  The
+        # ``detour_probe_records is not None`` guard makes the later
+        # ``route_all_two_phase`` hook a no-op on this flow.
+        self._probe_alone_on_empty_lengths()
 
         # Issue #3952: the escape pre-phase (sub-grid pre-pass, dense
         # detection, escape generation, pad-channel budgets) is extracted
@@ -26011,6 +26324,10 @@ class Autorouter:
             path inside the recursive ``route_net`` call.
         """
         if net not in self.nets:
+            return []
+        # Issue #9003: the read-only detour probe never edits other nets'
+        # copper (on its empty board that could only be fixed copper).
+        if getattr(self, "_detour_probe_active", False):
             return []
 
         # Issue #8414: ``per_net_timeout`` is what is LEFT of the caller's
