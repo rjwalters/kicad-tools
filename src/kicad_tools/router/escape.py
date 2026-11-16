@@ -7051,9 +7051,13 @@ class EscapeRouter:
                 escape via's copper annulus is never gap-checked against
                 its own pad the way the stitcher's slit-band guard
                 (``same_net_pad_gap_acceptable``, same issue) now does.
-                Measured impact is small (~3 of the 114 findings on the
-                board 06/07 fixtures); fixing it here is a follow-up
-                issue, deliberately out of #8957's scope.
+                Issue #8974 closed that gap: the same-net skip branch now
+                runs the same ``same_net_pad_gap_acceptable`` predicate
+                against the caller-resolved
+                ``DesignRules.same_net_pad_gap_band_edge_mm`` (off when
+                the caller resolved no stackup edge), so an escape via
+                can no longer park its annulus inside the fab-view slit
+                band of its own pad.
             foreign_tracks: Optional list of nearby segments to validate
                 against.  Segments whose ``net`` equals ``net`` are
                 skipped automatically.
@@ -7157,11 +7161,39 @@ class EscapeRouter:
             # ``EscapeRouter._via_clears_other_pads`` for the matching
             # rect template).
             pad_tuples: list[tuple[float, float, float, float, int]] = []
+            # Issue #8974: the same-net pads the loop below skips are the
+            # population the slit-band predicate needs -- collect their
+            # bboxes here and reject a candidate whose annulus sits in the
+            # fab-view ``(0, band_edge)`` band beside its own pad.  The
+            # edge is the caller-resolved
+            # ``DesignRules.same_net_pad_gap_band_edge_mm`` (None/0 ⇒ guard
+            # off), never a literal, so an unresolvable stackup leaves
+            # placement exactly as before.
+            band_edge_mm = float(
+                getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+            )
+            same_net_bboxes: list[tuple[float, float, float, float]] = []
             if foreign_pads:
                 for p in foreign_pads:
                     if net is not None and p.net == net:
+                        if band_edge_mm > 0 and not getattr(p, "through_hole", False):
+                            same_net_bboxes.append(
+                                (
+                                    p.x - p.width / 2.0,
+                                    p.y - p.height / 2.0,
+                                    p.x + p.width / 2.0,
+                                    p.y + p.height / 2.0,
+                                )
+                            )
                         continue
                     pad_tuples.append((p.x, p.y, p.width, p.height, p.net))
+            if same_net_bboxes:
+                from .via_clearance import same_net_pad_gap_acceptable
+
+                if not same_net_pad_gap_acceptable(
+                    x, y, eff_diameter, same_net_bboxes, band_edge_mm
+                ):
+                    return False
 
             seg_list: list[Segment] = []
             if foreign_tracks:
