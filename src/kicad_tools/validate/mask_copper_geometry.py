@@ -61,6 +61,31 @@ SAFE_RULE_CONSTRAINTS = frozenset(
         # Silkscreen text minima, silkscreen-scoped by their own conditions; silk_clearance's double argument applies verbatim (#8948).
         "text_thickness",
         "text_height",
+        # Measured minimum intra-pair gap the router laid each coupled pair
+        # at (#6443), one rule per pair. A DRC measurement over
+        # already-routed track material; the gap was an input to the router,
+        # not to the plot, and the rule recording it changes nothing the
+        # plotter emits. Parity-pinned by tests/test_mask_copper_native.py
+        # (#8973).
+        "diff_pair_gap",
+        # Pair-quality maxima the protocol table or the net class resolves
+        # (#6443): uncoupled length and skew are measured over the lengths
+        # of already-plotted track, and via_count counts vias that already
+        # exist. None of the three is a plot input. ``skew`` is emitted both
+        # bare and with ``(within_diff_pairs)``; both forms measure the same
+        # plotted lengths. Parity-pinned by tests/test_mask_copper_native.py
+        # (#8973).
+        "diff_pair_uncoupled",
+        "skew",
+        "via_count",
+        # A keepout prohibition (#6039), argued on its own terms: unlike
+        # every other entry it is not a dimensional minimum at all but a ban
+        # on item PRESENCE inside a referenced rule area. DRC reports items
+        # of the listed kinds there; the rule never moves, resizes, removes
+        # or adds any plotted object, so the plot is identical with or
+        # without it. Parity-pinned by tests/test_mask_copper_native.py
+        # (#8973).
+        "disallow",
     }
 )
 
