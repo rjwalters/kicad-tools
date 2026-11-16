@@ -16,6 +16,9 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-16
 
+- **PR #9026**: build(deps-dev): bump @types/node from 26.6.5 to 26.6.6 in /site in the npm-minor-patch group across 1 directory
+- **PR #9021**: fix(stitch): use pad-gap detection edge to match kct check on 2oz stackups
+- **Issue #9016** (closed): Stitcher passes error_edge_mm to the same-net pad-gap predicate whose contract now says detection_edge_mm
 - **PR #9024**: test: pin first-pass far-end tie clearance on cornered SMD legs
 - **PR #9022**: fix(readiness): bind the waivers sidecar into evidence inputs
 - **Issue #9006** (closed): readiness evidence does not record waiver-cleared errors, nor hash the waivers sidecar
