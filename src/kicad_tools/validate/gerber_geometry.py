@@ -24,6 +24,10 @@ GERBER_CHORD_ERROR_MM = 0.000001
 # and the cap keeps a hostile body from exploding the geometry budget.
 _MACRO_OUTLINE_VERTICES = (3, 500)
 
+# Relative tolerance for accepting a repaired self-touching region contour:
+# the repair must preserve the contour's own (shoelace) area.
+REGION_REPAIR_AREA_TOLERANCE = 1e-9
+
 
 class GerberGeometryError(ValueError):
     """The complete layer cannot be reconstructed with known semantics."""
@@ -199,6 +203,7 @@ def _arc(start, end, center, clockwise, tolerance):
 
 def parse_gerber_geometry(data: str) -> GerberGeometry:
     """Read native Gerber with the KiCad %AMRoundRect macro subset; reject the rest."""
+    from shapely import make_valid  # type: ignore[import-untyped]
     from shapely.affinity import rotate, scale, translate  # type: ignore[import-untyped]
     from shapely.geometry import (  # type: ignore[import-untyped]
         GeometryCollection,
@@ -328,14 +333,17 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                 if len(values) not in {required, required + 1}:
                     raise GerberGeometryError("Unsupported aperture parameters")
                 width = values[0] * units
-                if width <= 0:
-                    raise GerberGeometryError("Nonpositive aperture")
+                # A zero-size aperture may be defined and selected (KiCad uses
+                # one as the current aperture while emitting G36/G37 regions);
+                # only flashing or stroking it is illegal, so the rejection
+                # lives at the use sites below.
+                nonpositive = width <= 0
                 if kind == "C":
                     shape = _buffer(Point(0, 0), width / 2)
                 elif kind in {"R", "O"}:
                     height = values[1] * units
                     if height <= 0:
-                        raise GerberGeometryError("Nonpositive aperture")
+                        nonpositive = True
                     if kind == "R":
                         shape = box(-width / 2, -height / 2, width / 2, height / 2)
                     else:
@@ -362,7 +370,7 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                 hole = len(values) > required and values[-1] > 0
                 if hole:
                     shape = shape.difference(_buffer(Point(0, 0), values[-1] * units / 2))
-                apertures[number] = (shape, kind, width, hole)
+                apertures[number] = (shape, kind, width, hole, nonpositive)
             else:
                 raise GerberGeometryError(f"Unsupported extended command: {command[:80]}")
             continue
@@ -388,7 +396,28 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                     raise GerberGeometryError("Open or degenerate region")
                 polygon = Polygon(points)
                 if not polygon.is_valid:
-                    raise GerberGeometryError("Invalid region contour")
+                    # A self-touching contour is normal fill output (a pour
+                    # pinching off at a point) and carries unambiguous area:
+                    # keep the polygonal parts of the repair and require the
+                    # shoelace area to survive it. An ambiguous interior
+                    # (e.g. a self-intersecting bow tie) changes the area and
+                    # is still rejected. make_valid can also yield
+                    # lower-dimensional parts at the pinch, so filtering only
+                    # a Polygon/MultiPolygon top-level result is not enough.
+                    repaired = make_valid(polygon)
+                    parts = [
+                        part
+                        for part in getattr(repaired, "geoms", [repaired])
+                        if part.geom_type in {"Polygon", "MultiPolygon"}
+                    ]
+                    if not parts:
+                        raise GerberGeometryError("Invalid region contour")
+                    repaired = unary_union(parts)
+                    if abs(repaired.area - polygon.area) > REGION_REPAIR_AREA_TOLERANCE * max(
+                        polygon.area, 1.0
+                    ):
+                        raise GerberGeometryError("Invalid region contour")
+                    polygon = repaired
                 shape = shape.symmetric_difference(polygon)
             emit(shape)
             region, contour = None, []
@@ -437,7 +466,9 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
             else:
                 if selected is None:
                     raise GerberGeometryError("Draw before aperture selection")
-                aperture, kind, width, hole = apertures[selected]
+                aperture, kind, width, hole, nonpositive = apertures[selected]
+                if nonpositive:
+                    raise GerberGeometryError("Nonpositive aperture")
                 if hole or (interpolation != 1 and kind != "C"):
                     raise GerberGeometryError("Unsupported swept aperture")
                 if kind == "C":
@@ -453,7 +484,10 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
         elif operation == 3:
             if region is not None or selected is None:
                 raise GerberGeometryError("Invalid flash")
-            emit(translate(apertures[selected][0], *endpoint))
+            aperture, _, _, _, nonpositive = apertures[selected]
+            if nonpositive:
+                raise GerberGeometryError("Nonpositive aperture")
+            emit(translate(aperture, *endpoint))
         else:
             raise GerberGeometryError("Coordinates without valid operation")
         position = endpoint

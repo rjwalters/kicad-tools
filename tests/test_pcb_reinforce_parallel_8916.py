@@ -239,6 +239,172 @@ class TestTieVias:
         assert all(g <= 5.0 + 1e-6 for g in gaps), gaps
         assert len(xs) == 5
 
+    # -- Issue #8950 (a): tie-via rows sized from the declared current ------
+
+    @staticmethod
+    def _smd_leg(*, end: float = 40.0, width: float = 3.5) -> PCB:
+        """A B.Cu leg of ``width`` mm between two SMD pads at x=20 and ``end``."""
+        pcb = PCB.create(width=200, height=100, center=False)
+        _smd_pad(pcb, "J1", 20.0, 50.0)
+        _smd_pad(pcb, "J2", end, 50.0)
+        pcb.add_trace((20.0, 50.0), (end, 50.0), width=width, layer="B.Cu", net=NET)
+        return pcb
+
+    def test_declared_current_sizes_a_tie_row_at_each_smd_end(self):
+        """A 15 A SMD-ended leg gets a 10-via tie row per end (0.30 mm drill
+        barrels 1.6 A each) and passes path_ampacity with no under-capacity
+        layer change at either end."""
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+        pcb = self._smd_leg()
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=_rules()
+        )
+        (leg,) = result.legs
+        assert leg.status == LEG_PARALLEL and leg.copy_status == COPY_PLACED, leg.reason
+        _, drill = stitch_via_geometry(_rules())
+        need = math.ceil(15.0 / via_barrel_current_capacity(drill))
+        assert need == 10
+        assert leg.copy is not None
+        # One packed row per end; the rows leave no room for an interior
+        # stitch (their tips sit ~3.5 mm apart, under the 5 mm pitch).
+        assert len(leg.copy.stitch_vias) == 2 * need
+        assert "20 stitching via(s)" in leg.reason  # the per-leg report row
+        res = resolve_current_path(pcb, _spec())
+        assert len(res.series_layer_changes) == 2
+        for change in res.series_layer_changes:
+            assert change.count == need
+            assert change.current_capacity_a() >= 15.0
+        assert PathAmpacityRule([_spec()]).check(pcb, _rules()).errors == []
+
+    def test_tie_row_count_tracks_the_governing_rules(self):
+        """A 0.20 mm drill tier sizes the row from its own barrel capacity
+        (13 vias for 15 A), not from a constant."""
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+        rules = DesignRules(
+            min_trace_width_mm=0.127,
+            min_clearance_mm=0.127,
+            min_via_drill_mm=0.2,
+            min_via_diameter_mm=0.45,
+            min_annular_ring_mm=0.13,
+            min_hole_to_hole_mm=0.5,
+            outer_copper_oz=2.0,
+            inner_copper_oz=2.0,
+        )
+        pcb = self._smd_leg()
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=rules
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        need = math.ceil(15.0 / via_barrel_current_capacity(0.2))
+        assert need == 13
+        res = resolve_current_path(pcb, _spec())
+        assert len(res.series_layer_changes) == 2
+        for change in res.series_layer_changes:
+            assert change.count == need
+            assert change.current_capacity_a() >= 15.0
+        assert PathAmpacityRule([_spec()]).check(pcb, rules).errors == []
+
+    def test_a_blocked_tie_row_refuses_the_copy_whole(self):
+        """An other-net via part-way along the row stops it: the leg is
+        refused whole, nothing is written, and the reason names the
+        shortfall and the governing rule."""
+        pcb = self._smd_leg()
+        # The end-0 row steps inward at 0.815 mm from x=20.927: the third
+        # member would sit on this via.
+        pcb.add_via(22.557, 50.0, size=0.6, drill=0.3, net="SIG")
+        n_seg, n_via = len(pcb.segments), len(pcb.vias)
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=_rules()
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_REFUSED
+        assert "end tie row" in leg.copy_reason and "10" in leg.copy_reason
+        assert result.refused_copies and not result.copies
+        assert (len(pcb.segments), len(pcb.vias)) == (n_seg, n_via)
+
+    def test_a_leg_too_short_for_the_tie_rows_refuses_whole(self):
+        """15 A needs a 7.34 mm row at each end; a 6 mm leg cannot hold one.
+        The refusal names the shortfall and nothing is written."""
+        pcb = self._smd_leg(end=26.0)
+        n_seg, n_via = len(pcb.segments), len(pcb.vias)
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=_rules()
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_REFUSED
+        assert "end tie row" in leg.copy_reason and "10" in leg.copy_reason
+        assert (len(pcb.segments), len(pcb.vias)) == (n_seg, n_via)
+
+    def test_ungated_smd_end_keeps_a_single_tie_via(self):
+        """Without declared current there is nothing to size a row from: one
+        tie via per SMD end, exactly as before #8950."""
+        pcb = self._smd_leg(width=1.0)
+        result = reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        assert leg.copy is not None
+        assert len(leg.copy.stitch_vias) == 5  # two end ties + three interior
+        xs = sorted(v.position[0] for v in _stitches(pcb))
+        assert len([x for x in xs if x < 25.0]) == 1
+        assert len([x for x in xs if x > 35.0]) == 1
+
+    def test_pulsed_only_spec_sizes_the_row_without_crashing(self):
+        """A pulsed-only spec (no pulse_duration_s) has a peak-as-continuous
+        design current; the row sizes from it and the placement completes."""
+        from kicad_tools.physics.ampacity import via_barrel_current_capacity
+
+        spec = CurrentPathSpec(
+            name="PULSE",
+            net_name=NET,
+            source=PathEndpoint("J1", "1"),
+            sink=PathEndpoint("J2", "1"),
+            continuous_a=15.0,
+            pulsed_a=15.0,
+            reinforcement_eligible=True,
+        )
+        pcb = self._smd_leg()
+        result = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[spec], design_rules=_rules()
+        )
+        (leg,) = result.legs
+        assert leg.copy_status == COPY_PLACED, leg.reason
+        _, drill = stitch_via_geometry(_rules())
+        assert leg.copy is not None
+        assert len(leg.copy.stitch_vias) == 2 * math.ceil(15.0 / via_barrel_current_capacity(drill))
+
+    def test_clear_removes_every_tie_row_via_and_rerun_is_idempotent(self):
+        """Every row via is recorded, so --clear removes them all, and a
+        re-run with the record writes the identical row again."""
+        pcb = self._smd_leg()
+        n_via0 = len(pcb.vias)
+        first = reinforce_net(
+            pcb, NET, strategy="parallel", current_paths=[_spec()], design_rules=_rules()
+        )
+        assert len(pcb.vias) == 20
+        records = build_wire_records(first, 0.0, 0.0)
+
+        def copy_records(recs):
+            return [w for w in recs if w.get("strategy") == "parallel"]
+
+        n_seg, n_via = len(pcb.segments), len(pcb.vias)
+        second = reinforce_net(
+            pcb,
+            NET,
+            strategy="parallel",
+            current_paths=[_spec()],
+            design_rules=_rules(),
+            sidecar_wires=records,
+        )
+        assert (len(pcb.segments), len(pcb.vias)) == (n_seg, n_via)
+        assert copy_records(build_wire_records(second, 0.0, 0.0)) == copy_records(records)
+
+        clear_anchors(pcb, NET, sidecar_wires=records, design_rules=_rules())
+        assert len(pcb.vias) == n_via0
+        assert _on(pcb, "F.Cu") == []
+
 
 # --------------------------------------------------------------------------
 # AC 3: auto chooses by the minimum wire length

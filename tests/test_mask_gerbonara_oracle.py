@@ -1,6 +1,7 @@
 """Analytic controls for the independent native-export comparison helper."""
 
 import math
+from pathlib import Path
 
 import pytest
 
@@ -56,3 +57,22 @@ def test_clear_layer_object_erases_prior_copper(tmp_path):
     assert not shape.covers(Point(0, 0))
     assert shape.covers(Point(0.75, 0))
     assert shape.area == pytest.approx(math.pi * 0.75, abs=1e-5)
+
+
+def test_oracle_repairs_self_touching_region_like_production_reader():
+    # Issue #8947: a KiCad 10 zone-fill contour that pinches off at a point
+    # is invalid to Shapely but legal Gerber. The oracle must apply the same
+    # repair as the production reader instead of rejecting the layer, so the
+    # comparison stays an independent witness on real fill output.
+    from kicad_tools.validate.gerber_geometry import parse_gerber_geometry
+
+    path = (
+        Path(__file__).parent
+        / "fixtures"
+        / "gerber_kicad10_region_aperture"
+        / "kicad10_simple_led_zone_fill_B_Cu.gbl"
+    )
+    shape = read_native_gerber(path)
+    reference = parse_gerber_geometry(path.read_text()).geometry
+    assert shape.area > 0
+    assert abs(shape.area - reference.area) <= 1e-9 * max(reference.area, 1.0)
