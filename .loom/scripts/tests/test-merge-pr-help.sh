@@ -28,22 +28,6 @@ loom_test_require_daemon_bin --self-only "$(cd "$SCRIPT_DIR/.." && pwd)" "merge-
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 
-assert_contains() {
-    local haystack="$1"
-    local needle="$2"
-    local msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if [[ "$haystack" == *"$needle"* ]]; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg"
-        echo "    Looking for: '$needle'"
-        echo "    In output:   '$haystack'"
-    fi
-}
-
 if [[ ! -x "$MERGE_PR" ]]; then
     echo "ERROR: $MERGE_PR is not executable" >&2
     exit 1

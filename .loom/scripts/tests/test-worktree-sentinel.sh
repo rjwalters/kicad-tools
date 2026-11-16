@@ -48,17 +48,6 @@ assert_file_exists() {
     fi
 }
 
-assert_grep() {
-    local pattern="$1"
-    local file="$2"
-    local msg="$3"
-    if grep -qE "$pattern" "$file"; then
-        pass "$msg"
-    else
-        fail "$msg (pattern not found: $pattern in $file)"
-    fi
-}
-
 # --- Test 1: worktree.sh writes .loom-managed sentinel ---
 echo "Test 1: worktree.sh writes .loom-managed sentinel"
 

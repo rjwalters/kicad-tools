@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # test-spawn-codex-guarded.sh — spawn-codex.sh's merging-role hook gate
-# (rjwalters/loom#9390). Split out of test-spawn-codex.sh, which the file-size
-# ratchet freezes.
+# (rjwalters/loom#9390). Split out of test-spawn-codex.sh.
 #
 # Champion merges and Judge issues the verdict a merge relies on, so on Codex
 # both need Loom's managed pre_tool_use hook proven exactly like a mutable

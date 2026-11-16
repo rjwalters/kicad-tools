@@ -11,9 +11,8 @@
 # so the binary that runs the update is the one that classifies -- there is
 # no separate `release-explain` probe left to be missing (#9185).
 #
-# WHY A SEPARATE SUITE: test-loom-daemon-update-fetch.sh is at the file-size
-# ratchet (see its closing note), and these assertions need a built
-# loom-daemon carrying `release-explain`, which is the job that suite already
+# WHY A SEPARATE SUITE: these assertions need a built loom-daemon carrying
+# `release-explain`, which is the job test-loom-daemon-update-fetch.sh already
 # runs in. Same fixtures (lib/daemon-update-fixtures.sh), shared not copied.
 #
 # Hermetic: no network, no live forge, no tokens. Every read goes to a stub.

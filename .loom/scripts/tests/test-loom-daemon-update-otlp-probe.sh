@@ -9,10 +9,8 @@
 # passes for a capable daemon (its fakes answer it); this suite proves the
 # probe is load-bearing.
 #
-# WHY THIS IS A SEPARATE SUITE: test-loom-daemon-update.sh is over the
-# file-size ratchet's 1000-line threshold and frozen
-# (.loom/docs/file-size-policy.md), so the scenario lives in a sibling that
-# shares lib/daemon-update-fixtures.sh with it.
+# WHY THIS IS A SEPARATE SUITE: the scenario lives in a sibling of
+# test-loom-daemon-update.sh that shares lib/daemon-update-fixtures.sh with it.
 #
 # Needs a BUILT loom-daemon (the fixture lib pins $LOOM_DAEMON_BIN), so it is
 # wired in ci.yml's "Native Port Suites" job. Hermetic: no network, no forge.

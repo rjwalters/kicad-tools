@@ -22,6 +22,7 @@ BLAME_SCRIPT="$SCRIPTS_DIR/blame-issue.sh"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
+# Local assert_contains kept: takes (needle, haystack, msg); shared helper is (haystack, needle, msg).
 assert_contains() {
     local needle="$1" haystack="$2" msg="$3"
     if [[ "$haystack" == *"$needle"* ]]; then
@@ -31,6 +32,7 @@ assert_contains() {
     fi
 }
 
+# Local assert_not_contains kept: takes (needle, haystack, msg); shared helper is (haystack, needle, msg).
 assert_not_contains() {
     local needle="$1" haystack="$2" msg="$3"
     if [[ "$haystack" != *"$needle"* ]]; then
@@ -40,6 +42,7 @@ assert_not_contains() {
     fi
 }
 
+# Local assert_eq kept: takes (actual, expected, msg); shared assert_eq is (expected, actual, msg).
 assert_eq() {
     if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (expected '$2', got '$1')"; fi
 }

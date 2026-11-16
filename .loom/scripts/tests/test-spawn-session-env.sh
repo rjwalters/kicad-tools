@@ -17,7 +17,7 @@
 # call, and reports what that child inherited. LOOM_DAEMON_ITEM_ID stays
 # exported on purpose: a nested agent shares the item's pause state.
 #
-# Sibling of test-spawn-claude.sh, which is frozen by the file-size ratchet.
+# Sibling of test-spawn-claude.sh.
 
 set -euo pipefail
 

@@ -16,8 +16,7 @@
 # Bounded: a regression fails in ~8s instead of hanging. The watched PID dies
 # (4s) before the loop's first wake-up (8s), so the loop exits without ever
 # renewing: no `gh` call is made and no stub is needed. Kept apart from
-# test-sweep-lease-renew.sh, which sits at the file-size threshold
-# (.loom/docs/file-size-policy.md).
+# test-sweep-lease-renew.sh.
 #
 # Needs a built loom-daemon (CI: the daemon-built job, not the hermetic loop).
 #

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # test-spawn-codex-model-effort.sh — spawn-codex.sh's `model@effort` split
-# (issue #8387), split out of test-spawn-codex.sh (over the file-size ratchet
-# threshold; new assertions go in a sibling, per file-size-policy.md).
+# (issue #8387), split out of test-spawn-codex.sh.
 #
 # A tier model may carry an effort suffix (`gpt-5-codex@high`). Codex has no
 # such model id, so spawn-codex.sh must forward only the base as `-m` and route

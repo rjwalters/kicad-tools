@@ -63,24 +63,6 @@ assert_line() {
 
 assert_true() { if "$@"; then pass "${!#}"; else fail "${!#}"; fi; }
 
-assert_doc_contains() {
-    local file="$1" needle="$2" msg="$3"
-    if grep -qF -- "$needle" "$file"; then
-        pass "$msg"
-    else
-        fail "$msg (missing literal in $file: $needle)"
-    fi
-}
-
-assert_doc_lacks() {
-    local file="$1" needle="$2" msg="$3"
-    if grep -qF -- "$needle" "$file"; then
-        fail "$msg (unexpected literal in $file: $needle)"
-    else
-        pass "$msg"
-    fi
-}
-
 # =====================================================================
 # Fixture comment bodies (the real shapes champion-issue-promo.md posts)
 # =====================================================================
@@ -418,8 +400,7 @@ assert_eq "1" "$RC" "one merits finding disqualifies the whole set"
 assert_contains "$OUT" "REASON: merits-finding" "mixed set reports merits-finding"
 
 # Premise-false interaction with --check-defer (#7904) is covered in the
-# sibling module test-classify-dependency-block-premise-false.sh -- extracted
-# to keep this file under the file-size-policy.md threshold.
+# sibling module test-classify-dependency-block-premise-false.sh.
 
 echo
 echo "--- REGRESSION GUARD: a real dependency CYCLE still escalates ---"

@@ -2242,43 +2242,56 @@ Guide-filed PR still has to clear Judge (and possibly Doctor), so filing one
 at exactly the worst time competes with substantive work for the resource
 under the most pressure.
 
-**Cheap by construction (AC4):** this reads the **already-written**
-`.loom/tokens/.ranking` file — the running daemon self-refreshes it on its
-own ~10-minute loop (`autonomous.tokenRankingRefresh`, see
+**Cheap by construction (AC4):** `loom-daemon tokens pressure` parses the
+**already-written** ranking file — the running daemon self-refreshes it on
+its own ~10-minute loop (`autonomous.tokenRankingRefresh`, see
 `.loom/docs/token-pool.md`) — rather than
 invoking `loom-daemon tokens check --ranking`, which would trigger a fresh
 per-account probe (a real, if minimal, request against the very pool this
-check exists to protect) on every dry-queue tick. A plain file read costs
-nothing. Missing/empty/unparseable ranking data fails **open** (proceeds as
-if there is no pressure) — the same fail-open posture the rest of this phase
-uses for best-effort forge probes; a missing telemetry file is not evidence
-of pressure, and starving doc maintenance because the ranking file happens to
-be absent would be worse than occasionally filing without one.
+check exists to protect) on every dry-queue tick. The verb is filesystem-only
+and costs nothing. Missing/empty/unparseable ranking data fails **open**
+(prints `0`, so this proceeds as if there is no pressure) — the same
+fail-open posture the rest of this phase uses for best-effort forge probes; a
+missing telemetry file is not evidence of pressure, and starving doc
+maintenance because the ranking file happens to be absent would be worse than
+occasionally filing without one.
+
+**Why a verb and not a file read (#13839):** do **not** open the pool
+directory yourself. Reading a path under `.loom/tokens` fails twice over.
+First, the role-tool-policy hook (#8256) treats that directory as a
+credential store, and `guide`'s `toolPolicy.allowedCapabilities` is empty, so
+a Bash call naming the path is denied *at the harness* — and the denial takes
+down the whole call, not just the one read, so a Guide that batches this with
+other commands loses all of them. Second, the path would be wrong anyway: the
+pool usually resolves to the shared machine-level directory
+(`~/.loom/tokens`, `$LOOM_SHARED_TOKENS_DIR`), not to a repo-local one, so a
+hardcoded `<repo>/.loom/tokens/.ranking` silently reports "no pressure" on
+every shared-pool host. The verb resolves the same directory the ranking
+writer targets and prints only a number — no account names, no statuses, no
+token material — which is precisely why a role without the
+`credential-store` capability may call it. `guide.json` stays unchanged.
 
 ```bash
-# Fraction of pool accounts NOT `available` (0.0-1.0), read straight off the
-# `.ranking` file's pipe-delimited `name|status|5h_util|limit_reset` lines
-# (token-pool.md "Account health probe + ranking") -- never a fresh probe.
-# A malformed row (empty status field) is treated as available (fail open),
-# never counted as pressure.
+# Fraction of pool accounts NOT `available` (0.0-1.0), obtained from
+# `loom-daemon tokens pressure` -- a filesystem-only read of the ranking the
+# daemon already refreshes (token-pool.md "Account health probe + ranking"),
+# never a fresh probe. The verb resolves the pool the SAME way the ranking
+# writer does (repo-local, else the shared machine-level pool), which a
+# hardcoded path here could not, and it prints only this number, so no
+# `credential-store` capability is needed (#13839).
+#
+# Fails open to "0" on anything unexpected: a daemon too old to know the verb
+# (exit != 0), a verb that printed nothing, or output that is not a bare
+# number. The verb itself already prints "0" for an absent, unreadable, or
+# unparseable ranking, so the no-data and no-pressure cases agree.
 pool_pressure_fraction() {
-  local ranking="$(git rev-parse --show-toplevel 2>/dev/null)/.loom/tokens/.ranking"
-  [ -f "$ranking" ] || { echo "0"; return; }
-
-  local total unavailable
-  # `grep -c` exits 1 (a normal "zero matches" result, not an error) on an
-  # empty/no-pipe file while still printing "0" to stdout -- an `|| echo 0`
-  # fallback here would fire on that same exit 1 and duplicate the output
-  # into two lines ("0\n0"), corrupting the arithmetic below. `grep -c`
-  # always prints exactly one numeric line regardless of match count, so no
-  # fallback is needed; only guard against a genuinely empty capture.
-  total=$(grep -c '|' "$ranking" 2>/dev/null)
-  if [ -z "$total" ] || [ "$total" -eq 0 ]; then
-    echo "0"
-    return
-  fi
-  unavailable=$(awk -F'|' '$2 != "" && $2 != "available" { c++ } END { print c+0 }' "$ranking")
-  awk -v u="$unavailable" -v t="$total" 'BEGIN { printf "%.4f", u/t }'
+  local out
+  out="$(loom-daemon tokens pressure --workspace "$(git rev-parse --show-toplevel 2>/dev/null || echo .)" 2>/dev/null)" \
+    || { echo "0"; return; }
+  case "$out" in
+    '' | *[!0-9.]*) echo "0" ;;
+    *) echo "$out" ;;
+  esac
 }
 
 # Epoch seconds of the most recently MERGED docs-maintenance PR of ANY kind
@@ -2667,8 +2680,10 @@ Document Maintenance Phase
   (and possibly Doctor), competing with substantive work for the pool's
   scarcest capacity at exactly the moment other roles are retrying against
   a shrinking set of available accounts. Gated on `pool_pressure_fraction()`
-  (a cheap read of the already-refreshed `.loom/tokens/.ranking` file, never
-  a fresh probe) against `guide.docsMaintenance.poolPressureThreshold`
+  (`loom-daemon tokens pressure`: a filesystem-only read of the
+  already-refreshed ranking, never a fresh probe — and never a direct read
+  inside the token pool, which `guide`'s tool policy denies, #13839) against
+  `guide.docsMaintenance.poolPressureThreshold`
   (default 0.70), and bounded by an absolute
   `guide.docsMaintenance.poolPressureMaxDeferSecs` ceiling (default 14400 =
   4h) so doc maintenance never starves permanently even if pressure never

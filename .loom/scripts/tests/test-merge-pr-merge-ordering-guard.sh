@@ -96,9 +96,8 @@ error()   { echo "ERROR: $*" >&2; exit 1; }
 # --- Extract the function under test from merge-pr.sh and source it ---
 # From `_check_no_open_stacked_children() {` up to (not including) the
 # `# Invoke the guard before` invocation comment. The #7982 pin/warn/block
-# decision is inline in that same function (merge-pr.sh is ratcheted and a new
-# sibling shell lib is not an available remedy — see the comment above the
-# function in merge-pr.sh), so this one extraction covers all of it.
+# decision is inline in that same function, so this one extraction covers all
+# of it.
 # Extracting from source keeps the test in lockstep with the script.
 FUNCS_FILE="$(mktemp)"
 STUB_DIR="$(mktemp -d)"

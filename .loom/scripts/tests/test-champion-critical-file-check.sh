@@ -89,31 +89,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
 # Pin a literal snippet as present verbatim in a doc file — catches drift
 # between this test's mirrored function and the shipped markdown.
-assert_doc_contains() {
-    local file="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" "$file"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg (missing literal in $file: $needle)"
-    fi
-}
 
 # Pin a literal snippet's ABSENCE from a doc file — catches a regression back
 # to the truncating command.
-assert_doc_lacks() {
-    local file="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" "$file"; then
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg (found stale/truncating literal in $file: $needle)"
-    else
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    fi
-}
 
 # =====================================================================
 # champion-pr-merge.md the critical-files criterion's critical-file check-loop, mirrored

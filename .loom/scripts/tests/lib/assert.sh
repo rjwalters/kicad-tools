@@ -87,3 +87,16 @@ assert_no_grep() {
     local pattern="$1" file="$2" msg="$3"
     if grep -qE "$pattern" "$file"; then fail "$msg (found pattern: $pattern)"; else pass "$msg"; fi
 }
+
+# assert_doc_contains/assert_doc_lacks: fixed-string (-F) match of <needle>
+# against <file>; args are `file needle msg` (#13795). Suites whose local helper
+# takes a different argument order (e.g. a fixed $DOC) keep their own.
+assert_doc_contains() {
+    local file="$1" needle="$2" msg="$3"
+    if grep -qF -- "$needle" "$file"; then pass "$msg"; else fail "$msg (missing literal in $file: $needle)"; fi
+}
+
+assert_doc_lacks() {
+    local file="$1" needle="$2" msg="$3"
+    if grep -qF -- "$needle" "$file"; then fail "$msg (found literal in $file: $needle)"; else pass "$msg"; fi
+}

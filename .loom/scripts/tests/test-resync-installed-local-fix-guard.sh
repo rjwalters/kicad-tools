@@ -2,8 +2,7 @@
 # test-resync-installed-local-fix-guard.sh - local-divergence protection in
 # resync-installed.sh's sync_one() (#7864)
 #
-# Split out of test-resync-installed.sh (which is frozen by the file-size
-# ratchet, .loom/docs/file-size-policy.md) rather than grown in place -- see
+# Split out of test-resync-installed.sh rather than grown in place -- see
 # that file's own header for the full fixture-based test catalog this one
 # does not duplicate, and its make_fixture() for why the fixture commit
 # message there deliberately matches the "routine resync" lineage pattern

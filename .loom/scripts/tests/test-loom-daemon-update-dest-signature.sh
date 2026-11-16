@@ -6,18 +6,14 @@
 #
 # WHY THIS IS A SEPARATE SUITE
 #
-# Subject, then size. These two scenarios are not about `--fetch` at all: they
+# Subject. These two scenarios are not about `--fetch` at all: they
 # assert what happens AFTER provisioning, on the destination binary, on Darwin
 # only. They lived in the fetch suite because that is where a Darwin-target
 # fixture already existed, not because they test artifact fetching.
 #
-# The forcing function was the file-size ratchet
-# (.loom/docs/file-size-policy.md): test-loom-daemon-update-fetch.sh sat at 999
-# code lines -- one short of the 1000-line freeze -- and its own closing
-# comment already said so. Adding #8770's scenario crossed it. Extracting a
-# coherent subject into a sibling is the remedy that policy names first, and
-# the same one #7977 (--resolve-json) and #8028 (--fetch) already applied to
-# this suite's parent twice.
+# Extracting a coherent subject into a sibling is the same thing #7977
+# (--resolve-json) and #8028 (--fetch) already applied to this suite's parent
+# twice.
 #
 # Like its two siblings it needs a BUILT loom-daemon: lib/daemon-update-fixtures.sh
 # pins $LOOM_DAEMON_BIN through require-daemon-bin.sh, and the flows here reach

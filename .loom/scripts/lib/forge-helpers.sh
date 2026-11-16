@@ -304,10 +304,7 @@ forge_split_nwo() {
 
 # --- Forge-Dispatched Operations ---
 
-# forge_detect_merge_method() (#7754) lives in the sibling module below --
-# forge-helpers.sh is already over the file-size ratchet's threshold and
-# frozen at its current size (scripts/file-size-baseline.txt), so new
-# functionality is split out rather than added here.
+# forge_detect_merge_method() (#7754) lives in the sibling module below.
 # shellcheck source=./forge-merge-method.sh
 source "$_LOOM_FORGE_HELPERS_LIB_DIR/forge-merge-method.sh"
 
@@ -1090,7 +1087,6 @@ _forge_nwo_from_remote() {
 # `loom-daemon forge may-write` (loom-daemon/src/write_scope.rs: managed repo +
 # the credential has WRITE). See .loom/docs/comment-trust.md.
 # requires-daemon: forge optional   With no binary, or one predating `may-write` (any exit but 0/1, or 0 without OWNER/REPO on stdout), the fallback allows a write only when the checkout's ONLY remote is origin, only to origin, and GH_REPO is unset or origin: it cannot check permission, but it cannot reach any repository but the one this Loom checkout was cloned from.
-# Five dense body lines on purpose: this file is frozen by the file-size ratchet.
 loom_write_repo() {
   local want="${1:-}" out rc=0 err origin; err="$(mktemp)"; origin="$(_forge_nwo_from_remote)" || origin=""
   if [[ -n "$want" ]]; then out="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge may-write --repo "$want" 2>"$err")" || rc=$?; else out="$("${LOOM_DAEMON_BIN:-loom-daemon}" forge may-write 2>"$err")" || rc=$?; fi
@@ -1547,10 +1543,9 @@ forge_gh_remove_label_rl_safe() {
 # "not created" are indistinguishable from here, so a caller must LOOK before
 # retrying rather than blind-retry into a real duplicate.
 #
-# Implemented as two MODIFIED lines, no added ones, on purpose: this file is
-# frozen by scripts/check-file-size-budget.sh, and a "never silent" guarantee
-# belongs at the point of failure, not in a sibling module the one caller
-# would have to remember to route through.
+# Implemented as two MODIFIED lines, no added ones, on purpose: a "never
+# silent" guarantee belongs at the point of failure, not in a sibling module
+# the one caller would have to remember to route through.
 forge_gh_create_issue_rl_safe() {
   local nwo="$1" title="$2" body="$3"; nwo="$(loom_write_repo "$nwo")" || return 1  # #9548
   shift 3

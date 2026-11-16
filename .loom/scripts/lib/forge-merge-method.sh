@@ -2,11 +2,7 @@
 # forge-merge-method.sh - Detect a target repo's actually-allowed merge
 # strategy, for forge-helpers.sh's merge call sites (#7754).
 #
-# Split out of forge-helpers.sh as a sibling module per the file-size ratchet
-# (scripts/file-size-baseline.txt / .loom/docs/file-size-policy.md) --
-# forge-helpers.sh is already over the tracked-line threshold and frozen at
-# its current size, so new functionality lands in a new file instead of
-# growing it further.
+# Split out of forge-helpers.sh as a sibling module.
 #
 # Usage:
 #   source "$(dirname "${BASH_SOURCE[0]}")/forge-merge-method.sh"

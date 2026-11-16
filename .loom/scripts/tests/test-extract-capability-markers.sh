@@ -21,6 +21,7 @@ PARSER_SCRIPT="$SCRIPTS_DIR/extract-capability-markers.sh"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
+# Local assert_contains kept: takes (needle, haystack, msg); shared helper is (haystack, needle, msg).
 assert_contains() {
     local needle="$1" haystack="$2" msg="$3"
     if [[ "$haystack" == *"$needle"* ]]; then
@@ -30,6 +31,7 @@ assert_contains() {
     fi
 }
 
+# Local assert_not_contains kept: takes (needle, haystack, msg); shared helper is (haystack, needle, msg).
 assert_not_contains() {
     local needle="$1" haystack="$2" msg="$3"
     if [[ "$haystack" != *"$needle"* ]]; then
