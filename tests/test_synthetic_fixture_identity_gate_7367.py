@@ -129,7 +129,7 @@ BOARD07_GAP_NETS = (
     "TMDS_D2_N",
 )
 
-BOARD06_GAP_NETS = ("+1V2", "+1V8", "+3V3", "GND", "MIPI_CLK+", "PCIE_RX+", "USB2_D-")
+BOARD06_GAP_NETS = ("GND", "MIPI_CLK+", "PCIE_RX+", "USB2_D-")
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
