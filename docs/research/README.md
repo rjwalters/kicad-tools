@@ -25,6 +25,7 @@ licence-compatibility, is the ecosystem registry: `kct ecosystem list`,
 | [OmniLayout / OmniRouting](omnilayout-recon.md) | External LLM layout/routing benchmark recon |
 | [RepoRecon KiCad AI sweep](reporecon-kicad-ai-sweep.md) | Sweep of KiCad AI repositories |
 | [tscircuit](tscircuit-evaluation.md) | tscircuit as an upstream producer and peer autorouter |
+| [WeaveEngine](weaveengine-topology-first-evaluation.md) | Topology-first DSN/SES autorouter (GPL, ideas-only): planning ideas adopted, substrate rejected |
 
 ### Atopile / Faebryk
 
