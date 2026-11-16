@@ -79,21 +79,14 @@ class TestBoard07Allowance:
     def test_fixture_finding_allowance_is_fab_gap_only(self):
         """Issues #5333/#6448 emptied the pair/impedance/skew entries, so the
         identity allowance holds only the #8957 fab-view ``physical_copper_gap``
-        nets: the nine pre-PR-#8955 nets plus ``+1V2``, this PR's same-net
-        fab-gap slit (a +1V2 via annulus 0.0585 mm from its own pad, produced
-        by the restored authored zone clearance; measured in CI run
-        43688361347 and documented in the comment block at
-        ``scripts/ci/check_matchgroup_coverage.py`` above
-        ``MATCHGROUP_FIXTURE_ALLOWED_FINDINGS``).  Every other blocking
-        finding counts."""
+        nets: every other blocking finding counts.  #8974's route-side
+        slit-band fix, measured on the tree merged with #8975 and #8937,
+        drained DQS_P, DQS_N, GND and +1V2 entirely (entries deleted) and
+        re-pointed the six survivors to the #8962 parent tracker."""
         mod = _load_helper_module()
         assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS) == {
             ("physical_copper_gap", net)
             for net in (
-                "+1V2",
-                "DQS_N",
-                "DQS_P",
-                "GND",
                 "MIPI_CLK_N",
                 "MIPI_DAT0_N",
                 "MIPI_DAT1_N",
@@ -102,7 +95,7 @@ class TestBoard07Allowance:
                 "TMDS_D2_N",
             )
         }
-        assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS.values()) == {8957}
+        assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS.values()) == {8962}
         assert mod.board_allowance(mod.MATCHGROUP_FIXTURE_KEY) == (
             mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS
         )

@@ -425,9 +425,6 @@ fi
 _PRF_ERR="$(mktemp)"
 PR_JSON=$(forge_get_pr_nocache "$REPO_NWO" "$PR_NUMBER" "$GH" 2>"$_PRF_ERR") || error "Could not fetch PR #$PR_NUMBER -- $(forge_fetch_error_cause "$(cat "$_PRF_ERR"; rm -f "$_PRF_ERR")" "$PR_JSON")"; rm -f "$_PRF_ERR"; unset _PRF_ERR
 
-# Combined onto two lines (net code-line offset for the #8112 guard added
-# below — file-size-policy.md's "remove at least as much as you added"; a
-# verbatim, behavior-preserving chain, not a reformat of anything else).
 PR_STATE=$(echo "$PR_JSON" | jq -r '.state'); PR_MERGED=$(echo "$PR_JSON" | jq -r '.merged'); PR_BRANCH=$(echo "$PR_JSON" | jq -r '.head.ref')
 PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
 # Head SHA (#4100): the safety criterion for local-branch deletion. A local
@@ -728,8 +725,7 @@ _check_loom_pr_label() {
 # artifact carries the floor yet. [verb] is the sub-subcommand that actually
 # failed: when it has a `daemon-verb-hint:` above, the message names
 # '<subcommand> <verb>' and that verb's own version; otherwise the family
-# floor. Written as a one-liner because merge-pr.sh is frozen by the
-# file-size ratchet (scripts/check-file-size-budget.sh) and may not grow.
+# floor.
 #
 # Both reads carry `|| true` deliberately. merge-pr.sh runs under `set -euo
 # pipefail`, and a bare `x="$(cmd)"` assignment adopts cmd's status — so an
@@ -1258,9 +1254,6 @@ _notify_cleared_blockers() { [[ "$FORGE_TYPE" == "github" ]] || return 0; "${LOO
 # lines above, OUTSIDE the span test-merge-pr-auto-reconcile.sh extracts and
 # sources, so an unguarded call would put `command not found` into the one
 # message whose whole job is to tell an operator what to do next.
-#
-# One line, like `_mp_daemon_roll_hint` itself: this file is over the file-size
-# ratchet's threshold, so it may shrink but not grow (.loom/docs/file-size-policy.md).
 _mp_reconcile_roll_hint() { declare -F _mp_daemon_roll_hint >/dev/null || return 0; _mp_daemon_roll_hint merge-pr "$(command -v "${LOOM_DAEMON_SELF_BIN:-${LOOM_DAEMON_BIN:-loom-daemon}}" 2>/dev/null || true)"; }
 
 # The whole pass (plan, per-child route, deferral comment or reconcile-stack.sh)

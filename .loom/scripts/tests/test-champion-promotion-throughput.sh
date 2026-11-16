@@ -49,19 +49,6 @@ THROUGHPUT_DOC="$DOCS_DIR/promotion-throughput.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_contains() {
-    if [[ "$1" == *"$2"* ]]; then pass "$3"; else fail "$3"; echo "    Expected to contain: '$2'"; echo "    Actual: '$1'"; fi
-}
-assert_not_contains() {
-    if [[ "$1" != *"$2"* ]]; then pass "$3"; else fail "$3"; echo "    Expected NOT to contain: '$2'"; fi
-}
-assert_doc_contains() {
-    if grep -qF -- "$2" "$1"; then pass "$3"; else fail "$3 (missing literal in $1: $2)"; fi
-}
-assert_doc_lacks() {
-    if grep -qF -- "$2" "$1"; then fail "$3 (found literal in $1: $2)"; else pass "$3"; fi
-}
-
 # Print one section, from a heading containing $2 up to the next heading of
 # the same or shallower level. Fenced code is skipped when looking for
 # headings, so a shell comment is never mistaken for one.

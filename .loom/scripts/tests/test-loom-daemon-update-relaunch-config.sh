@@ -13,9 +13,8 @@
 # Scenario 32 of test-loom-daemon-update.sh covers the opposite shape (a unit
 # carrying both autonomy keys keeps them byte-for-byte).
 #
-# WHY A SEPARATE SUITE: test-loom-daemon-update.sh is over the file-size
-# ratchet's 1000-line threshold and frozen (.loom/docs/file-size-policy.md),
-# so this lives in a sibling sharing lib/daemon-update-fixtures.sh with it.
+# WHY A SEPARATE SUITE: this lives in a sibling of test-loom-daemon-update.sh,
+# sharing lib/daemon-update-fixtures.sh with it.
 # Needs a BUILT loom-daemon (the fixture lib pins it), so it is wired in
 # ci.yml's "Native Port Suites" job. Hermetic: stub systemctl via the
 # LOOM_SYSTEMD_FORCE seam, no network, no forge.

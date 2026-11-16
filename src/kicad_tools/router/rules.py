@@ -159,6 +159,21 @@ class DesignRules:
     # layer-agnostic ``MfrLimits.min_clearance`` of :attr:`manufacturer`.
     mfr_clearance_floor: float | None = None
 
+    # The fab-view same-net pad slit-band edge for the board's actual
+    # stackup (Issue #8974): the ``GapBand.detection_edge_mm`` of the
+    # resolved ``pad_spacing`` dfm entry (#9016) -- the same edge
+    # ``cli.stitch_cmd._resolve_mfr_pad_gap_edge`` reads and ``kct check
+    # --mfr`` grades same-net pad copper gaps with.  Like
+    # :attr:`mfr_clearance_floor` this is CALLER-RESOLVED (the caller knows
+    # the board's layer count and copper weight; ``DesignRules`` has no
+    # stackup fields, so an ``__post_init__`` resolution would be
+    # stackup-blind: it could not pick the entry for the board's actual
+    # layer count and copper weight).  Consumers: the escape router's ``_can_place_via`` band
+    # check and the oracle weld's ``same_net_pad_gap_mm``.  ``None``
+    # (default): the stackup is unknown, so the band guard stays off rather
+    # than guessing an edge.
+    same_net_pad_gap_band_edge_mm: float | None = None
+
     # Fab minimum trace width for the effective layers/copper key (Issue #4700)
     # The SAME ``get_design_rules(layers, copper_oz).min_trace_width_mm`` that
     # ``kct check --mfr`` enforces -- NOT the layer/copper-agnostic

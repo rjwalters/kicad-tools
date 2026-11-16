@@ -71,6 +71,7 @@ from ..pairplan.via_pair import ViaPair, via_pair_sites
 from ..primitives import Pad, Route, Segment, Via, pad_half_extents
 from ..quantize import dogleg_points
 from ..rules import DesignRules, layer_permitted
+from ..via_clearance import same_net_pad_gap_acceptable
 from .coupled import CoupledConnection
 from .escape_plan import EscapeChoice, chosen_stub, foreign_reservations, plan_tapered_escapes
 from .geometry import Pt, Rect, dist, pt_in_rect, seg_pt_dist, seg_seg_dist
@@ -2211,6 +2212,15 @@ class LatticePathfinder:
         """
         obstacles = self.obstacles
         via_radius = self.rules.via_diameter / 2.0
+        # Issue #8974: the fab-view same-net pad slit-band edge, resolved by
+        # the caller from the board's stackup (see
+        # ``DesignRules.same_net_pad_gap_band_edge_mm``).  None/0 keeps the
+        # band check off, so an unresolvable stackup changes nothing.
+        band_edge_mm = float(getattr(self.rules, "same_net_pad_gap_band_edge_mm", 0.0) or 0.0)
+        # ``same_net_pad_gap_acceptable`` is imported at module level: the
+        # guard being off (None/0) changes the band check below, never the
+        # import (#8974 review: a use-guarded local import reads as if the
+        # name might not bind).
         if not self._escape_boundary.segment_clear(point, point, via_radius):
             return False
         own_clr = (
@@ -2240,6 +2250,29 @@ class LatticePathfinder:
                     return False
             else:
                 half_w, half_h = pad_half_extents(pad)
+                if pad.net == net and band_edge_mm > 0:
+                    # Issue #8974: a same-net SMD pad is not an obstacle, but
+                    # the via's annulus may not park in the fab-view
+                    # ``(0, band_edge_mm)`` slit band beside its own pad -- a
+                    # fab sees copper, not nets (#8938).  Reuses the merged
+                    # stitcher predicate so the router and ``kct check``
+                    # grade the same band.  ``False`` is the search's "try
+                    # the next node" signal, never an abort.
+                    if not same_net_pad_gap_acceptable(
+                        point[0],
+                        point[1],
+                        self.rules.via_diameter,
+                        [
+                            (
+                                pad.x - half_w,
+                                pad.y - half_h,
+                                pad.x + half_w,
+                                pad.y + half_h,
+                            )
+                        ],
+                        band_edge_mm,
+                    ):
+                        return False
                 if (
                     abs(point[0] - pad.x) <= half_w + via_radius
                     and abs(point[1] - pad.y) <= half_h + via_radius

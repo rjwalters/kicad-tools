@@ -6360,6 +6360,12 @@ def run_post_route_drc(
     # reporting a false FAILED on legal tier-gated geometry (e.g. via-in-pad).
     _write_fab_profile_sidecar(output_path, manufacturer, quiet=quiet)
 
+    # Issue #9003: the detour-ratio report + sidecar, when the run opted in
+    # with --report-detour-ratio.  A no-op otherwise (the probe pre-pass
+    # never ran, so the router holds no records).  Prints even under
+    # --quiet, matching --report-stage-quality's explicit-opt-in rule.
+    _report_detour_ratio(output_path, router)
+
     # Issue #3919: emit the ``.kicad_pro`` + ``.kicad_dru`` constraint
     # sidecars from the manufacturer profile *before* the geometric DRC
     # cross-check below, so ``kicad-cli pcb drc`` auto-loads the intended
@@ -8680,6 +8686,62 @@ def _apply_ripup_strategy(router: "Autorouter", args) -> None:
         router._ripup_strategy = strategy
 
 
+def _apply_detour_ratio_report(router: "Autorouter", args) -> None:
+    """Enable the ``--report-detour-ratio`` probe pre-pass (issue #9003).
+
+    Off by default (mirrors the ``_ripup_strategy`` attribute-on-router
+    pattern above): without the flag no probe runs, no sidecar is written
+    and the run is byte-identical.  With it, routed output is still
+    identical unless a wall-clock limit cuts the run short (the probe's
+    searches count against ``--timeout``).  When passed, sets
+    ``router.report_detour_ratio`` so ``route_all`` /
+    ``route_all_negotiated`` run the read-only alone-on-empty probe
+    pre-pass; the report itself is printed/written post-settle by
+    :func:`_report_detour_ratio`.  A no-op when the flag is absent, so
+    every attempt helper can call it unconditionally.
+    """
+    if getattr(args, "report_detour_ratio", False):
+        router.report_detour_ratio = True
+
+
+def _report_detour_ratio(output_path: Path, router: object | None) -> None:
+    """Print the detour-ratio report and write its sidecar (#9003).
+
+    A no-op unless the router ran the probe (flag off, or a mesh/lattice
+    run that never reaches the grid-engine pre-pass).  Like
+    ``--report-stage-quality``, printing is NOT cancelled by ``--quiet``:
+    a non-empty ``detour_probe_records`` means the user opted in
+    explicitly.  The sidecar write is best-effort on the established
+    post-route sidecar contract -- a blocked write warns and never fails
+    the route.
+    """
+    records = getattr(router, "detour_probe_records", None)
+    if not records:
+        return
+    finalize = getattr(router, "finalize_detour_probe_records", None)
+    if callable(finalize):
+        finalize()
+    from kicad_tools.analysis.detour_ratio import (
+        detour_ratio_payload,
+        format_detour_report,
+        summarize_detour_records,
+    )
+
+    summary = summarize_detour_records(
+        records,
+        unattributed_drawn_mm=float(getattr(router, "_detour_unattributed_drawn_mm", 0.0) or 0.0),
+    )
+    print(format_detour_report(summary))
+    out = Path(output_path)
+    sidecar = out.parent / f"{out.stem}.detour_ratio.json"
+    try:
+        import json
+
+        sidecar.write_text(json.dumps(detour_ratio_payload(summary, records), indent=2) + "\n")
+    except Exception as exc:  # noqa: BLE001 - a blocked write never fails a route
+        logger.warning("Could not save detour-ratio sidecar: %s", exc)
+
+
 def _apply_slack_corridor_widening(router: "Autorouter", args) -> None:
     """Enable slack-corridor widening when requested (Issue #4092).
 
@@ -10228,6 +10290,12 @@ def _run_pour_oracle_stage(output_path: Path, *, args, quiet: bool = False, rout
             pad_edge_gap=float(
                 getattr(getattr(router, "rules", None), "min_via_pad_edge_gap", 0.0) or 0.0
             ),
+            # Issue #8974: weld vias keep out of the fab-view same-net pad
+            # slit band (the caller-resolved DesignRules scalar mirrors how
+            # pad_edge_gap is threaded here).
+            same_net_pad_gap_mm=float(
+                getattr(getattr(router, "rules", None), "same_net_pad_gap_band_edge_mm", 0.0) or 0.0
+            ),
             # Issue #8027: oracle copper keeps the --voltage-map pairwise gaps.
             pairwise_table=(
                 getattr(getattr(router, "rules", None), "pairwise_clearance", None)
@@ -11148,6 +11216,31 @@ def _apply_manufacturer_trace_width_floor(args, pcb_path, *, quiet: bool = False
     # those, not ``--trace-width``, are what actually width the emitted copper
     # for classified nets.
     args._mfr_min_trace_floor = floor
+
+    # Issue #8974: the same-net pad slit-band edge for this stackup, resolved
+    # ONCE here (the single place with manufacturer + layer count + copper
+    # weight in hand) and threaded into every ``DesignRules`` as the
+    # caller-resolved ``same_net_pad_gap_band_edge_mm`` -- mirroring
+    # ``mfr_clearance_floor`` above, NOT ``min_via_pad_edge_gap`` (whose
+    # ``__post_init__`` resolution is stackup-blind).  ``None`` (no dfm
+    # table / no stackup entry) keeps the band guard OFF rather than
+    # guessing an edge.
+    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
+
+    # None without ``--manufacturer``: nothing to resolve from, so the band
+    # guard stays OFF rather than guessing a fab -- the stitcher's
+    # ``pad_gap_edge`` gates the identical resolution on ``args.mfr``, and
+    # ``_resolve_route_clearance_floor`` returns None on this same
+    # no-profile path.  With a fab, ``layers``/``copper_outer`` fall back to
+    # the PROFILE defaults (4-layer / 1oz) exactly the way
+    # ``resolve_min_trace_width`` normalizes them -- the documented
+    # profile-default behavior of ``get_design_rules``, never a guessed
+    # stackup (issue #8974 review: no fab literal on the no-``--mfr`` path).
+    args._mfr_pad_gap_band_edge = (
+        _resolve_mfr_pad_gap_edge(str(manufacturer), layers or 4, copper_outer or 1.0)
+        if manufacturer
+        else None
+    )
 
     explicit_width = getattr(args, "trace_width", None)
     if explicit_width is None:
@@ -12535,6 +12628,8 @@ def route_with_layer_escalation(
         authored_min_clearance=getattr(args, "_authored_min_clearance", None),
         # Issue #6561: the stackup-aware fab floor for the pair gap.
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
+        # Issue #8974: the stackup-aware same-net pad slit-band edge.
+        same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -12997,6 +13092,7 @@ def route_with_layer_escalation(
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
+        _apply_detour_ratio_report(router, args)
         # Issue #6401: reserve pour-pad via sites before signal routing.
         _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (the single-attempt tail's
@@ -13607,6 +13703,7 @@ def route_with_layer_escalation(
     # one) and ``net-status --why`` fell back to geometry alone.
     _write_search_failures_sidecar(output_path, final_result.router)
     _write_route_decisions(output_path, final_result.router)
+    _report_detour_ratio(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -14099,6 +14196,8 @@ def route_with_rule_relaxation(
             authored_min_clearance=getattr(args, "_authored_min_clearance", None),
             # Issue #6561: the stackup-aware fab floor for the pair gap.
             mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
+            # Issue #8974: the stackup-aware same-net pad slit-band edge.
+            same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
             # Issue #2891: forward escalation-in-progress flag.
             auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
             # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -14205,6 +14304,7 @@ def route_with_rule_relaxation(
         _apply_escape_corridor_reservation(router, args)
         _apply_pad_access_invariant(router, args)
         _apply_ripup_strategy(router, args)
+        _apply_detour_ratio_report(router, args)
         # Issue #6401: reserve pour-pad via sites before signal routing.
         _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
         # Issue #5787: --order-method crossing (see the layer-escalation path).
@@ -14590,6 +14690,7 @@ def route_with_rule_relaxation(
     # one) and ``net-status --why`` fell back to geometry alone.
     _write_search_failures_sidecar(output_path, final_result.router)
     _write_route_decisions(output_path, final_result.router)
+    _report_detour_ratio(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -16598,6 +16699,8 @@ def route_with_combined_escalation(
                 authored_min_clearance=getattr(args, "_authored_min_clearance", None),
                 # Issue #6561: the stackup-aware fab floor for the pair gap.
                 mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
+                # Issue #8974: the stackup-aware same-net pad slit-band edge.
+                same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
                 # Issue #2891: forward escalation-in-progress flag.
                 auto_mfr_tier_in_progress=getattr(args, "_auto_mfr_tier_in_progress", False),
                 # Issue #4433: forward --strict-layers (hard per-net avoid_layers).
@@ -16707,6 +16810,7 @@ def route_with_combined_escalation(
             _apply_escape_corridor_reservation(router, args)
             _apply_pad_access_invariant(router, args)
             _apply_ripup_strategy(router, args)
+            _apply_detour_ratio_report(router, args)
             # Issue #6401: reserve pour-pad via sites before signal routing.
             _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
             # Issue #5787: --order-method crossing (see layer-escalation path).
@@ -17131,6 +17235,7 @@ def route_with_combined_escalation(
     # one) and ``net-status --why`` fell back to geometry alone.
     _write_search_failures_sidecar(output_path, final_result.router)
     _write_route_decisions(output_path, final_result.router)
+    _report_detour_ratio(output_path, final_result.router)
 
     # Issue #6376: post-save output connectivity verification.  This flow
     # returns before main_with_result's tail, so it runs the shared verifier
@@ -21251,6 +21356,23 @@ def _route_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--report-detour-ratio",
+        action="store_true",
+        help=(
+            "Print advisory per-connection detour ratios (drawn copper vs "
+            "what the same search achieves alone on an empty board) with a "
+            "distribution summary and the worst offenders above ~1.25x, "
+            "and write them to a stem-keyed <output>.detour_ratio.json "
+            "sidecar. Roughly doubles search work (one extra A* per "
+            "connection). Diagnostic only: the probe restores all router "
+            "state it touches and never changes the exit code, so routed "
+            "copper is identical with and without the flag -- except when "
+            "a wall-clock limit (--timeout) cuts the run short, since the "
+            "probe's searches count against that limit (issue #9003). "
+            "Grid engine only; a no-op on the mesh/lattice engines."
+        ),
+    )
+    parser.add_argument(
         "--auto-pour",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -23629,6 +23751,8 @@ def _run_main_impl(args, parser, argv) -> int:
         authored_min_clearance=getattr(args, "_authored_min_clearance", None),
         # Issue #6561: the stackup-aware fab floor for the pair gap.
         mfr_clearance_floor=getattr(args, "_mfr_clearance_floor", None),
+        # Issue #8974: the stackup-aware same-net pad slit-band edge.
+        same_net_pad_gap_band_edge_mm=getattr(args, "_mfr_pad_gap_band_edge", None),
         # Issue #2891: forward escalation-in-progress flag so the escape
         # router demotes the #2880 ERROR log when an outer wrapper will
         # retry on a tier that supports via-in-pad.
@@ -23766,6 +23890,7 @@ def _run_main_impl(args, parser, argv) -> int:
     _apply_escape_corridor_reservation(router, args)
     _apply_pad_access_invariant(router, args)
     _apply_ripup_strategy(router, args)
+    _apply_detour_ratio_report(router, args)
     # Issue #6401: reserve pour-pad via sites before signal routing.
     _apply_plane_via_reservation(router, args, pcb_path, quiet=quiet)
 
@@ -25241,6 +25366,7 @@ def _run_main_impl(args, parser, argv) -> int:
         # one) and ``net-status --why`` fell back to geometry alone.
         _write_search_failures_sidecar(output_path, router)
         _write_route_decisions(output_path, router)
+        _report_detour_ratio(output_path, router)
 
     _rss.mark("post-save")
 

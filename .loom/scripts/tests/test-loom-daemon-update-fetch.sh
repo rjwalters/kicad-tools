@@ -6,8 +6,7 @@
 # Scenario V (post-provision signature preservation, #8008) moved OUT of here
 # to test-loom-daemon-update-dest-signature.sh with #8770, which added a
 # second scenario on that same subject: it is about what provisioning does to
-# the destination binary, not about fetching, and this suite had no room left
-# under the file-size ratchet (see the closing note at the bottom).
+# the destination binary, not about fetching.
 #
 # WHY THIS IS A SEPARATE SUITE
 #
@@ -1380,10 +1379,9 @@ rm -rf "$(grep '^TMP_DIR=' <<<"$outY" | cut -d= -f2-)"
 # its own sibling suite, test-daemon-update-fixture-containment.sh — it belongs
 # to lib/daemon-update-fixtures.sh, not to `--fetch`.
 #
-# Keep that reflex: this suite sat one code line short of the 1000-line freeze
-# until #8770 moved scenario V out to test-loom-daemon-update-dest-signature.sh.
-# A new scenario belongs in the sibling whose SUBJECT it shares, not here by
-# default.
+# Keep that reflex: a new scenario belongs in the sibling whose SUBJECT it
+# shares, not here by default — #8770 moved scenario V out to
+# test-loom-daemon-update-dest-signature.sh on exactly that ground.
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"

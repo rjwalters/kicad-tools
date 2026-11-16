@@ -2,8 +2,8 @@
 # test-check-main-clean-build-trees.sh - check-main-clean.sh --quarantine and
 # cargo build trees: the #11149 follow-ups to #11075.
 #
-# A sibling of test-check-main-clean.sh (which holds the #11075 cases and is
-# frozen by the file-size ratchet). Verified behavior:
+# A sibling of test-check-main-clean.sh (which holds the #11075 cases).
+# Verified behavior:
 #   - a staged `git mv old.txt <buildtree>/b.o` quarantines cleanly (exit 4):
 #     the old.txt deletion is in the stash and the worktree copy is restored;
 #     the build tree is neither stashed nor removed from disk (#11149 item 1)

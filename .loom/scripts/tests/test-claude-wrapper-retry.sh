@@ -4,10 +4,9 @@
 #
 # WHY THIS EXISTS, AND WHY IT IS NOT A PORT
 #
-# `claude-wrapper.sh` is 1,675 code lines and had NO dedicated test suite.
-# .loom/docs/file-size-policy.md names it as the one port target whose logic
-# exists only in shell: "retry/backoff lives ONLY here -- the retry policy
-# itself, which is application logic".
+# `claude-wrapper.sh` is 1,675 code lines and had NO dedicated test suite. It
+# is the one port target whose logic exists only in shell: retry/backoff lives
+# ONLY here -- the retry policy itself, which is application logic.
 #
 # Every port epic #7810 has landed used one method: keep the script's black-box
 # suite and run its assertions unchanged against the Rust, as the equivalence

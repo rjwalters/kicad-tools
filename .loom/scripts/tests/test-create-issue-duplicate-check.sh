@@ -69,17 +69,12 @@ source "$TEST_DIR/lib/write-scope-fixture.sh"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
+# Local assert_eq kept: takes (actual, expected, msg); shared assert_eq is (expected, actual, msg).
 assert_eq() {
     if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (expected '$2', got '$1')"; fi
 }
 # Pure-bash substring match (no forked grep) so a transient fork failure under
 # the parallel suite pool cannot masquerade as a content mismatch (#7819).
-assert_contains() {
-    if [[ "$1" == *"$2"* ]]; then pass "$3"; else fail "$3 (missing '$2' in: $1)"; fi
-}
-assert_not_contains() {
-    if [[ "$1" != *"$2"* ]]; then pass "$3"; else fail "$3 (unexpectedly found '$2' in: $1)"; fi
-}
 
 WORK="$(mktemp -d)"
 cleanup() { [[ -n "${LOOM_KEEP_WORK:-}" ]] || { [[ -n "$WORK" && -d "$WORK" ]] && rm -rf "$WORK"; }; }

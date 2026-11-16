@@ -43,6 +43,7 @@ cd "$WS_FIXTURE_DIR"
 
 source "$SCRIPT_DIR/lib/assert.sh"
 
+# Local assert_grep kept: fixed-string (-F) match; shared assert_grep is -E (#13258).
 assert_grep() {
     local pattern="$1" file="$2" msg="$3"
     if grep -qF "$pattern" "$file"; then pass "$msg"; else fail "$msg (pattern: $pattern)"; fi
