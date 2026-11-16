@@ -1040,6 +1040,27 @@ class TestSmdEndTieAdoption:
         assert counts == [first_pass] * 6, counts
         assert sorted(v.position for v in _stitches(pcb)) == pass_one
 
+    @pytest.mark.parametrize(
+        ("a", "b"), [(20.0, 40.0), (5.0, 45.0), (45.0, 5.0)], ids=["L20/40", "L5/45", "L45/5"]
+    )
+    def test_first_pass_far_end_tie_sits_clear_of_the_far_pad(self, a, b):
+        """Issue #8996: pass 1 only. The far tie arc must be derived in the
+        reversed polyline's own arc frame; with the forward frame the far tie
+        landed on the wrong point of a cornered leg (6.015 mm vs 0.927 mm on
+        L 45/5), overlapping the far pad."""
+        pcb = self._smd_leg_l(a, b)
+        reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
+        size, _drill = stitch_via_geometry(_rules())
+        # Far pad is 1.0 x 3.0 unrotated; the leg arrives along x, so the
+        # pad's half extent along the leg is 0.5 mm.
+        expected = 0.5 + size / 2 + _rules().min_clearance_mm
+        far = (20.0 + b, 50.0 + a)
+        nearest = min(
+            ((v.position[0] - far[0]) ** 2 + (v.position[1] - far[1]) ** 2) ** 0.5
+            for v in _stitches(pcb)
+        )
+        assert nearest == pytest.approx(expected, abs=1e-3)
+
     def test_adopted_ties_credit_existing_vias_and_stay_out_of_the_record(self):
         pcb = self._smd_leg(40.0)
         reinforce_net(pcb, NET, strategy="parallel", design_rules=_rules())
