@@ -14,8 +14,22 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 - [2026-02](work_log/WORK_LOG_2026-02.md)
 - [2026-01](work_log/WORK_LOG_2026-01.md)
 
+### 2026-11-16
+
+- **PR #8977**: fix: kct check verdict reads INCOMPLETE when a blocking category cannot run, with collapsed reasons and a remediation line
+- **PR #8967**: feat: size parallel-copy tie rows from declared current and judge width-swap vias
+- **Issue #8950** (closed): pcb reinforce parallel: tie-via arrays at SMD ends, and path_ampacity judging a width-swap via between doubled stretches
+- **Issue #8949** (closed): kct check prints Overall: PASSED above BLOCKING UNKNOWN and exits 2: an incomplete blocking category must report INCOMPLETE, with collapsed reasons and a remediation line
+
 ### 2026-11-15
 
+- **PR #8966**: fix: reject zero-size Gerber apertures on use, repair self-touching region contours
+- **PR #8987**: fix: attribute fab-band physical_copper_gap findings to their parity rows
+- **PR #8985**: fix: name the frame of 'kct pcb prune --region' and echo it in both frames
+- **PR #8968**: fix: admit physical_hole_clearance, text_thickness and text_height to the native rule-context allowlist
+- **Issue #8972** (closed): Fab DFM parity: trace-band physical_copper_gap findings are attributed to pad_spacing
+- **Issue #8969** (closed): kct pcb prune: report is sheet-absolute but --region input is board-relative, and its help does not say so
+- **Issue #8947** (closed): Gerber reader rejects KiCad 10's own output: zero-size region aperture and self-touching zone-fill contours abort whole layers
 - **PR #8963**: fix: keep stitch via annuli out of the same-net pad slit band
 - **PR #8965**: feat: print kct-vs-fab counts in the Fab DFM parity stanza
 - **PR #8961**: fix(pcb): quote prune's report coordinates at their sheet position
