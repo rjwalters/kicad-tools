@@ -151,6 +151,19 @@ def read_readiness(board_dir: Path) -> dict:
                 or p.name.endswith("fab_profile.json")
             )
         }
+        # Issue #9006: a waivers sidecar the check gate auto-loads for a
+        # hashed PCB is evidence like the rule files, so require it here.
+        from kicad_tools.validate.rules.waivers import discover_waivers_sidecar
+
+        for name in inputs:
+            if not name.endswith(".kicad_pcb"):
+                continue
+            sidecar = discover_waivers_sidecar(root / name)
+            if sidecar is None:
+                continue
+            sidecar_resolved = sidecar.resolve()
+            if sidecar_resolved.is_relative_to(root):
+                required.add(sidecar_resolved.relative_to(root).as_posix())
         if not required.issubset(inputs):
             raise ValueError("Evidence omits current project or rule files")
         if "manufacturer" in data and (

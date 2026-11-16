@@ -170,6 +170,13 @@ STITCH_PITCH_MM = 5.0
 #: Copper layer -> the outer layer that takes its parallel copy (#8916).
 OPPOSITE_OUTER_LAYER = {"F.Cu": "B.Cu", "B.Cu": "F.Cu"}
 
+#: ``end_tie`` states (#8970); each pairs with an arc length measured along
+#: the leg from the end ``end_tie`` was called for.
+END_TIED_BY_HOLE = "through"  # a plated barrel already joins the layers
+END_TIE_PLANNED = "tie"  # plant a tie via at the arc
+END_TIE_ADOPTED = "adopted"  # an earlier pass's tie stands there: plant
+# nothing, credit one ``existing_vias``
+
 #: ``LegSummary.copy_status`` values (#8916).
 COPY_PLACED = "placed"
 COPY_REFUSED = "refused"
@@ -2892,15 +2899,48 @@ def _reinforce_ends(
         view = _OtherNetCopper(by_net=other.by_net, net_names=other.net_names, all_drills=drills)
         return _position_violation(p[0], p[1], via_size, via_drill, rules, view, policy)
 
+    def adoptable_stitch(via, points, cum, t_lo: float, t_hi: float) -> float | None:
+        """Arc of ``via`` when it may stand in for a stitch of ``points``/``cum``.
+
+        An unowned same-net through via of the stitching geometry lying on
+        the leg within the arc window ``[t_lo, t_hi]`` is an earlier
+        record-less pass's stitching via (issues #8951, #8970): adopting it
+        in place keeps the re-run from planting a duplicate beside it. Any
+        other via -- wrong net, size or drill, off the leg, recorded as this
+        tool's own (the sidecar re-plans those) -- is not adopted and stays
+        an obstacle.
+        """
+        if id(via) in owned_vias or via.drill <= 0:
+            return None
+        if via.net_number != target_net_number or via.via_type not in (None, "through"):
+            return None
+        if (
+            abs(via.size - via_size) > _ANCHOR_SIZE_TOL_MM
+            or abs(via.drill - via_drill) > _ANCHOR_SIZE_TOL_MM
+        ):
+            return None
+        t = _arc_of_point(points, cum, via.position)
+        if not t_lo - 1e-9 <= t <= t_hi + 1e-9:
+            return None
+        if math.dist(_point_at_arc(points, cum, t), via.position) > _SIDECAR_ANCHOR_TOL_MM:
+            return None
+        return t
+
     def end_tie(points, cum, layer: str, cap: float):
         """How the copy is tied at the leg end ``points[0]``.
 
-        ``(False, 0.0)``: the end lands on a plated through-hole pad or a
-        through via that predates this tool (any via no sidecar record names,
-        whatever its size), whose barrel already joins the layers -- the copy
-        runs to the vertex and nothing is placed or recorded there. ``(True, arc)``: a stitching via ties it at ``arc`` -- the
-        vertex itself for a free track end or a junction, or the first point
-        whose via clears the SMD pad the leg ends on (no via in an SMD pad).
+        ``(END_TIED_BY_HOLE, 0.0)``: the end lands on a plated through-hole
+        pad or a through via that predates this tool (any via no sidecar
+        record names, whatever its size), whose barrel already joins the
+        layers -- the copy runs to the vertex and nothing is placed or
+        recorded there. ``(END_TIE_PLANNED, arc)``: a stitching via ties it
+        at ``arc`` -- the vertex itself for a free track end or a junction,
+        or the first point whose via clears the SMD pad the leg ends on (no
+        via in an SMD pad). ``(END_TIE_ADOPTED, arc)``: an unowned via of
+        the stitching geometry already stands at that arc -- an earlier
+        record-less pass's tie, which a vertex-anchored test cannot see
+        because ``_clear_arc`` pushes the tie inward past the pad extent
+        (issue #8970): plant nothing, but credit one ``existing_vias``.
         ``None``: a pad covers the whole leg.
         """
         copper = _end_copper(points, layer, features, [], cap)
@@ -2909,17 +2949,17 @@ def _reinforce_ends(
         start = points[0]
         for feat in copper:
             if feat.pad is not None and feat.pad.type == "thru_hole":
-                return False, 0.0
+                return END_TIED_BY_HOLE, 0.0
         for via in pcb.vias:
             if via.net_number != target_net_number or via.via_type not in (None, "through"):
                 continue
             if id(via) in owned_vias:
                 continue  # an earlier pass's recorded tie via: re-planned, not relied on
             if math.dist(via.position, start) <= via.size / 2.0 + cap + 1e-6:
-                return False, 0.0
+                return END_TIED_BY_HOLE, 0.0
         smd = [f for f in copper if f.pad is not None]
         if not smd:
-            return True, 0.0
+            return END_TIE_PLANNED, 0.0
         extent = _end_extent(points, smd)
 
         def clear(p, _smd=smd):
@@ -2928,7 +2968,27 @@ def _reinforce_ends(
             )
 
         t = _clear_arc(points, cum, extent, cum[-1], clear)
-        return (True, t) if t is not None else None
+        if t is None:
+            return None
+        # The pad-clear walk is deterministic, so a record-less re-run
+        # re-derives the arc its predecessor's tie was placed at (a rules
+        # refusal may have slid that placement inward, within the end-tie
+        # nudge reach). Adopting it keeps the re-run from planting a fresh
+        # tie beside it; requiring ``clear`` at the via's own position keeps
+        # adoption from crediting -- and pulling the copy span out to --
+        # copper this tool would never have placed there (#8970).
+        candidates = [
+            tv
+            for via in pcb.vias
+            if (
+                (tv := adoptable_stitch(via, points, cum, t - 1e-9, t + STITCH_PITCH_MM / 2.0))
+                is not None
+                and clear(via.position)
+            )
+        ]
+        if candidates:
+            return END_TIE_ADOPTED, min(candidates, key=lambda tv: abs(tv - t))
+        return END_TIE_PLANNED, t
 
     def refuse_copy(leg: LegSummary, copy_layer: str, pos, violation: _Violation, why: str) -> None:
         leg.status = LEG_UNANCHORED
@@ -2990,11 +3050,17 @@ def _reinforce_ends(
             row_need = max(1, math.ceil(row_current_a / via_barrel_current_capacity(via_drill)))
         ties = [
             end_tie(points, cum, cand.layer, cand.run[0].width / 2.0),
-            end_tie(points[::-1], cum, cand.layer, cand.run[-1].width / 2.0),
+            end_tie(
+                points[::-1], _cumulative_arc(points[::-1]), cand.layer, cand.run[-1].width / 2.0
+            ),
         ]
         if ties[0] is None or ties[1] is None:
             refuse_copy(leg, copy_layer, points[0], no_room, "same-net pad copper covers the leg")
             return
+        #: End ties adopted in place this pass (#8970): credited like
+        #: ``adopted`` but never in ``planned`` -- no record names them, so
+        #: ``--clear`` still cannot remove them (#8945's contract).
+        end_adoptions = sum(1 for tie in ties if tie[0] == END_TIE_ADOPTED)
         planned: list[tuple[float, float]] = []
         span = [ties[0][1], total - ties[1][1]]
         #: Arc of each end's innermost placed tie via (#8950): interior
@@ -3003,8 +3069,7 @@ def _reinforce_ends(
         reach = STITCH_PITCH_MM / 2.0
         steps = max(1, round(reach / (END_NUDGE_MAX_MM / END_NUDGE_STEPS)))
         for end, sign in ((0, 1.0), (1, -1.0)):
-            needs_via, _ = ties[end]
-            if not needs_via:
+            if ties[end][0] != END_TIE_PLANNED:
                 continue
             base = span[end]
             first: tuple[tuple[float, float], _Violation] | None = None
@@ -3075,34 +3140,10 @@ def _reinforce_ends(
             n -= 1
         pitch = (ihi - ilo) / (n + 1) if n else 0.0
 
-        def adoptable_arc(via) -> float | None:
-            """Arc of ``via`` when it may stand in for an interior stitch.
-
-            An unowned same-net through via of the stitching geometry lying
-            on the leg inside the span is an earlier pass's stitch (a
-            record-less re-run, issue #8951): adopting it keeps the re-run
-            idempotent the way ``end_tie`` already keeps the ends so. Any
-            other via -- wrong net, size or drill, off the leg, recorded as
-            someone else's -- is not adopted and stays an obstacle.
-            """
-            if id(via) in owned_vias or via.drill <= 0:
-                return None
-            if via.net_number != target_net_number or via.via_type not in (None, "through"):
-                return None
-            if (
-                abs(via.size - via_size) > _ANCHOR_SIZE_TOL_MM
-                or abs(via.drill - via_drill) > _ANCHOR_SIZE_TOL_MM
-            ):
-                return None
-            t = _arc_of_point(points, cum, via.position)
-            if not lo - 1e-9 <= t <= hi + 1e-9:
-                return None
-            if math.dist(_point_at_arc(points, cum, t), via.position) > _SIDECAR_ANCHOR_TOL_MM:
-                return None
-            return t
-
         adoptable = sorted(
-            (t, via.position) for via in pcb.vias if (t := adoptable_arc(via)) is not None
+            (t, via.position)
+            for via in pcb.vias
+            if (t := adoptable_stitch(via, points, cum, lo, hi)) is not None
         )
         #: Stitching positions this pass adopted, not placed: kept out of
         #: ``planned`` (which becomes the record's ``stitch_vias``), so
@@ -3175,7 +3216,7 @@ def _reinforce_ends(
             via_size_mm=via_size,
             via_drill_mm=via_drill,
             existing_segments=len(foreign),
-            existing_vias=len(adopted),
+            existing_vias=len(adopted) + end_adoptions,
         )
         for a, b, width in copy.segments:
             if dry_run:
@@ -3203,7 +3244,9 @@ def _reinforce_ends(
         leg.copy_status = COPY_PLACED
         leg.copy = copy
         result.copies.append(copy)
-        ends = " / ".join("its through hole" if not tie[0] else "a tie via" for tie in ties)
+        ends = " / ".join(
+            "its through hole" if tie[0] == END_TIED_BY_HOLE else "a tie via" for tie in ties
+        )
         # Same text on a re-run (copper already present is counted on the
         # copy, not here), so the wire-list record stays byte-identical.
         leg.reason = (

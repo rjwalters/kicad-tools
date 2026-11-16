@@ -269,8 +269,13 @@ def docker_kicad_cli_prefix(
     image: str | None = None,
     workdir: str | None = None,
     model_dir: Path | None = None,
+    entrypoint: str = "kicad-cli",
 ) -> list[str]:
-    """``docker run`` argv up to (and including) the image, ending at kicad-cli.
+    """``docker run`` argv up to (and including) the image, ending at the entrypoint.
+
+    *entrypoint* replaces the image's ``kicad-cli`` (e.g. ``python3`` to run a
+    native helper in the image, #8946); ``write_docker_shim`` still locates its
+    split point at ``--entrypoint``, so the keyword stays in the argv.
 
     Every mount is bound at its own path (and at its resolved path, when that
     differs) so host paths in kicad-cli's arguments and reports stay valid.  The container runs as the calling user
@@ -298,7 +303,7 @@ def docker_kicad_cli_prefix(
     cmd += docker_model_args(model_dir)
     if workdir is not None:
         cmd += ["-w", workdir]
-    cmd += ["--entrypoint", "kicad-cli", image or docker_image()]
+    cmd += ["--entrypoint", entrypoint, image or docker_image()]
     return cmd
 
 

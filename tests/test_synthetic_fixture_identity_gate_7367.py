@@ -118,7 +118,6 @@ def with_board07_synthetic(gate):
 
 
 BOARD07_GAP_NETS = (
-    "GND",
     "MIPI_CLK_N",
     "MIPI_DAT0_N",
     "MIPI_DAT1_N",
@@ -131,7 +130,7 @@ BOARD06_GAP_NETS = ("GND", "MIPI_CLK+", "PCIE_RX+", "USB2_D-")
 
 
 def fab_gap_allowance(nets: tuple[str, ...]) -> dict:
-    # #8974: DQS_P/DQS_N drained (route-side slit-band fix) and every
+    # #8974: DQS_P/DQS_N/GND/+1V2 drained (route-side slit-band fix) and every
     # survivor re-pointed from #8957 to the #8962 parent tracker.
     return {("physical_copper_gap", net): 8962 for net in nets}
 
@@ -413,9 +412,10 @@ def test_regenerated_population_passes_and_a_new_net_fails():
     match the #8962-re-pointed fab-gap allowance; a NEW net's slits are
     unallowed, and a net that stops carrying slits goes stale."""
     gate = load("check_matchgroup_coverage")
-    run_a = [gap_violation(("GND",)) for _ in range(3)] + [gap_violation(("MIPI_CLK_N",))]
+    run_a = [gap_violation(("TMDS_D0_N",)) for _ in range(3)] + [gap_violation(("MIPI_CLK_N",))]
     run_b = [
-        gap_violation(("GND",), items=("Via@1.1/1.1:F.Cu-B.Cu:d0.25/s0.45",)) for _ in range(2)
+        gap_violation(("TMDS_D0_N",), items=("Via@1.1/1.1:F.Cu-B.Cu:d0.3/s0.6",))
+        for _ in range(2)
     ]
     for run in (run_a, run_b):
         assert gate.unallowed_blocking(BOARD07_KEY, run) == []

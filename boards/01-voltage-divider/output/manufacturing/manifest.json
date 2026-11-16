@@ -55,8 +55,8 @@
       "size": 377
     },
     "gerbers/gerbers.zip": {
-      "sha256": "a25462ebb4087abd2b330da79ad248f5fb6668e8442acf9bd018435e9ed7ae54",
-      "size": 15908
+      "sha256": "3c22a75c0e9bc11a28c818f65536aeec03905215bd981c7991253e88190c5b82",
+      "size": 16291
     },
     "images/assembly.png": {
       "sha256": "e3288a551928d4ce28ac5534bacacb9c505fb05b7c6c029afca332c2ccbf550c",
@@ -87,8 +87,8 @@
       "size": 118129
     },
     "kicad_project.zip": {
-      "sha256": "0dc836b5862f7523130af5653711d69961fe80b56dcc3fbcbdb27d0f343682d5",
-      "size": 16997
+      "sha256": "adb7e491d89fd056c98171dc2298f8a935533a882647d125a4ba2dd37b32819e",
+      "size": 17176
     },
     "report.md": {
       "sha256": "597b6bc407517c7d7bc323f6c08acd757254b07fe5ea915f1330c06f7e47a4f3",

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -151,3 +152,53 @@ def test_verified_metrics_do_not_require_markdown_summary(tmp_path, caplog, mark
     assert stale["status"] == "partial"
     assert stale["readiness"]["status"] == "unverified"
     assert stale.get("drc_violations") is None
+
+
+def _bind_sidecar(root: Path, sidecar: Path) -> None:
+    report = json.loads((root / "output/readiness.json").read_text())
+    report["inputs"][sidecar.relative_to(root).as_posix()] = hashlib.sha256(
+        sidecar.read_bytes()
+    ).hexdigest()
+    save(root, report)
+
+
+def test_bound_waiver_sidecar_change_stales_evidence(tmp_path):
+    report_fixture(tmp_path)
+    sidecar = tmp_path / "output/demo_routed.kct-waivers.json"
+    sidecar.write_text(json.dumps({"version": 1, "waivers": []}))
+    _bind_sidecar(tmp_path, sidecar)
+    assert read_readiness(tmp_path)["status"] == "ready"
+
+    sidecar.write_text(json.dumps({"version": 1, "waivers": [{"rule": "physical_copper_gap"}]}))
+    result = read_readiness(tmp_path)
+    assert result["status"] == "unverified"
+    assert "stale" in result["blockers"][0]
+
+
+def test_unlisted_waiver_sidecar_refuses_evidence(tmp_path):
+    report_fixture(tmp_path)
+    (tmp_path / "output/demo_routed.kct-waivers.json").write_text(
+        json.dumps({"version": 1, "waivers": []})
+    )
+    result = read_readiness(tmp_path)
+    assert result["status"] == "unverified"
+    assert "omits current project or rule files" in result["blockers"][0]
+
+
+def test_waiver_sidecar_for_a_different_pcb_name_is_not_bound(tmp_path):
+    report_fixture(tmp_path)
+    (tmp_path / "output/demo.kct-waivers.json").write_text(json.dumps({"version": 1}))
+    assert read_readiness(tmp_path)["status"] == "ready"
+
+
+def test_shared_waivers_sidecar_spelling_is_bound_the_same_way(tmp_path):
+    report_fixture(tmp_path)
+    sidecar = tmp_path / "output/.kct_waivers.json"
+    sidecar.write_text(json.dumps({"version": 1, "waivers": []}))
+    _bind_sidecar(tmp_path, sidecar)
+    assert read_readiness(tmp_path)["status"] == "ready"
+
+    sidecar.write_text("{}")
+    result = read_readiness(tmp_path)
+    assert result["status"] == "unverified"
+    assert "stale" in result["blockers"][0]

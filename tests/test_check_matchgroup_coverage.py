@@ -79,14 +79,14 @@ class TestBoard07Allowance:
     def test_fixture_finding_allowance_is_fab_gap_only(self):
         """Issues #5333/#6448 emptied the pair/impedance/skew entries, so the
         identity allowance holds only the #8957 fab-view ``physical_copper_gap``
-        nets (PR #8956): every other blocking finding counts.  #8974 drained
-        DQS_P/DQS_N entirely (route-side slit-band fix) and re-pointed the
-        survivors to the #8962 parent tracker."""
+        nets: every other blocking finding counts.  #8974's route-side
+        slit-band fix, measured on the tree merged with #8975 and #8937,
+        drained DQS_P, DQS_N, GND and +1V2 entirely (entries deleted) and
+        re-pointed the six survivors to the #8962 parent tracker."""
         mod = _load_helper_module()
         assert set(mod.MATCHGROUP_FIXTURE_ALLOWED_FINDINGS) == {
             ("physical_copper_gap", net)
             for net in (
-                "GND",
                 "MIPI_CLK_N",
                 "MIPI_DAT0_N",
                 "MIPI_DAT1_N",

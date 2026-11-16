@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import re
 import sys
-from typing import TYPE_CHECKING, Sequence
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Sequence
 
 from .base import DesignRules
 
@@ -267,10 +268,119 @@ def _strip_version_header(content: str) -> str:
     return re.sub(r"^\s*\(version[^)]*\)\s*\n?", "", content, count=1)
 
 
+def dru_clearance_rules(text: str | None) -> list[dict[str, Any]]:
+    """Parse a ``.kicad_dru`` file's ``clearance``-constraint rules, in order.
+
+    The record shape consumed by
+    :func:`kicad_tools.core.rule_loosening.rule_loosenings` (the ``dru_rules``
+    comparison shape, Issue #8937): one mapping per ``(rule ...)`` carrying a
+    ``(constraint clearance (min <N>mm))``, in file order -- KiCad gives the
+    last matching custom rule precedence, so order is semantics.  Each record
+    carries ``name``, ``condition`` (``None`` when the rule is unconditional),
+    ``layer`` (``None`` when unscoped) and ``clearance_mm``.
+
+    Rules with non-``mm`` minima or unparsable minima are skipped, as are
+    comments and every non-``clearance`` constraint: only ``clearance``-class
+    constraints can lower a copper clearance (the #8937 review's scope).  A
+    text that fails to parse yields ``[]`` -- the merge's own loadability
+    lint covers the *written* file, and this parser only feeds the loosening
+    comparison.
+    """
+    if not text or not text.strip():
+        return []
+    stripped = re.sub(r"(?m)^\s*#.*$", "", text)
+    try:
+        from kicad_tools.sexp import parse_string
+
+        doc = parse_string("(rules\n" + stripped + "\n)")
+    except Exception:
+        return []
+    records: list[dict[str, Any]] = []
+    for rule in doc.find_all("rule"):
+        name = rule.get_string(0)
+        if name is None:
+            continue
+        condition_node = rule.find("condition")
+        condition = condition_node.get_string(0) if condition_node is not None else None
+        layer_node = rule.find("layer")
+        layer = layer_node.get_string(0) if layer_node is not None else None
+        for constraint in rule.find_all("constraint"):
+            if constraint.get_string(0) != "clearance":
+                continue
+            minimum = constraint.find("min")
+            token = minimum.get_string(0) if minimum is not None else None
+            if token is None or not token.endswith("mm"):
+                continue
+            try:
+                value = float(token[:-2])
+            except ValueError:
+                continue
+            records.append(
+                {
+                    "name": name,
+                    "condition": condition,
+                    "layer": layer,
+                    "clearance_mm": value,
+                }
+            )
+    return records
+
+
+def _gate_dru_loosenings(
+    existing: str | None,
+    dru_content: str,
+    merged: str,
+    *,
+    authored: Mapping[str, Any] | None,
+    allow: Iterable[str],
+    path: str | Path | None,
+) -> None:
+    """Refuse a ``.kicad_dru`` rewrite that would lower a resolved clearance.
+
+    The #8937 gate behind :func:`kicad_tools.core.rule_loosening`'s ``dru``
+    shape: the freshly generated ``dru_content`` names the rules the writer
+    owns (they may move with the profile), everything else in ``existing``
+    is authored -- hand-written rules, the creepage block, the native
+    zone-clearance block -- and must survive the merge with its minimum
+    intact.  Independently of the pre-rewrite text, the merged file must
+    resolve every (track, track), (pad, zone) and (via, zone) pair at no
+    less than the design's own authored clearance (``authored``), which is
+    what the fab-floor-replaces-authored-clearance defect escaped.
+    """
+    from kicad_tools.core.rule_loosening import DRU_SHAPE_KEY, assert_no_loosenings
+
+    managed = {record["name"] for record in dru_clearance_rules(dru_content)}
+    # The rules of the fab-floors block being REPLACED are as much kct's own
+    # as the new content -- including a previous manufacturer's differently
+    # suffixed names (an explicit profile switch may legitimately move the
+    # floor; the authored-baseline check still bounds how far down it goes).
+    if existing:
+        match = re.search(
+            re.escape(DRU_FLOORS_BLOCK_BEGIN) + r"(.*?)" + re.escape(DRU_FLOORS_BLOCK_END),
+            existing,
+            re.DOTALL,
+        )
+        if match:
+            managed |= {record["name"] for record in dru_clearance_rules(match.group(1))}
+    before = {DRU_SHAPE_KEY: dru_clearance_rules(existing), "managed_names": managed}
+    after = {
+        DRU_SHAPE_KEY: dru_clearance_rules(merged),
+        "managed_names": managed,
+        "authored": authored or {},
+    }
+    writer = "merge_dru_floors"
+    if path is not None:
+        writer = f"merge_dru_floors({path})"
+    assert_no_loosenings(before, after, allow=allow, writer=writer)
+
+
 def merge_dru_floors(
     existing: str | None,
     dru_content: str,
     path: str | Path | None = None,
+    *,
+    authored: Mapping[str, Any] | None = None,
+    allow: Iterable[str] = (),
 ) -> str:
     """Merge :func:`generate_dru` output into ``.kicad_dru`` content (#4600).
 
@@ -300,6 +410,15 @@ def merge_dru_floors(
 
     Idempotent: re-merging identical inputs yields byte-identical output.
 
+    Loosening gate (Issue #8937): before returning, the merged text is run
+    through :func:`kicad_tools.core.rule_loosening.assert_no_loosenings`
+    in its ``dru`` shape.  Rules named in ``dru_content`` are the writer's
+    own and may move with the profile; every other rule in ``existing``
+    must survive with its ``clearance`` minimum intact, and the merged file
+    must resolve every (track, track), (pad, zone) and (via, zone) pair at
+    no less than the clearance the design authorises (``authored``).
+    A violation raises :class:`RuleLooseningError` and nothing is written.
+
     Args:
         existing: Current ``.kicad_dru`` file content, or ``None`` when the
             file does not exist yet.
@@ -307,8 +426,19 @@ def merge_dru_floors(
             version header) to install as the managed block.
         path: Optional path of the ``.kicad_dru`` file the content came
             from, used only to name the file in the one-line stderr warning
-            emitted when the legacy-replace branch fires (see below).  Has
-            no effect on the merged output.
+            emitted when the legacy-replace branch fires (see below), and in
+            the loosening refusal message.  Has no effect on the merged
+            output.
+        authored: The design's own clearance floor sources, for the #8937
+            gate: ``{"netclasses": {name: mm}, "zones": [[layer, net, mm],
+            ...]}`` -- post-merge net classes and the board zones'
+            ``connect_pads`` clearances.  ``None`` skips the
+            resolved-below-authored check (the pre-rewrite comparison still
+            runs).
+        allow: :mod:`fnmatch` patterns over ``Loosening.path`` for
+            documented, permitted loosenings -- ``"*"`` under
+            ``KCT_PRESERVE_BOARD_RULES=0``, mirroring
+            :func:`~kicad_tools.manufacturers.project_generator.merge_policy_allowances`.
 
     Returns:
         The full merged ``.kicad_dru`` file content.
@@ -324,7 +454,11 @@ def merge_dru_floors(
     block = f"{DRU_FLOORS_BLOCK_BEGIN}\n{body}\n{DRU_FLOORS_BLOCK_END}"
 
     if existing is None or not existing.strip():
-        return f"{DRU_VERSION_HEADER}\n\n{block}\n"
+        merged = f"{DRU_VERSION_HEADER}\n\n{block}\n"
+        _gate_dru_loosenings(
+            existing, dru_content, merged, authored=authored, allow=allow, path=path
+        )
+        return merged
 
     pattern = re.compile(
         re.escape(DRU_FLOORS_BLOCK_BEGIN) + r".*?" + re.escape(DRU_FLOORS_BLOCK_END),
@@ -333,7 +467,11 @@ def merge_dru_floors(
     if pattern.search(existing):
         merged = pattern.sub(lambda _m: block, existing)
         merged = merged if merged.endswith("\n") else merged + "\n"
-        return _check_dru_loadable(merged, path)
+        _check_dru_loadable(merged, path)
+        _gate_dru_loosenings(
+            existing, dru_content, merged, authored=authored, allow=allow, path=path
+        )
+        return merged
 
     if _is_legacy_generated_dru(existing):
         # Pre-#4600 clobber-written sidecar: the whole file is our own
@@ -349,13 +487,39 @@ def merge_dru_floors(
             f"as generated; restore from VCS if this file was yours.",
             file=sys.stderr,
         )
-        return f"{DRU_VERSION_HEADER}\n\n{block}\n"
+        merged = f"{DRU_VERSION_HEADER}\n\n{block}\n"
+        # The pre-#4600 sidecar this branch just classified is kct's own
+        # generated output, not an authored "before" state: handing it to
+        # the gate as ``existing`` would re-classify its tier floors as
+        # authored rules and refuse the very replacement #4667 established
+        # (a profile switch legitimately moves the floor).  Only the
+        # ``authored`` baseline bounds how far down the replacement may go.
+        _gate_dru_loosenings(None, dru_content, merged, authored=authored, allow=allow, path=path)
+        return merged
 
-    # Append; ensure a version header exists (mirrors ``merge_dru_block``).
-    prefix = existing if existing.endswith("\n") else existing + "\n"
-    if not re.search(r"^\s*\(version\b", existing, re.MULTILINE):
-        prefix = f"{DRU_VERSION_HEADER}\n" + prefix
-    return _check_dru_loadable(f"{prefix}\n{block}\n", path)
+    # Insert; ensure a version header exists (mirrors ``merge_dru_block``'s
+    # append, with one deliberate difference: the block goes ABOVE the
+    # foreign content, not below it).  KiCad gives the last matching custom
+    # rule precedence, so appending kct's floors after a hand-written or
+    # native-zone clearance rule would let the floor *override* a designer
+    # minimum -- the exact #8937 defect class.  Above the foreign rules the
+    # floor still floors, and the designer's stricter rule still wins.
+    # "Above the foreign content" means above the foreign *rules*: a
+    # ``.kicad_dru`` whose first element is not the ``(version ...)`` form
+    # is not a valid design-rules file (``load_design_rules`` and KiCad
+    # both require the header first), so when a leading version form is
+    # present the block is anchored immediately after it.
+    version_form = re.search(r"^\s*\(version[^)]*\)[ \t]*\n?", existing, re.MULTILINE)
+    if version_form:
+        head = existing[: version_form.end()]
+        tail = existing[version_form.end() :].lstrip("\n")
+        merged = f"{head}\n{block}\n\n{tail}"
+    else:
+        prefix = existing if existing.endswith("\n") else existing + "\n"
+        merged = f"{DRU_VERSION_HEADER}\n\n{block}\n{prefix}"
+    merged = _check_dru_loadable(merged, path)
+    _gate_dru_loosenings(existing, dru_content, merged, authored=authored, allow=allow, path=path)
+    return merged
 
 
 def _dru_quote(value: str) -> str:
