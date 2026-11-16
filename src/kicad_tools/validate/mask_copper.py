@@ -157,6 +157,25 @@ class MaskCopperAssessment:
             raise ValueError("Unknown mask-to-copper coverage status")
 
     @property
+    def remediation(self) -> str | None:
+        """What to configure so this assessment can run, when it could not (issue #8949).
+
+        ``None`` for a ``complete`` assessment.  Sourced here so the hint
+        travels with the assessment instead of living in CLI formatting --
+        and deliberately a property, not a serialized field: ``to_dict()``
+        ships the JSON report and its ``schema`` is round-trip validated,
+        so a new key there would force a ``kct.mask-copper-assessment.v1``
+        -> ``v2`` bump.  Machine consumers already read ``coverage``.
+        """
+        if self.coverage == "complete":
+            return None
+        return (
+            "run the mask assessment on a qualified KiCad build "
+            "(native interpreter): set KCT_KICAD_DOCKER=1 to use the pinned "
+            "image, or install a qualified kicad-cli, then re-run"
+        )
+
+    @property
     def passed(self):
         return (
             not self.reasons
