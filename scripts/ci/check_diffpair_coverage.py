@@ -189,17 +189,19 @@ DIFFPAIR_FIXTURE_KEY = "boards/06-diffpair-test/regression-fixture/diffpair_test
 # exactly.  A new net starting to carry sub-danger slits still fails the
 # gate; a net whose slits the router stops leaving goes stale and forces its
 # entry out.
-# Issue #8974: the attribution for this board's via-banded population (2
+# Issue #8975: the recipe repair pass now keeps its offset vias out of the
+# same-net slit band (#8957's predicate in ``_via_ok``), which drained the
+# pour-net population (+1V2, +3V3, +1V8) to zero -- those entries went
+# stale on the first post-fix regen (21 remain: MIPI_CLK+ 11, GND 6,
+# USB2_D- 3, PCIE_RX+ 1) and are deleted.
+# Issue #8974: the attribution for the remaining via-banded population (2
 # vias, 4 findings: PCIE_RX+ 1, USB2_D- 3, re-measured 2026-11-16 at
 # d0.25/s0.6) lands on ``cpp_backend._convert_result_to_route`` -- the C++
 # pathfinder places them, so the fix needs a DesignRules C++ mirror and is
 # split to its own child of #8962 rather than widened into #8974.  Every
-# entry still fires; they are re-pointed to #8962, the parent tracker
-# (#8957's own scope ended at the merged stitcher path).
+# surviving entry still fires; they are re-pointed to #8962, the parent
+# tracker (#8957's own scope ended at the merged stitcher path).
 DIFFPAIR_FIXTURE_ALLOWED_FINDINGS: Allowance = {
-    ("physical_copper_gap", "+1V2"): 8962,
-    ("physical_copper_gap", "+1V8"): 8962,
-    ("physical_copper_gap", "+3V3"): 8962,
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK+"): 8962,
     ("physical_copper_gap", "PCIE_RX+"): 8962,

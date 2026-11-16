@@ -72,7 +72,7 @@ from kicad_tools.router.current_paths import (
 from kicad_tools.schema.pcb import PCB
 from kicad_tools.sidecars import net_class_map_sidecar_candidates
 from kicad_tools.validate import DRCChecker, DRCResults, DRCViolation
-from kicad_tools.validate.coverage import coverage_to_dict
+from kicad_tools.validate.coverage import collapse_reasons, coverage_to_dict
 from kicad_tools.validate.rules.reinforcement_incomplete import reinforcement_waived_nets
 from kicad_tools.validate.rules.schematic_fields import DEFAULT_SCH_FIELD_THRESHOLD_MM
 
@@ -269,19 +269,36 @@ class MetaCheckResult:
     # a machine-detectable JSON field so a skipped gate is never mistaken for a
     # clean one.
     schematic_missing: bool = False
+    # Issue #8949: True when a blocking coverage category (mask_to_copper,
+    # the DFM threshold table, fab DFM parity) could not complete its
+    # assessment.  ``compute_overall`` consults this so ``overall``, the
+    # printed ``Overall:`` line and the exit-code decision all read one
+    # source of truth, instead of two notions of "incomplete" that can
+    # drift.  Set from the same incompleteness the exit code already
+    # honours; never widened (an explicitly requested check that cannot run
+    # stays FAILED).
+    coverage_incomplete: bool = False
+    # The blocking categories whose incompleteness set ``coverage_incomplete``
+    # (e.g. ``("mask_to_copper",)``); names them on the ``Overall:`` line.
+    # Not serialized in ``to_dict``: machine consumers already receive
+    # ``verdict`` and ``exit_code``, and the report's schema is pinned.
+    incomplete_categories: tuple[str, ...] = ()
 
     def _subs(self) -> tuple[SubCheckResult, ...]:
         return (self.drc, self.erc, self.lvs, self.manifest)
 
     def compute_overall(self) -> None:
-        """Roll up the four sub-statuses into ``self.overall``.
+        """Roll up the four sub-statuses (+ coverage incompleteness) into ``overall``.
 
-        Rules (per issue #3750 acceptance criterion #3):
+        Rules (per issue #3750 acceptance criterion #3, extended by #8949):
 
-        * ``FAILED`` if any sub-check is ``FAILED``.
+        * ``FAILED`` if any sub-check is ``FAILED`` -- a real failure is
+          never masked by an incomplete category.
         * ``INCOMPLETE`` if any sub-check is ``NOT RUN`` (and none is
-          ``FAILED``).
-        * ``PASSED`` only when every sub-check is ``PASSED``.
+          ``FAILED``), or when ``coverage_incomplete`` is set (a blocking
+          category could not complete its assessment).
+        * ``PASSED`` only when every sub-check is ``PASSED`` and no
+          blocking category was incomplete.
 
         The rollup intentionally reports the truthful aggregate state and
         does not collapse ``INCOMPLETE`` into ``FAILED`` under ``--strict``
@@ -293,7 +310,7 @@ class MetaCheckResult:
         subs = self._subs()
         if any(s.status == "FAILED" for s in subs):
             self.overall = "FAILED"
-        elif any(s.status == "NOT RUN" for s in subs):
+        elif any(s.status == "NOT RUN" for s in subs) or self.coverage_incomplete:
             self.overall = "INCOMPLETE"
         else:
             self.overall = "PASSED"
@@ -307,6 +324,14 @@ class MetaCheckResult:
             "overall": self.overall,
             "schematic_missing": self.schematic_missing,
         }
+
+
+# Issue #8949: stdout bound for distinct mask-to-copper reasons in the
+# human-readable stanza.  Wider than the coverage row's ``limit=3`` (whose
+# string lands verbatim in committed reports): the reporter's run carried
+# four distinct real causes among the repeats, and the stanza must be able
+# to show all of them plus headroom, while staying bounded.
+_MASK_STDOUT_REASON_LIMIT = 8
 
 
 # Available check categories
@@ -1046,6 +1071,8 @@ def run_meta_checks(
     drc_status: SubCheckResult,
     schematic: str | None = None,
     strict: bool = False,
+    coverage_incomplete: bool = False,
+    incomplete_categories: tuple[str, ...] = (),
 ) -> MetaCheckResult:
     """Run the four meta sub-checks (DRC + ERC + LVS + Manifest).
 
@@ -1068,6 +1095,13 @@ def run_meta_checks(
             the exit-code policy in :func:`main` controls whether
             ``INCOMPLETE`` exits non-zero (the new default) or 0 (with
             ``--allow-incomplete``).
+        coverage_incomplete: A blocking coverage category (mask_to_copper,
+            DFM table, fab DFM parity) could not complete its assessment
+            (issue #8949).  Threaded in -- not set on the returned object
+            -- because this helper calls ``compute_overall`` itself, so a
+            flag assigned afterwards would be a no-op.
+        incomplete_categories: Names of the categories behind
+            ``coverage_incomplete``; rendered on the ``Overall:`` line.
     """
     resolved_sch = _resolve_check_schematic(schematic, pcb_path)
 
@@ -1095,6 +1129,8 @@ def run_meta_checks(
         lvs=lvs,
         manifest=manifest,
         schematic_missing=schematic_missing,
+        coverage_incomplete=coverage_incomplete,
+        incomplete_categories=incomplete_categories,
     )
     result.compute_overall()
     return result
@@ -1153,7 +1189,12 @@ def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> N
 
     Output goes to stdout in a stable column layout so humans can
     diff it across runs.  The ``Overall:`` line is the rollup that
-    matches the exit-code decision.
+    matches the exit-code decision -- an invariant #8949 makes true by
+    construction, because every incompleteness the exit code honours is
+    folded into ``compute_overall`` via ``coverage_incomplete``.  When a
+    blocking category is the cause, the line names it
+    (``Overall:   INCOMPLETE (mask_to_copper)``); sub-check ``NOT RUN``
+    causes are named by their own status rows above.
 
     ``verbose`` (issue #4616) expands the ``LVS:`` row into the complete,
     uncapped mismatch list from both comparator legs.  The status lines
@@ -1168,7 +1209,10 @@ def print_meta_check_stanza(result: MetaCheckResult, verbose: bool = False) -> N
     if verbose:
         _print_lvs_verbose_expansion(result.lvs)
     print(_format_meta_status_line("Manifest", result.manifest))
-    print(f"{'Overall:':10} {result.overall}")
+    if result.overall == "INCOMPLETE" and result.incomplete_categories:
+        print(f"{'Overall:':10} {result.overall} ({', '.join(result.incomplete_categories)})")
+    else:
+        print(f"{'Overall:':10} {result.overall}")
 
 
 def print_routing_quality_stanza(metrics: RoutingQualityMetrics) -> None:
@@ -2971,10 +3015,18 @@ def main(argv: list[str] | None = None) -> int:
     fabrication_process_dict = describe_selection(checker.design_rules)
     machine_output = args.format in ("json", "sarif")
     if results.mask_copper_assessments and not machine_output:
+        # Issue #8949: collapse the repeated reason lines (the live
+        # incomplete case repeats one line hundreds of times, burying the
+        # distinct causes) with the same shared rule the coverage row uses,
+        # at a wider stdout bound -- and print one remediation line naming
+        # what to configure.  JSON/SARIF output is untouched (the guard
+        # above); the machine report already carries the full reasons list.
         for assessment in results.mask_copper_assessments:
             print(f"Mask-to-copper: {assessment.coverage}; passed={assessment.passed}")
-            for reason in assessment.reasons:
-                print(f"  {reason}")
+            print(f"  {collapse_reasons(assessment.reasons, limit=_MASK_STDOUT_REASON_LIMIT)}")
+            remediation = assessment.remediation
+            if remediation:
+                print(f"  Remediation: {remediation}")
 
     _warn_attach_zone_suppressed(results)
 
@@ -3167,17 +3219,37 @@ def evaluate_check_verdict(
             f"{error_count} error(s), {warning_count} warning(s)"
         ),
     )
+    from kicad_tools.validate.fab_dfm_parity import evaluate_parity
+
+    parity = evaluate_parity(manufacturer, findings=counted, recorded_counts=recorded_fab_counts)
     meta: MetaCheckResult | None = None
     if not drc_only:
+        # Issue #8949: ONE notion of "incomplete".  Every incompleteness the
+        # exit code already honours (a default-applied mask coverage check
+        # that could not run, a stackup with no DFM-table entry, a
+        # danger-capable fab DFM parity row) is folded into the meta rollup
+        # through one flag, so ``meta.overall``, the printed ``Overall:``
+        # line and the exit code cannot disagree.  Never widened: an
+        # explicitly requested mask check that cannot run is ``mask_failed``
+        # above and keeps reporting FAILED.  ``compute_overall`` ranks
+        # FAILED first, so a failed board still reads FAILED.
+        incomplete_categories: list[str] = []
+        if mask_incomplete:
+            incomplete_categories.append("mask_to_copper")
+        if dfm_incomplete:
+            incomplete_categories.append("dfm_table")
+        if parity is not None and parity.incomplete:
+            incomplete_categories.append("fab_dfm_parity")
         meta = run_meta_checks(
             Path(pcb_path),
             drc_status=drc_sub,
             schematic=schematic,
             strict=strict,
+            coverage_incomplete=bool(incomplete_categories),
+            incomplete_categories=tuple(incomplete_categories),
         )
     verdict, exit_code = _check_verdict(
         mask_copper_failed=bool(mask_failed),
-        mask_copper_incomplete=mask_incomplete,
         strict_copper_disagreement=strict_copper_disagreement,
         drc_only=drc_only,
         error_count=error_count,
@@ -3186,10 +3258,12 @@ def evaluate_check_verdict(
         allow_incomplete=allow_incomplete,
         meta=meta,
     )
-    from kicad_tools.validate.fab_dfm_parity import evaluate_parity
-
-    parity = evaluate_parity(manufacturer, findings=counted, recorded_counts=recorded_fab_counts)
     if (dfm_incomplete or (parity is not None and parity.incomplete)) and verdict == "pass":
+        # Reachable only under ``drc_only`` since #8949: without the meta
+        # rollup there is no ``Overall:`` line to keep honest (the branch is
+        # dead on the meta path -- a "pass" verdict there implies no
+        # incompleteness), but the exit code must still honour the
+        # incompleteness.
         from ._gate import gate_exit_code
 
         exit_code, verdict = gate_exit_code(
@@ -3208,7 +3282,6 @@ def evaluate_check_verdict(
 def _check_verdict(
     *,
     mask_copper_failed: bool,
-    mask_copper_incomplete: bool = False,
     strict_copper_disagreement: bool,
     drc_only: bool,
     error_count: int,
@@ -3224,6 +3297,12 @@ def _check_verdict(
     ``--allow-incomplete`` an incomplete verdict still exits 0 (the verdict
     stays honest).  Numbering is unchanged (Issue #3750): the ``"check"``
     ladder of :func:`~kicad_tools.cli._gate.gate_exit_code`.
+
+    Issue #8949: the meta path reads incompleteness solely from
+    ``meta.overall`` -- the rollup now folds every incompleteness the exit
+    code honours (mask coverage, DFM table, fab DFM parity) via
+    ``coverage_incomplete``, so the printed ``Overall:`` line and this
+    decision cannot disagree.
     """
     from ._gate import gate_exit_code
 
@@ -3238,11 +3317,12 @@ def _check_verdict(
         )
     else:
         # The meta rollup already folded DRC (incl. --strict warnings), ERC,
-        # LVS and the manifest into FAILED / INCOMPLETE / PASSED.
+        # LVS, the manifest and #8949's coverage incompleteness into
+        # FAILED / INCOMPLETE / PASSED.
         exit_code, verdict = gate_exit_code(
             1 if meta.overall == "FAILED" else 0,
             0,
-            incomplete=meta.overall == "INCOMPLETE" or mask_copper_incomplete,
+            incomplete=meta.overall == "INCOMPLETE",
             allow_incomplete=allow_incomplete,
             style="check",
         )

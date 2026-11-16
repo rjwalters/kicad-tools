@@ -1,0 +1,15 @@
+%FSLAX46Y46*%
+%MOMM*%
+%LPD*%
+G01*
+G04 Aperture modelled on the zero-width circular aperture KiCad selects as the current aperture while emitting G36/G37 regions*
+%ADD10C,0.000000*%
+D10*
+G36*
+X0Y0D02*
+X1000000Y0D01*
+X1000000Y1000000D01*
+X0Y1000000D01*
+X0Y0D01*
+G37*
+M02*

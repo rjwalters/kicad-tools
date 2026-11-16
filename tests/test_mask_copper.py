@@ -855,3 +855,109 @@ def test_mask_copper_unknown_tolerates_no_reasons():
 
     result = cov.mask_copper_unknown("not_run", [])
     assert result.state == cov.UNKNOWN and "not_run" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Issue #8949: the CLI's human-readable ``Mask-to-copper:`` stdout stanza
+# must collapse repeated reasons (one shared collapse rule with the
+# coverage row) and print one actionable remediation line.
+# ---------------------------------------------------------------------------
+
+
+def test_collapse_reasons_is_the_shared_dedup_truncate_rule():
+    """One collapse rule, two consumers: coverage row and stdout stanza."""
+    from kicad_tools.validate.coverage import collapse_reasons
+
+    repeated = ["F.Mask: unattributed native mask region"] * 13
+    collapsed = collapse_reasons([*repeated, "a", "b", "c", "d"], limit=3)
+    assert collapsed == ("F.Mask: unattributed native mask region; a; b (+2 more)")
+    # First-occurrence order is preserved.
+    assert collapsed.index("F.Mask") < collapsed.index("a")
+    # Exactly one reason: no spurious suffix.
+    assert collapse_reasons(["only"], limit=3) == "only"
+    # No reasons at all: a placeholder, never an empty string or "(+0 more)".
+    assert collapse_reasons([], limit=3) == "no reason reported"
+    assert "(+0 more)" not in collapse_reasons(["x", "x"], limit=5)
+
+
+def test_incomplete_assessment_carries_a_remediation_hint():
+    """AC: an incomplete assessment names what to configure, not just what failed."""
+    incomplete = MaskCopperAssessment(
+        coverage="incomplete", reasons=["F.Mask: unattributed native mask region"]
+    )
+    assert incomplete.remediation is not None
+    assert "KCT_KICAD_DOCKER" in incomplete.remediation
+    # A complete assessment needs no remediation; not_run and incomplete do
+    # (the dataclass default is ``not_run``, which is exactly "never ran").
+    assert MaskCopperAssessment(coverage="complete").remediation is None
+    assert MaskCopperAssessment().remediation is not None
+    # And the hint must never enter the serialized JSON payload: that dict
+    # is round-trip validated against kct.mask-copper-assessment.v1.
+    assert "remediation" not in incomplete.to_dict()
+
+
+def _run_mask_stdout(tmp_path, capsys, monkeypatch, reasons, *extra):
+    """Run a --drc-only human-format check with a controlled incomplete assessment."""
+    from kicad_tools.cli.check_cmd import main
+    from kicad_tools.schema.pcb import PCB
+
+    _patch_assessment(monkeypatch, coverage="incomplete", reasons=list(reasons))
+    board = tmp_path / "b.kicad_pcb"
+    PCB.create(width=10, height=10, layers=2).save(board)
+    main([str(board), "--drc-only", "--mfr", "jlcpcb", *extra])
+    return capsys.readouterr().out
+
+
+def _mask_stdout_stanza(out: str) -> str:
+    """The ``Mask-to-copper:`` stdout stanza, through its Remediation line.
+
+    Scoped because the ``mask_to_copper_incomplete`` info *finding* (which
+    ships the full un-collapsed reasons list inside its message, in the
+    violations table and the JSON report) repeats the same strings.
+    """
+    lines = out.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Mask-to-copper:"))
+    stanza = []
+    for line in lines[start:]:
+        stanza.append(line)
+        if line.strip().startswith("Remediation:"):
+            break
+    else:
+        raise AssertionError("no Remediation line after the Mask-to-copper header")
+    return "\n".join(stanza)
+
+
+def test_stdout_collapses_repeated_reasons_and_shows_distinct_causes(tmp_path, capsys, monkeypatch):
+    """Hundreds of repeats collapse to one bounded line; distinct causes survive.
+
+    Mirrors the reporter's run: 13 repeats of one line plus enough distinct
+    causes to exceed the stdout bound, so both the collapse and the
+    ``(+N more)`` remainder are exercised.
+    """
+    repeated = ["F.Mask: unattributed native mask region"] * 13
+    distinct = [f"cause {i}" for i in range(9)]
+    out = _run_mask_stdout(tmp_path, capsys, monkeypatch, [*repeated, *distinct])
+    stanza = _mask_stdout_stanza(out)
+
+    headers = [line for line in stanza.splitlines() if line.startswith("Mask-to-copper:")]
+    assert len(headers) == 1
+    assert "incomplete" in headers[0]
+    # The repeated reason appears exactly once inside the stanza.
+    assert stanza.count("F.Mask: unattributed native mask region") == 1
+    # Distinct causes up to the bound are visible, the remainder counted.
+    assert "cause 0" in stanza and "cause 7" not in stanza
+    assert "(+2 more)" in stanza
+
+
+def test_stdout_single_and_empty_reason_lists_stay_clean(tmp_path, capsys, monkeypatch):
+    """Edge cases: exactly one reason (no spurious count), no reasons at all."""
+    stanza = _mask_stdout_stanza(
+        _run_mask_stdout(tmp_path, capsys, monkeypatch, ["F.Cu: Invalid region contour"])
+    )
+    assert stanza.count("F.Cu: Invalid region contour") == 1
+    assert "(+" not in stanza
+    assert "Remediation:" in stanza
+
+    stanza = _mask_stdout_stanza(_run_mask_stdout(tmp_path, capsys, monkeypatch, []))
+    assert "no reason reported" in stanza
+    assert "Remediation:" in stanza

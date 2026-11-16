@@ -643,17 +643,20 @@ def count_errors_via_kct_check(
 # reproduced exactly.  A new net starting to carry sub-danger slits still
 # fails the gate; a net whose slits the router stops leaving goes stale and
 # forces its entry out.
+# Issue #8975: the recipe repair pass now keeps its offset vias out of the
+# same-net slit band (#8957's predicate in ``_via_ok``), which drained the
+# recipe's own d0.25/s0.45 population to zero (93 -> 0 measured on the
+# first post-fix regen; GND's count dropped 118 -> 25 but its entry stays
+# load-bearing -- allowances are by net, not by producer).
 # Issue #8974: the route-side d0.3/s0.6 producers (the oracle weld's
 # run_stitch vias, the oracle link router's vias, and the lattice
 # pathfinder's pair vias) now keep their annuli out of the same-net pad
 # slit band, draining DQS_P and DQS_N completely (their 2 + 2 findings were
-# entirely route-side; entries deleted).  Post-fix seed-42 re-route
-# (feature/issue-8974, 2026-11-16): 109 same-net findings, all d0.25/s0.45
-# (GND 95) or no-via -- GND's +2 d0.25/s0.45 drift is the pour-repair
-# rounds placing offset vias for the two weld pads the band guard now
-# drops, still producer 1's (#8975) population, not a new producer.  The
-# surviving entries are re-pointed to #8962, the parent tracker for the
-# remaining producers; #8957's own scope ended at the merged stitcher path.
+# entirely route-side; entries deleted).  The surviving entries are
+# re-pointed to #8962, the parent tracker for the remaining producers;
+# #8957's own scope ended at the merged stitcher path.  (The counts above
+# are per-branch measurements: 109 findings / GND 95 on this branch without
+# #8975's recipe fix; the merged tree is what this gate measures.)
 MATCHGROUP_FIXTURE_ALLOWED_FINDINGS: Allowance = {
     ("physical_copper_gap", "GND"): 8962,
     ("physical_copper_gap", "MIPI_CLK_N"): 8962,
