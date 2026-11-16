@@ -367,12 +367,32 @@ def inspect_attributed_mask_geometry(
                 margin_source = "board:pad_to_mask_clearance=" + str(board_margin.get_value(0))
             else:
                 margin_source = "native-default (no explicit object/footprint/board margin)"
+            # Source identity for triage messages (issue #9038): the owning
+            # footprint's Reference and the pad number, so a finding can say
+            # `pad:R1/1` instead of an opaque UUID. Additive to the internal
+            # object dict; the report schema does not carry it.
+            pad_ref = None
+            if feature["kind"].startswith("pad:"):
+                number = feature["node"].get_string(0)
+                reference = None
+                if parent_node is not None:
+                    reference = next(
+                        (
+                            child.get_string(1)
+                            for child in parent_node.iter_children()
+                            if child.name == "property" and child.get_string(0) == "Reference"
+                        ),
+                        None,
+                    )
+                if reference and number:
+                    pad_ref = f"{reference}/{number}"
             result.objects[identity] = {
                 **{k: v for k, v in feature.items() if k != "node"},
                 "net": item["net"],
                 "layers_geometry": geometries,
                 "margin_mm": item["margin_mm"],
                 "margin_source": margin_source,
+                "pad_ref": pad_ref,
             }
         # Verify source and all sidecar bytes (including their absence) after
         # both native operations. The author files themselves were never passed.
