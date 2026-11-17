@@ -307,10 +307,13 @@ def docker_kicad_cli_prefix(
     return cmd
 
 
-#: ``docker run`` flags whose *value* carries host state (mounts, forwarded
-#: environment, uid/gid, working directory, platform) and is therefore dropped
-#: from the recorded form of a native command (``portable_native_command``).
-_DOCKER_VALUE_FLAGS = frozenset({"-v", "-e", "--user", "-w", "--platform"})
+#: The complete ``docker run`` flag vocabulary :func:`docker_kicad_cli_prefix`
+#: emits.  Value flags' *values* carry host state (mounts, forwarded
+#: environment, uid/gid, working directory, platform, the entrypoint) and are
+#: dropped from the recorded form of a native command
+#: (``portable_native_command``).
+_DOCKER_VALUE_FLAGS = frozenset({"-v", "-e", "--user", "-w", "--platform", "--entrypoint"})
+_DOCKER_NO_VALUE_FLAGS = frozenset({"--rm", "-i"})
 
 
 def _recorded_executable_name(text: str) -> str:
@@ -324,17 +327,21 @@ def _recorded_executable_name(text: str) -> str:
 def portable_native_command(argv: Iterable[str]) -> list[str]:
     """Stable, host-independent form of a *recorded* native command (#9055).
 
-    A ``docker run`` argv reduces to ``["docker", "run", "<image>",
-    "<entrypoint>"]``: every ``-v``/``-e``/``--user``/``-w``/``--platform``
-    value names host directories (per-run temp stages, the config home, the
-    calling user), so keeping any of them would put a per-run path into
-    hash-bound evidence; the image reference and the entrypoint still name
-    the tool.  Any other argv records only the executable's basename -- a
-    real binary's bytes are already pinned by ``command_file_sha256`` where
-    that is recorded, and a kct docker shim's bytes are per-run by
-    construction (see :func:`is_docker_shim`).  Only what evidence
-    *records* goes through this; the argv that actually executes is
-    untouched.
+    A ``docker run`` argv whose flags are all in the vocabulary
+    :func:`docker_kicad_cli_prefix` emits reduces to ``["docker", "run",
+    "<image>", "<entrypoint>"]``: every value flag's value names host state
+    (per-run temp stages, the config home, the calling user), so keeping any
+    of it would put a per-run path into hash-bound evidence; the image
+    reference and the entrypoint still name the tool.  A ``docker run`` argv
+    with any flag outside that vocabulary (docker's long forms like
+    ``--volume`` or ``--name``) is not a recognised prefix shape -- a later
+    non-flag token could be that flag's value, not the image (#9080) -- and
+    reduces to ``["docker"]``.  Any other argv records only the executable's
+    basename -- a real binary's bytes are already pinned by
+    ``command_file_sha256`` where that is recorded, and a kct docker shim's
+    bytes are per-run by construction (see :func:`is_docker_shim`).  Only
+    what evidence *records* goes through this; the argv that actually
+    executes is untouched.
     """
     argv = list(argv)
     if not argv:
@@ -350,17 +357,22 @@ def portable_native_command(argv: Iterable[str]) -> list[str]:
     index = 2
     while index < len(argv):
         token = argv[index]
-        if token == "--entrypoint":
-            if index + 1 < len(argv):
+        if token in _DOCKER_VALUE_FLAGS:
+            if index + 1 >= len(argv):
+                # Truncated value: not a shape docker_kicad_cli_prefix emits.
+                return ["docker"]
+            if token == "--entrypoint":
                 entrypoint = argv[index + 1]
             index += 2
             continue
-        if token in _DOCKER_VALUE_FLAGS:
-            index += 2
-            continue
-        if token.startswith("-"):
+        if token in _DOCKER_NO_VALUE_FLAGS:
             index += 1
             continue
+        if token.startswith("-"):
+            # Outside the recognised vocabulary (#9080): a later non-flag
+            # token may be this flag's value rather than the image, so the
+            # recorded form stops at the subcommand.
+            return ["docker"]
         image = token
         break
     if image is None:

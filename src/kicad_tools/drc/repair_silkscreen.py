@@ -167,6 +167,11 @@ class HoleClearanceRepairResult:
     #: ``silk_hole_overlap`` findings on *text* -- never clipped; move the
     #: text with ``kct place-silk-refs`` instead.
     text_residual: list[str] = field(default_factory=list)
+    #: Refs the ``pin1_marker`` check accepted before the clip and rejects
+    #: after (empty on a dry run): the clip removed the last ink it
+    #: recognised.  A warning, not an error -- a fab cannot print ink over a
+    #: hole -- but the marker is gone and must be re-added by hand.
+    marker_lost: list[str] = field(default_factory=list)
 
     @property
     def total_fixed(self) -> int:
@@ -485,7 +490,9 @@ class SilkscreenRepairer:
         is never touched: text over a hole lands in
         ``result.text_residual`` for ``kct place-silk-refs``.  Pin-1 markers
         are clipped like any other silk -- a fab cannot print ink over a
-        hole -- so re-run the ``pin1_marker`` check afterwards.
+        hole -- and a footprint whose marker the clip erased outright is
+        reported in ``result.marker_lost``; re-add that marker by hand,
+        clear of the hole.
 
         This is an explicit recipe step, run after routing so it sees the
         routed vias.  The router never calls it (#5744).
@@ -522,6 +529,12 @@ class SilkscreenRepairer:
         footprints = [(node, Footprint.from_sexp(node)) for node in _find_all_footprints(self.doc)]
         vias = [Via.from_sexp(node) for node in self.doc.find_all("via")]
         holes = list(iter_drill_holes(vias, [fp for _n, fp in footprints]))
+        # Before any node is edited: refs the pin-1 rule still recognises a
+        # marker for, so only the clip's own losses get reported (a dry run
+        # edits nothing and never needs the before-state).
+        markers_before: set[str] = set()
+        if not dry_run and holes:
+            markers_before = self._pin1_marker_refs()
         if holes:
             tree = STRtree([g for g, _ in holes])
 
@@ -651,7 +664,30 @@ class SilkscreenRepairer:
 
         if not dry_run:
             self._measure_hole_residual(result)
+            if holes:
+                result.marker_lost = sorted(self._pin1_marker_refs() - markers_before)
         return result
+
+    def _pin1_marker_refs(self) -> set[str]:
+        """Refs the ``pin1_marker`` rule flags on the current tree."""
+        from kicad_tools.manufacturers.base import DesignRules
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp.parser import parse_string, serialize_sexp
+        from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
+
+        rules = DesignRules(
+            min_trace_width_mm=0.0,
+            min_clearance_mm=0.0,
+            min_via_drill_mm=0.0,
+            min_via_diameter_mm=0.0,
+            min_annular_ring_mm=0.0,
+        )
+        pcb = PCB(parse_string(serialize_sexp(self.doc)))
+        return {
+            violation.items[0]
+            for violation in Pin1MarkerRule().check(pcb, rules).violations
+            if violation.rule_id.startswith("pin1_marker") and violation.items
+        }
 
     def _measure_hole_residual(self, result: HoleClearanceRepairResult) -> None:
         """Re-measure ``silk_hole_overlap`` with the real rule on the edited tree."""

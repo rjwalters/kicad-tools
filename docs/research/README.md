@@ -74,6 +74,7 @@ Measured experiments on `kct route`; several record negative results.
 | [Board 05 unattended route](board-05-unattended-route.md) | `kct route` from scratch at seeds 42/7/1337: 37/37, both DRC engines 0 errors, LVS clean, byte-identical across seeds; which wall clocks stay live; the nightly gate (Issue #7834) |
 | [kct check vs kicad-cli lengths](kicad-length-bench-6725.md) | Per-net length and pair skew comparison |
 | [Detour-ratio fleet measurement](detour-ratio-fleet-measurement-9003.md) | `kct route --report-detour-ratio` drawn vs alone-on-empty length over the fleet: median 1.001, 10.9% of 147 connections above 1.25x, max 3.7x, but only 2 at 2x or more, at most 91.7 mm avoidable, and 20% of probed connections unmatched -- a borderline tail that justifies trying the targeted repair pass (Issue #9003) |
+| [Pour-skeleton fit fleet measurement](pour-skeleton-fit-results-9002.md) | Straight pad-joining skeleton corridors vs the kicad-cli refill gate on all routed fleet boards: 0 actual `isolated_copper`/`unconnected_items` anywhere, 6/6 predictions false -- pour-cutting is not real on the fleet, no router-reservation follow-up (Issue #9002) |
 | [Joint candidate selection](kct-route-joint-candidate-selection-experiment.md) | Decide corridor assignment jointly on the empty grid before Iteration 0 (Issue #8998): overflow entering rip-up regressed on board 02 (25→49), tied on the mains fixture with a fatal HV-clearance failure; kill criterion fired, feature not merged |
 
 ## Calibration notes
