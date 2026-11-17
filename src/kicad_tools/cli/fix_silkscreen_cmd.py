@@ -17,6 +17,9 @@ Examples:
     # Trim silk lines that come too close to pads (opt-in)
     kct fix-silkscreen board.kicad_pcb --clip-to-pads
 
+    # After routing: clip silk lines/polygons off every drilled hole (opt-in)
+    kct fix-silkscreen board.kicad_pcb --clip-to-holes
+
     # Preview changes without applying
     kct fix-silkscreen board.kicad_pcb --dry-run
 
@@ -33,6 +36,7 @@ from collections import Counter
 from pathlib import Path
 
 from kicad_tools.drc.repair_silkscreen import (
+    HoleClearanceRepairResult,
     PadClearanceRepairResult,
     SilkscreenRepairer,
     SilkscreenRepairResult,
@@ -138,14 +142,46 @@ def _print_results(
     dry_run: bool,
     mfr: str | None,
     clip_result: PadClearanceRepairResult | None = None,
+    hole_result: HoleClearanceRepairResult | None = None,
 ) -> None:
     """Print repair results in the requested format."""
     if output_format == "json":
-        _print_json(line_result, text_result, dry_run, mfr, clip_result)
+        _print_json(line_result, text_result, dry_run, mfr, clip_result, hole_result)
     elif output_format == "summary":
-        _print_summary(line_result, text_result, dry_run, mfr, clip_result)
+        _print_summary(line_result, text_result, dry_run, mfr, clip_result, hole_result)
     else:
-        _print_text(line_result, text_result, dry_run, mfr, clip_result)
+        _print_text(line_result, text_result, dry_run, mfr, clip_result, hole_result)
+
+
+def _hole_dicts(hole_result: HoleClearanceRepairResult) -> dict:
+    return {
+        "min_hole_clearance_mm": hole_result.min_clearance_mm,
+        "total_hole_clearance_fixed": hole_result.total_fixed,
+        "hole_clearance_fixes": [
+            {
+                "footprint_ref": f.footprint_ref,
+                "element_type": f.element_type,
+                "layer": f.layer,
+                "action": f.action,
+                "holes": f.holes,
+                "old_area_mm2": round(f.old_area, 6),
+                "new_area_mm2": round(f.new_area, 6),
+                "pieces": f.pieces,
+            }
+            for f in hole_result.fixes
+        ],
+        "hole_clearance_skipped": [
+            {
+                "footprint_ref": k.footprint_ref,
+                "element_type": k.element_type,
+                "layer": k.layer,
+                "reason": k.reason,
+            }
+            for k in hole_result.skipped
+        ],
+        "hole_clearance_residual": hole_result.residual,
+        "hole_clearance_text_residual": hole_result.text_residual,
+    }
 
 
 def _clip_dicts(clip_result: PadClearanceRepairResult) -> dict:
@@ -181,6 +217,7 @@ def _print_json(
     dry_run: bool,
     mfr: str | None,
     clip_result: PadClearanceRepairResult | None = None,
+    hole_result: HoleClearanceRepairResult | None = None,
 ) -> None:
     data = {
         "min_width_mm": line_result.min_width_mm,
@@ -191,7 +228,8 @@ def _print_json(
         "total_text_height_fixed": text_result.total_fixed,
         "total_fixed": line_result.total_fixed
         + text_result.total_fixed
-        + (clip_result.total_fixed if clip_result else 0),
+        + (clip_result.total_fixed if clip_result else 0)
+        + (hole_result.total_fixed if hole_result else 0),
         "line_width_fixes": [
             {
                 "element_type": f.element_type,
@@ -217,6 +255,8 @@ def _print_json(
     }
     if clip_result is not None:
         data.update(_clip_dicts(clip_result))
+    if hole_result is not None:
+        data.update(_hole_dicts(hole_result))
     print(json.dumps(data, indent=2))
 
 
@@ -226,12 +266,15 @@ def _print_summary(
     dry_run: bool,
     mfr: str | None,
     clip_result: PadClearanceRepairResult | None = None,
+    hole_result: HoleClearanceRepairResult | None = None,
 ) -> None:
     action = "Would fix" if dry_run else "Fixed"
     source = f" to {mfr.upper()} minimum" if mfr else ""
     total = line_result.total_fixed + text_result.total_fixed
     if clip_result is not None:
         total += clip_result.total_fixed
+    if hole_result is not None:
+        total += hole_result.total_fixed
     parts = []
     if line_result.total_fixed > 0:
         parts.append(
@@ -247,6 +290,8 @@ def _print_summary(
             f"{clip_result.total_fixed} pad clearance violation(s)"
             f" (min: {clip_result.min_clearance_mm}mm)"
         )
+    if hole_result is not None and hole_result.total_fixed > 0:
+        parts.append(f"{hole_result.total_fixed} silk-over-hole violation(s)")
     if not parts:
         parts.append("0 silkscreen violation(s)")
     print(f"{action} {total} silkscreen violation(s){source}: {'; '.join(parts)}")
@@ -258,6 +303,7 @@ def _print_text(
     dry_run: bool,
     mfr: str | None,
     clip_result: PadClearanceRepairResult | None = None,
+    hole_result: HoleClearanceRepairResult | None = None,
 ) -> None:
     has_line_fixes = line_result.total_fixed > 0
     has_text_fixes = text_result.total_fixed > 0
@@ -265,7 +311,14 @@ def _print_text(
         clip_result.total_fixed > 0 or len(clip_result.skipped) > 0
     )
 
-    if not has_line_fixes and not has_text_fixes and not has_clip:
+    has_hole = hole_result is not None and bool(
+        hole_result.fixes
+        or hole_result.skipped
+        or hole_result.residual
+        or hole_result.text_residual
+    )
+
+    if not has_line_fixes and not has_text_fixes and not has_clip and not has_hole:
         print("No silkscreen violations found.")
         return
 
@@ -322,6 +375,27 @@ def _print_text(
                 f"  {cskip.footprint_ref}: {cskip.element_type} on {cskip.layer} skipped"
                 f" ({cskip.reason})"
             )
+
+    if hole_result is not None and has_hole:
+        print(
+            f"{'Would clip' if dry_run else 'Clipped'} {hole_result.total_fixed} silkscreen "
+            f"graphic(s) off drilled holes ({hole_result.min_clearance_mm}mm clearance):"
+        )
+        for hfix in hole_result.fixes:
+            print(
+                f"  {hfix.footprint_ref}: {hfix.element_type} on {hfix.layer} {hfix.action}"
+                f" ({hfix.old_area:.4f} -> {hfix.new_area:.4f} mm^2 ink;"
+                f" {', '.join(hfix.holes)})"
+            )
+        for hskip in hole_result.skipped:
+            print(
+                f"  {hskip.footprint_ref}: {hskip.element_type} on {hskip.layer} skipped"
+                f" ({hskip.reason})"
+            )
+        for item in hole_result.residual:
+            print(f"  still over a hole: {item}")
+        for item in hole_result.text_residual:
+            print(f"  text over a hole (use place-silk-refs --over-holes): {item}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -380,6 +454,22 @@ Examples:
             "Also trim or remove footprint silk lines closer to a pad than the "
             "manufacturer's silk-to-pad clearance (pin-1 markers are never touched)"
         ),
+    )
+    parser.add_argument(
+        "--clip-to-holes",
+        action="store_true",
+        help=(
+            "Also clip footprint silk lines/polygons/rects off drilled holes "
+            "(every via, tented or not, and PTH/NPTH), clearing silk_hole_overlap. "
+            "Run after routing; text is left for place-silk-refs --over-holes"
+        ),
+    )
+    parser.add_argument(
+        "--hole-clearance",
+        type=float,
+        default=None,
+        metavar="MM",
+        help="Silk-to-hole clearance for --clip-to-holes (default: the silk_hole_overlap rule's, 0)",
     )
     parser.add_argument(
         "-o",
@@ -446,10 +536,22 @@ Examples:
             print(f"Error: --clip-to-pads requires shapely: {e}", file=sys.stderr)
             return 1
 
+    hole_result: HoleClearanceRepairResult | None = None
+    if args.clip_to_holes:
+        try:
+            hole_result = repairer.repair_hole_clearance(args.hole_clearance, dry_run=args.dry_run)
+        except ImportError as e:
+            print(f"Error: --clip-to-holes requires shapely: {e}", file=sys.stderr)
+            return 1
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
     total_fixed = (
         line_result.total_fixed
         + text_result.total_fixed
         + (clip_result.total_fixed if clip_result else 0)
+        + (hole_result.total_fixed if hole_result else 0)
     )
 
     # Print results
@@ -461,6 +563,7 @@ Examples:
             dry_run=args.dry_run,
             mfr=args.mfr,
             clip_result=clip_result,
+            hole_result=hole_result,
         )
 
     # Save if not dry run and there were fixes
@@ -474,6 +577,14 @@ Examples:
             print(f"Error saving PCB file: {e}", file=sys.stderr)
             return 1
 
+    if hole_result is not None and hole_result.residual:
+        # Graphics still over a hole (an arc/circle, or a shape no clip could
+        # save): fail loud rather than ship silk the fab will remove.
+        print(
+            f"Error: {len(hole_result.residual)} silk graphic(s) still overlap a drilled hole",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

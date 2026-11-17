@@ -117,13 +117,16 @@ def with_board07_synthetic(gate):
     return gate
 
 
+# Issue #9018: the leg-side band guard drained the pad-vs-trace population
+# (MIPI_*_N out); the six TMDS survivors are the re-sited gateway fan vias'
+# tangency wedges, re-pointed under the #8962 via-population child.
 BOARD07_GAP_NETS = (
-    "MIPI_CLK_N",
-    "MIPI_DAT0_N",
-    "MIPI_DAT1_N",
     "TMDS_D0_N",
+    "TMDS_D0_P",
     "TMDS_D1_N",
+    "TMDS_D1_P",
     "TMDS_D2_N",
+    "TMDS_D2_P",
 )
 
 BOARD06_GAP_NETS = ("GND", "MIPI_CLK+", "PCIE_RX+", "USB2_D-")
@@ -412,7 +415,7 @@ def test_regenerated_population_passes_and_a_new_net_fails():
     match the #8962-re-pointed fab-gap allowance; a NEW net's slits are
     unallowed, and a net that stops carrying slits goes stale."""
     gate = load("check_matchgroup_coverage")
-    run_a = [gap_violation(("TMDS_D0_N",)) for _ in range(3)] + [gap_violation(("MIPI_CLK_N",))]
+    run_a = [gap_violation(("TMDS_D0_N",)) for _ in range(3)] + [gap_violation(("TMDS_D0_P",))]
     run_b = [
         gap_violation(("TMDS_D0_N",), items=("Via@1.1/1.1:F.Cu-B.Cu:d0.3/s0.6",)) for _ in range(2)
     ]
@@ -421,7 +424,7 @@ def test_regenerated_population_passes_and_a_new_net_fails():
     regressed = run_a + [gap_violation(("ADDR_BUS",))]
     assert gate.unallowed_blocking(BOARD07_KEY, regressed) == [("physical_copper_gap", "ADDR_BUS")]
     stale = gate.stale_allowances(BOARD07_KEY, load("identity_allowance").error_identities(run_b))
-    assert ("physical_copper_gap", "MIPI_CLK_N", 8962) in stale
+    assert ("physical_copper_gap", "TMDS_D0_P", 8962) in stale
 
 
 # ---------------------------------------------------------------------------

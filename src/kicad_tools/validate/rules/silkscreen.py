@@ -30,13 +30,14 @@ convention difference to explain away.  See #4612 for the measured parity table.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from kicad_tools._shapely import require_shapely
 
 from ..violations import DRCResults, DRCViolation
+from .base import DRC_TOLERANCE
 
 if TYPE_CHECKING:
     from kicad_tools.schema.pcb import (
@@ -74,7 +75,10 @@ BACK_SILK_LAYERS = ("B.SilkS", "B.Silkscreen")
 # (a dependency-free leaf module) so ``kicad_tools.cli.parser`` can read it for
 # a ``--help`` default without importing this module's (and this package's)
 # full transitive chain.  Re-exported here unchanged for existing callers.
-from kicad_tools.silkscreen._silk_defaults import SILK_EDGE_CLEARANCE_MM  # noqa: E402
+from kicad_tools.silkscreen._silk_defaults import (  # noqa: E402
+    SILK_EDGE_CLEARANCE_MM,
+    SILK_HOLE_CLEARANCE_MM,
+)
 
 # Per-character width factor used to approximate a stroked-font text bounding
 # box.  KiCad's true glyph metrics are not modeled; a simple per-character box
@@ -1285,54 +1289,91 @@ def check_silk_over_copper(
     return results
 
 
+def iter_drill_holes(
+    vias: Iterable[Any],
+    footprints: Iterable[Footprint],
+    origin: tuple[float, float] = (0.0, 0.0),
+) -> Iterator[tuple[_Geometry, str]]:
+    """Yield ``(geom, label)`` for every drilled hole: via, PTH and NPTH.
+
+    The single definition of "a hole silk may not cover" (Issue #9054).
+    :func:`check_silk_hole_overlap` measures against it, ``kct
+    place-silk-refs`` avoids it and ``kct fix-silkscreen --clip-to-holes``
+    clips against it, so the three cannot disagree.  Every via with a drill
+    counts **whatever its tenting, fill or capping**: the drill pierces the
+    board, and the fab's DFM flags silk over it (#8844).  Pad holes use the
+    real round/oval, offset and rotated drill (``_hole_geometry``).
+
+    ``vias`` / ``footprints`` are taken separately (not a ``PCB``) so a
+    caller working on a raw S-expression tree can pass objects parsed in the
+    file's own frame; ``origin`` only shifts the coordinates printed in the
+    label back to the file's frame.
+    """
+    from shapely.geometry import Point
+
+    from .factory_clearance import _hole_geometry
+
+    ox, oy = origin
+    for via in vias:
+        if via.drill > 0:
+            x, y = via.position
+            yield (
+                Point(x, y).buffer(via.drill / 2.0, quad_segs=32),
+                f"via at ({x + ox:.3f}, {y + oy:.3f})",
+            )
+    for footprint in footprints:
+        for pad in footprint.pads:
+            if pad.type not in ("thru_hole", "np_thru_hole") or not pad.drill:
+                continue
+            geom = _hole_geometry(pad, footprint)
+            if geom is not None and not geom.is_empty:
+                yield geom, f"{footprint.reference} pad {pad.number} hole"
+
+
+def silk_hits_hole(silk: _Geometry, hole: _Geometry, clearance_mm: float) -> bool:
+    """Whether printed silk *silk* violates *clearance_mm* to drill *hole*.
+
+    At the rule's default clearance of 0 this is plain overlap (touching
+    counts); a positive clearance flags silk closer than it.
+    """
+    if clearance_mm <= 0:
+        return bool(silk.intersects(hole))
+    return bool(silk.distance(hole) < clearance_mm - DRC_TOLERANCE)
+
+
 def check_silk_hole_overlap(
     pcb: PCB,
     design_rules: DesignRules,
 ) -> DRCResults:
-    """Silkscreen over a drilled hole (via, PTH or NPTH), threshold 0 mm.
+    """Silkscreen over a drilled hole (via, PTH or NPTH).
 
     Unlike :func:`check_silk_over_copper` this tests the **drill** circle, not
     the mask aperture, so silk over a *tented* via hole is reported (Issue
     #8844; the fab's DFM flags it).  Holes pierce every layer, so both silk
     sides are tested.  Text uses the same bbox approximation as the other
     silk checks.  Emits one ``silk_hole_overlap`` warning per (silk, hole)
-    pair.
+    pair.  Holes come from :func:`iter_drill_holes` and the threshold is
+    :data:`SILK_HOLE_CLEARANCE_MM` (0 mm: any overlap), both shared with the
+    tools that clear these findings (Issue #9054).
     """
     require_shapely("silk-hole overlap geometry")
     from shapely import STRtree
-    from shapely.geometry import Point
-
-    from .factory_clearance import _hole_geometry
 
     results = DRCResults(rules_checked=1)
-    ox, oy = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    origin = getattr(pcb, "board_origin", None) or (0.0, 0.0)
+    clearance = SILK_HOLE_CLEARANCE_MM
 
-    holes: list[tuple[Any, str]] = []
-    for via in pcb.vias:
-        if via.drill > 0:
-            x, y = via.position
-            holes.append(
-                (
-                    Point(x, y).buffer(via.drill / 2.0, quad_segs=32),
-                    f"via at ({x + ox:.3f}, {y + oy:.3f})",
-                )
-            )
-    for footprint in pcb.footprints:
-        for pad in footprint.pads:
-            if pad.type not in ("thru_hole", "np_thru_hole") or not pad.drill:
-                continue
-            geom = _hole_geometry(pad, footprint)
-            if geom is not None and not geom.is_empty:
-                holes.append((geom, f"{footprint.reference} pad {pad.number} hole"))
+    holes = list(iter_drill_holes(pcb.vias, pcb.footprints, origin))
     if not holes:
         return results
 
     tree = STRtree([g for g, _ in holes])
     found: list[DRCViolation] = []
     for _side, geom, silk_label, location, layer, _uuid in _iter_silk_geometries(pcb):
-        for idx in tree.query(geom):
+        query = geom.buffer(clearance) if clearance > 0 else geom
+        for idx in tree.query(query):
             hole_geom, hole_label = holes[int(idx)]
-            if not geom.intersects(hole_geom):
+            if not silk_hits_hole(geom, hole_geom, clearance):
                 continue
             found.append(
                 DRCViolation(
@@ -1341,8 +1382,8 @@ def check_silk_hole_overlap(
                     message=f"Silkscreen {silk_label} overlaps drilled hole of {hole_label}",
                     location=location,
                     layer=layer,
-                    actual_value=0.0,
-                    required_value=0.0,
+                    actual_value=round(float(geom.distance(hole_geom)), 4),
+                    required_value=clearance,
                     items=(silk_label, hole_label),
                 )
             )
