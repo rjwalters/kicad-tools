@@ -36,8 +36,8 @@ same-net pour) is also declarable through a ``MaskEscapeIntent``.
 - ``same-net`` -- same net, but the entry/pass-through distinction does not
   apply: the conductor is an area (``zone``) or another pad, so it has no
   terminating endpoint to test.
-- (omitted) -- either net is unidentified or the opening is a merged region
-  with no single owner net.
+- (omitted) -- the conductor's net is unidentified, or none of the opening's
+  contributors has an identified net.
 
 While ``assessment.coverage != "complete"`` the findings are provisional:
 severity is capped at ``warning`` (never ``error``) and each message carries
