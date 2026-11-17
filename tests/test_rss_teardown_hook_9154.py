@@ -62,7 +62,12 @@ def _drop_cyclic_garbage(total_mb: int) -> None:
     del keep
 
 
-def test_teardown_hook_holds_rss_floor():
+def test_teardown_hook_holds_rss_floor(monkeypatch):
+    # Issue #9164: pin the floor so the sanity assertion below measures
+    # this test's own probe rather than inherited session state -- a
+    # stale-high ``_rss_floor_mb`` fails a healthy hook. monkeypatch
+    # restores whatever the session held once the test ends.
+    monkeypatch.setattr(conftest, "_rss_floor_mb", 0.0)
     floors = []
     for _ in range(_ROUNDS):
         _drop_cyclic_garbage(_PROBE_MB)
