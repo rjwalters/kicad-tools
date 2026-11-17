@@ -464,6 +464,8 @@ def inspect_attributed_mask_geometry(
                 "drill_mm": drill_mm,
                 "width_mm": width_mm,
                 "endpoints_mm": endpoints_mm,
+                # Declared pad/zone connection, as pcbnew loaded it (#9284).
+                "zone_connection": item.get("zone_connection"),
             }
         # Verify source and all sidecar bytes (including their absence) after
         # both native operations. The author files themselves were never passed.
@@ -503,6 +505,47 @@ def inspect_attributed_mask_geometry(
             ):
                 result.errors.append(layer + ": native per-object/full-layer material mismatch")
         return result
+
+
+def _valid_zone_connection(connection):
+    """Shape check for the worker's optional declared connection (issue #9284)."""
+
+    def millimetres(value, optional):
+        if value is None:
+            return optional
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(value)
+            and value >= 0
+        )
+
+    def code(value):
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    if not isinstance(connection, dict):
+        return False
+    if set(connection) == {"pad_connection", "thermal_gap_mm", "thermal_spoke_width_mm"}:
+        return (
+            code(connection["pad_connection"])
+            and millimetres(connection["thermal_gap_mm"], False)
+            and millimetres(connection["thermal_spoke_width_mm"], False)
+        )
+    if set(connection) == {
+        "pad",
+        "footprint",
+        "plated_through",
+        "thermal_gap_mm",
+        "thermal_spoke_width_mm",
+    }:
+        return (
+            code(connection["pad"])
+            and code(connection["footprint"])
+            and isinstance(connection["plated_through"], bool)
+            and millimetres(connection["thermal_gap_mm"], True)
+            and millimetres(connection["thermal_spoke_width_mm"], True)
+        )
+    return False
 
 
 def _read_worker_output(text, identities):
@@ -554,6 +597,9 @@ def _read_worker_output(text, identities):
             for v in item["margin_mm"].values()
         ):
             raise ValueError("Invalid native mask expansion")
+        connection = item.get("zone_connection")
+        if connection is not None and not _valid_zone_connection(connection):
+            raise ValueError("Invalid native zone connection")
         for regions in item["layers"].values():
             for region in regions:
                 for ring in [region["shell"], *region["holes"]]:

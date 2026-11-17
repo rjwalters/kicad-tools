@@ -235,10 +235,11 @@ def test_partial_does_not_trigger_incomplete():
 #: both rules ship. #9037 bumps it 9 -> 10 (``sharp_trace_corner`` row
 #: attribution narrows to the ``#bend`` population); again only the digit.
 #: #8858 bumps it 10 -> 11 (note-only change to the
-#: ``solder_mask_opening_exposing_trace`` row).
+#: ``solder_mask_opening_exposing_trace`` row). #9284 bumps it 11 -> 12
+#: (note-only change to the same row: the ``own_pour_thermal`` class).
 EXPECTED_DEFAULT_STANZA = (
     "\n"
-    "Fab DFM parity (JLCDFM, table v11, 2026-11-12): 0 danger-capable categories not covered\n"
+    "Fab DFM parity (JLCDFM, table v12, 2026-11-12): 0 danger-capable categories not covered\n"
     "  partial     trace_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     pad_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     solder_mask_opening_exposing_trace [danger-capable]: mask_to_copper\n"

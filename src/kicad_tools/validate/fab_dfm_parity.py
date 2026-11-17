@@ -82,7 +82,12 @@ Status = Literal["covered", "partial", "not_covered"]
 #: 11: #8858 -- ``solder_mask_opening_exposing_trace`` note records the
 #:    ``within_own_pad`` class (a clean single entry) and what stays an
 #:    error; status, attribution and danger-capability unchanged.
-TABLE_VERSION = 11
+#: 12: #9284 -- ``solder_mask_opening_exposing_trace`` note records the
+#:    ``own_pour_thermal`` class (a pad tied to its own pour by thermal
+#:    spokes, JLCDFM result on board 01) and the different-net pour parity
+#:    check (R2.1 0.13 mm warning, R1.1/R1.2 0.2 mm good); status,
+#:    attribution, thresholds and danger-capability unchanged.
+TABLE_VERSION = 12
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -207,6 +212,17 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "of 1,542 errors. Pass-through, along-edge and straddling tracks, shallow "
         "entries, arcs, vias and pours touching the pad, expansion rings wider than "
         "the construction budget, and different-net copper keep their verdict. "
+        "Since #9284 a second shape is `own_pour_thermal` at info: a plain pad "
+        "tied to its own same-net pour by thermal spokes, as pcbnew declares and "
+        "the fill shows, at 0 mm expansion with nothing beyond the pad, and within "
+        "the 0.15 mm examined band only 1-4 spoke crossings (pour body farther "
+        "out). JLCDFM listed no item for the four such pads on board 01 (relief "
+        "gaps 0.2 and 0.3 mm; #8858, 2026-11-17); same-net pairs were absent, not "
+        "rated Good. Solid connections, unconnected same-net pour, a pour body "
+        "inside 0.15 mm, and pour exposed by a positive expansion keep their "
+        "verdict. Different-net pour on that board agrees with the fab: R2.1 at "
+        "0.1275 mm is a kct warning (fab: warning, 0.13 mm); R1.1 and R1.2 at "
+        "0.2 mm get no finding (fab: good). "
         "Since #8914 an assessment that could not complete reports "
         "`mask_to_copper_incomplete` at info, so zero findings no longer read as a "
         "clean board.",

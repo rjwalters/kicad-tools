@@ -71,6 +71,20 @@ net, and any different-net copper all keep their measured verdict.
 measured quantities. "Same net" is the net pcbnew loads, which assigns a
 floating stub touching one pad to that pad's net. Evidence:
 ``docs/research/mask-to-copper-own-pad-8858.md``.
+
+A pad's own pour joined by thermal spokes (issue #9284)
+=======================================================
+
+A same-net ``zone`` whose only copper under mask beside a plain pad's opening is
+that pad's thermal spokes is ``own_pour_thermal`` at info: pcbnew declares
+thermal relief between the two, the fill overlaps the pad, nothing is exposed
+beyond the pad, and within the examined band (the warning clearance, else the
+danger clearance) the fill is 1 to 4 spoke crossings of at most the declared
+spoke width and nothing else, so the pour body lies beyond the band
+(``_own_pour_thermal``). JLCDFM listed no item for that shape on board 01
+(relief gaps 0.2 and 0.3 mm, 0 mm expansion). A solid connection, an
+unconnected same-net pour, a pour body inside the band, pour exposed by a
+positive expansion and different-net pour keep their measured verdict.
 """
 
 from __future__ import annotations
@@ -197,6 +211,12 @@ class MaskCopperMeasurement:
     # Issue #8858: copper under mask in the danger band beside the opening, in
     # excess of one clean entry crossing (mm²); None when not evaluated.
     beside_owner_excess_mm2: float | None = None
+    # Issue #9284: for an ``own_pour_thermal`` measurement, the number of
+    # thermal spokes found crossing the examined band, and the pad's declared
+    # effective relief gap and spoke width (mm). None otherwise.
+    pour_spokes: int | None = None
+    pour_relief_gap_mm: float | None = None
+    pour_spoke_width_mm: float | None = None
 
     def __post_init__(self):
         if self.disposition not in (
@@ -205,6 +225,7 @@ class MaskCopperMeasurement:
             "intentional",
             "warning",
             "within_own_pad",
+            "own_pour_thermal",
         ) or self.relation not in ("overlap", "touching", "disjoint"):
             raise ValueError("Invalid mask measurement disposition/relation")
         if self.mask_side not in (
@@ -225,6 +246,20 @@ class MaskCopperMeasurement:
             if flag is not None and not isinstance(flag, bool):
                 raise ValueError("Invalid mask measurement triage metadata")
         for extra in (self.exposed_beyond_owner_mm2, self.beside_owner_excess_mm2):
+            if extra is not None and (
+                isinstance(extra, bool)
+                or not isinstance(extra, (int, float))
+                or not math.isfinite(extra)
+                or extra < 0
+            ):
+                raise ValueError("Invalid mask measurement units/value")
+        if self.pour_spokes is not None and (
+            isinstance(self.pour_spokes, bool)
+            or not isinstance(self.pour_spokes, int)
+            or self.pour_spokes < 0
+        ):
+            raise ValueError("Invalid mask measurement units/value")
+        for extra in (self.pour_relief_gap_mm, self.pour_spoke_width_mm):
             if extra is not None and (
                 isinstance(extra, bool)
                 or not isinstance(extra, (int, float))
@@ -450,6 +485,132 @@ def _within_own_pad(opening, copper, owner_copper, owner, item, margin, clearanc
         if opening.distance(copper.centroid) < drill / 2 + uncertainty:
             return False, excess
     return True, excess
+
+
+#: pcbnew ZONE_CONNECTION codes (black-box read on the pinned image, #9284).
+_ZONE_CONNECTION_INHERITED = -1
+_ZONE_CONNECTION_THERMAL = 1
+_ZONE_CONNECTION_THT_THERMAL = 3
+
+#: pcbnew draws at most four thermal spokes per pad.
+_MAX_THERMAL_SPOKES = 4
+
+
+def _declared_thermal(owner, zone):
+    """``(relief_gap_mm, spoke_width_mm)`` when the pad declares thermal relief to *zone*.
+
+    Precedence as pcbnew stores it: the pad's own zone-connection override,
+    else its footprint's, else the zone's. Thermal relief only (or
+    "thermal for through-hole pads" on a plated through-hole pad); a solid,
+    none, or unknown connection returns None. Gap and spoke width are the
+    pad's overrides when set, else the zone's. Custom ``zone_connection``
+    DRC rules never get here: they make the native run incomplete.
+    """
+    pad = owner.get("zone_connection")
+    pour = zone.get("zone_connection")
+    if not isinstance(pad, dict) or not isinstance(pour, dict):
+        return None
+    if "pad" not in pad or "pad_connection" not in pour:
+        return None
+    effective = pad["pad"]
+    if effective == _ZONE_CONNECTION_INHERITED:
+        effective = pad["footprint"]
+    if effective == _ZONE_CONNECTION_INHERITED:
+        effective = pour["pad_connection"]
+    thermal = effective == _ZONE_CONNECTION_THERMAL or (
+        effective == _ZONE_CONNECTION_THT_THERMAL and pad["plated_through"]
+    )
+    if not thermal:
+        return None
+    gap = pad["thermal_gap_mm"] if pad["thermal_gap_mm"] is not None else pour["thermal_gap_mm"]
+    spoke = (
+        pad["thermal_spoke_width_mm"]
+        if pad["thermal_spoke_width_mm"] is not None
+        else pour["thermal_spoke_width_mm"]
+    )
+    if not gap or not spoke or gap <= 0 or spoke <= 0:
+        return None
+    return gap, spoke
+
+
+def _own_pour_thermal(opening, copper, owner_copper, owner, item, margin, band, uncertainty):
+    """``(qualifies, spokes, excess_mm2, gap_mm, spoke_mm)`` for issue #9284.
+
+    The fab evidence (#8858, JLCDFM on board 01) covers a pad joined to its
+    own same-net pour by **thermal spokes** at 0 mm mask expansion, with the
+    pour body a relief gap (0.2 and 0.3 mm there) away. It excuses exactly
+    that, and every condition is required:
+
+    1. The owner is a plain pad shape with a non-negative mask margin.
+    2. The pad declares thermal relief to this zone (``_declared_thermal``,
+       pcbnew's own connection data).
+    3. Direct connection: the fill overlaps the pad beyond ``u``.
+    4. Nothing exposed beyond the pad: ``opening ∩ fill − pad.buffer(u)`` is
+       empty, so a positive expansion with spoke copper in its ring fails.
+    5. Within ``band`` of the opening (the rule's whole examined reach: the
+       warning clearance, or the danger clearance without one) the fill is
+       spokes and nothing else. Each connected piece of
+       ``(fill − opening.buffer(u)) ∩ opening.buffer(band + u)`` must touch
+       the pad, run out to the band's outer edge, meet each of the band's two
+       edges along no more than ``1.45 × spoke_width`` (so pour body lying
+       along the band's outer edge never rides in on a spoke), not wrap
+       around the pad, and hold at most ``1.45 × spoke_width × band`` (one
+       perpendicular crossing, 1.45 as for track entries); there are 1 to 4
+       of them. Any
+       other copper in the band -- the pour body nearer than ``band``, an
+       island, a wider spoke -- is the returned excess and fails the class.
+
+    So the excused copper is the spokes, each crossing the pad edge, and
+    nothing else; the pour body must lie beyond ``band`` of the opening.
+    """
+    declared = _declared_thermal(owner, item)
+    if (
+        owner["kind"] not in _WITHIN_OWN_PAD_OWNER_KINDS
+        or margin < 0
+        or declared is None
+        or owner_copper.buffer(-uncertainty).intersection(copper.buffer(-uncertainty)).area <= 0
+        or opening.intersection(copper).difference(owner_copper.buffer(uncertainty)).area
+        > _AREA_EPSILON_MM2
+    ):
+        return False, None, None, None, None
+    gap, spoke = declared
+    inner = opening.buffer(uncertainty)
+    outer = opening.buffer(band + uncertainty)
+    ring = copper.difference(inner).intersection(outer)
+    pieces = [
+        piece
+        for piece in (getattr(ring, "geoms", None) or [ring])
+        if piece.geom_type in ("Polygon", "MultiPolygon") and piece.area > _AREA_EPSILON_MM2
+    ]
+    pieces = [p for piece in pieces for p in (getattr(piece, "geoms", None) or [piece])]
+    tolerance = max(uncertainty, 1e-6)
+    cap = _ENTRY_CROSSING_FACTOR * spoke * band
+    # A spoke meets each edge of the band across its own width only. Pour
+    # body inside the band lies *along* the outer edge, so a piece whose
+    # contact with either edge is longer than one crossing is not a spoke,
+    # however little area the body adds to it.
+    contact_cap = _ENTRY_CROSSING_FACTOR * spoke + 4 * tolerance
+    inner_edge = inner.boundary.buffer(tolerance)
+    outer_edge = outer.boundary.buffer(tolerance)
+    centre = opening.representative_point()
+    spokes = 0
+    excess = 0.0
+    for piece in pieces:
+        if (
+            piece.area <= cap + _AREA_EPSILON_MM2
+            and piece.distance(inner) <= tolerance
+            and piece.distance(outer.boundary) <= tolerance
+            and piece.boundary.intersection(inner_edge).length <= contact_cap
+            and piece.boundary.intersection(outer_edge).length <= contact_cap
+            and not piece.convex_hull.contains(centre)
+        ):
+            spokes += 1
+        else:
+            excess += piece.area
+    if spokes > _MAX_THERMAL_SPOKES:
+        excess = sum(piece.area for piece in pieces)
+    qualifies = spokes >= 1 and excess <= _AREA_EPSILON_MM2
+    return qualifies, spokes, excess, gap, spoke
 
 
 def assess_attributed_geometry(geometry, policy, intents=()):
@@ -696,6 +857,30 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                     )
                     if qualifies:
                         disposition = "within_own_pad"
+                pour_spokes = pour_gap = pour_spoke = None
+                if (
+                    disposition in ("violation", "uncertain")
+                    and same_net
+                    and item["kind"] == "zone"
+                    and owner_copper is not None
+                    and not owner_copper.is_empty
+                ):
+                    # Issue #9284: a pad tied to its own pour by thermal
+                    # spokes, the pour body beyond the examined band.
+                    thermal, spokes, pour_excess, gap, spoke = _own_pour_thermal(
+                        opening,
+                        copper,
+                        owner_copper,
+                        owner_items[0],
+                        item,
+                        margin,
+                        outer_limit,
+                        uncertainty,
+                    )
+                    if thermal:
+                        disposition = "own_pour_thermal"
+                        beside_excess = pour_excess
+                        pour_spokes, pour_gap, pour_spoke = spokes, gap, spoke
                 intent = (
                     approved.get((owners[0], identity, side))
                     if len(owners) == 1 and kind != "merged_region"
@@ -756,6 +941,9 @@ def assess_attributed_geometry(geometry, policy, intents=()):
                         owner_ref=owner_ref,
                         exposed_beyond_owner_mm2=beyond_owner,
                         beside_owner_excess_mm2=beside_excess,
+                        pour_spokes=pour_spokes,
+                        pour_relief_gap_mm=pour_gap,
+                        pour_spoke_width_mm=pour_spoke,
                     )
                 )
     return result
@@ -875,7 +1063,9 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         # ``within_own_pad`` (issue #8858): the opening exposes no copper
         # beyond the owner pad's own land, so there is no exposed trace to
         # report -- recorded at info, like a reviewed ``intentional`` escape.
-        if measurement.disposition in ("intentional", "within_own_pad"):
+        # ``own_pour_thermal`` (issue #9284): the only copper under mask
+        # beside the opening is the pad's own thermal spokes.
+        if measurement.disposition in ("intentional", "within_own_pad", "own_pour_thermal"):
             severity = "info"
         # Warning-disposition measurements and provisional (incomplete-run)
         # findings share the warning ceiling: neither may read as an error.
@@ -905,6 +1095,12 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
                 parts.append("same-net")
         elif measurement.same_net is False:
             parts.append("different-net")
+        if measurement.pour_spokes is not None:
+            parts.append(
+                f"{measurement.pour_spokes} thermal spokes "
+                f"(declared spoke {measurement.pour_spoke_width_mm:.9g} mm, "
+                f"relief gap {measurement.pour_relief_gap_mm:.9g} mm)"
+            )
         result.add(
             DRCViolation(
                 rule_id="mask_to_copper",
