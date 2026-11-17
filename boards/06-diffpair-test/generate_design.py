@@ -2238,10 +2238,15 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             band_trace_edge,
             # Issue #9186: grade the leg as its finished connector looks --
             # the sibling legs it touches are a copper union at the bend.
+            # Callers pass the full leg list, so the graded leg itself is
+            # filtered: self-inclusion lands (p0, p1) in the initial chain,
+            # making both endpoints satisfy the joins test and widening the
+            # 45-degree notch reach unconditionally.
             [
                 (LineString([a, b]).buffer(w / 2), w / 2)
                 for a, b, w in siblings
                 if math.hypot(b[0] - a[0], b[1] - a[1]) >= EPS
+                and (tuple(a), tuple(b)) != (tuple(p0), tuple(p1))
             ],
         )
 
