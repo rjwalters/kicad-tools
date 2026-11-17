@@ -60,12 +60,26 @@ def _straddle_slack_mb(rounds_done: int, live_count: int) -> float:
     madvise returns whole pages only, so each interior free run loses up to
     two partial pages (its start and end edges) to alignment, and each live
     separator pins a 64 KB block whose tail page is shared with the
-    neighbouring run. That waste is ~3 MB at 4K pages -- the measured
-    healthy-hook residual -- and scales linearly with the page size (~72 MB
-    at 64K pages), so the ceiling charges it explicitly instead of hiding
-    it in the fixed slack (Issue #9201). Analytical, not measured on a
-    large-page host: the term bounds the 4K measurement from the heap shape
-    (3 rounds x (128 runs x 2 edges + separators), x page size).
+    neighbouring run. The term is 4.5 MB at 4K pages after round 3 (1.5 MB
+    in round 1) and scales linearly with the page size (~72 MB at 64K pages
+    after round 3), so the ceiling charges it explicitly instead of hiding
+    it in the fixed slack (Issue #9201). It is precautionary margin, not
+    coverage of an observed residual: on a 4K host a healthy hook's
+    post-teardown RSS lands *below* ``baseline + live`` (measured -3.1 MB in
+    round 1, -2.5 MB in round 3, Issue #9214), so no positive straddle
+    waste has been seen to cover. Analytical, not measured on a large-page
+    host: the term bounds the heap shape (3 rounds x (128 runs x 2 edges +
+    separators), x page size).
+
+    Detection margin this trades away (Issue #9214): a hook with
+    ``malloc_trim(0)`` deleted retains ~68.4 MB over baseline (measured at
+    4K) and the assertion fires at round 1, where the straddle term is
+    smallest. Round-1 margin between that retention and the ceiling's
+    excess over baseline (8 MB live + 24 MB slack + straddle):
+    ~34.9 MB at 4K (measured), ~30.4 MB at 16K and ~12.4 MB at 64K
+    (both analysis only -- they assume retention stays at the 4K figure;
+    Issue #9202's large-page run should record the real number). The guard
+    is not defeated on 64K pages, but its margin narrows ~3x.
     """
     page_mb = conftest._PAGE_SIZE / 1048576
     runs_per_round = (_GARBAGE_MB * 1048576) // (_TRIM_RUN_PIECES * _TRIM_PIECE_BYTES)
@@ -172,8 +186,9 @@ def test_straddle_slack_scales_with_page_size(monkeypatch):
     Pins the analytical term against constant drift: 128 free runs per
     round, each with 2 straddling edges, plus 128 live separators per
     round = 384 pages per round, i.e. 1152 pages after 3 rounds -- ~4.5 MB
-    at 4K pages (comfortably above the ~3 MB measured healthy-hook
-    residual) and ~72 MB at 64K pages, the estimate a fixed
+    at 4K pages (precautionary: a healthy hook's measured residual at 4K is
+    negative, ~-3 MB below ``baseline + live``, not a positive waste) and
+    ~72 MB at 64K pages, the estimate a fixed
     ``_TRIM_SLACK_MB`` could not cover.
     """
     assert (_GARBAGE_MB * 1048576) // (_TRIM_RUN_PIECES * _TRIM_PIECE_BYTES) == 128
