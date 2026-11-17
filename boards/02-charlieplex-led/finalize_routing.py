@@ -86,17 +86,71 @@ def _relocate_escapes(pcb):
 
 
 def _relocate_pad_edge(path):
-    """Slide vias out of the mask-dam zone beside SMD pads (issue #7296)."""
+    """Slide vias out of the mask-dam zone beside SMD pads (issue #7296).
+
+    Issue #8979: also out of the fab-view same-net pad slit band, at the
+    edge ``kct check --mfr jlcpcb`` grades this 2-layer stackup's same-net
+    ``physical_copper_gap`` against (resolved from the profile table, never a
+    literal).  The grid router still seats some escape vias in that band
+    (C++ pathfinder, tracked by #8994).
+    """
     from kicad_tools.cli.relocate_in_pad_vias import relocate_pad_edge_vias
+    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
     from kicad_tools.manufacturers import get_profile
     from kicad_tools.schema.pcb import PCB
 
+    band = _resolve_mfr_pad_gap_edge("jlcpcb", 2)
+    if band is None:
+        raise ValueError("Board02 could not resolve the jlcpcb 2-layer pad slit band")
     pcb = PCB.load(path)
-    result = relocate_pad_edge_vias(pcb, get_profile("jlcpcb").get_design_rules(layers=2))
+    result = relocate_pad_edge_vias(
+        pcb, get_profile("jlcpcb").get_design_rules(layers=2), same_net_pad_gap_mm=band
+    )
     if result.skipped or result.unresolvable:
         raise ValueError(f"Board02 pad-edge vias left in the dam zone: {result}")
     if result.changed:
         pcb.save(path)
+
+
+def _net_vias(path):
+    """``(net name, x, y)`` of every via, in the file's absolute frame."""
+    doc = parse_file(path)
+    names = {n.get_int(0): n.get_string(1) for n in doc.find_children("net")}
+    vias = set()
+    for via in doc.find_all("via"):
+        at, net = via.find("at"), via.find("net")
+        name = names.get(net.get_int(0), net.get_string(0)) if net is not None else None
+        vias.add((name, round(at.get_float(0), 3), round(at.get_float(1), 3)))
+    return vias
+
+
+def _relocation_record(before, after, origin):
+    """Pair each via finalization added with the nearest one it removed, per net.
+
+    Issue #8979: ``output/readiness/drill-relocations.json`` is the reviewed
+    list ``package_release.py``'s ``smt_drill_clearance`` check re-locates on
+    the shipped board.  It used to be hand-recorded against one historical
+    route, so any regeneration orphaned it; deriving it from the vias this
+    recipe actually moved keeps it bound to the copper it describes.
+    """
+    removed = sorted(before - after, key=str)
+    record = []
+    for net, x, y in sorted(after - before, key=str):
+        same = [v for v in removed if v[0] == net]
+        if not same:
+            raise ValueError(f"Board02 finalization added an unpaired {net} via at {(x, y)}")
+        old = min(same, key=lambda v: (v[1] - x) ** 2 + (v[2] - y) ** 2)
+        removed.remove(old)
+        record.append(
+            {
+                "net": net,
+                "from": [round(old[1] - origin[0], 3), round(old[2] - origin[1], 3)],
+                "to": [round(x - origin[0], 3), round(y - origin[1], 3)],
+                "absolute_from": [old[1], old[2]],
+                "absolute_to": [x, y],
+            }
+        )
+    return record
 
 
 def _native_report(path):
@@ -174,6 +228,7 @@ def _finalize_candidate(path, schematic):
     from kicad_tools.validate.rules.via_in_pad import ViaInPadRule
 
     before = _geometry(PCB.load(path))
+    routed_vias = _net_vias(path)
     baseline = _lvs_report(schematic, path)
     pcb = parse_file(path)
     _relocate_escapes(pcb)
@@ -220,7 +275,7 @@ def _finalize_candidate(path, schematic):
         or lvs["bound_pad_count"] != baseline["bound_pad_count"]
     ):
         raise ValueError(f"Board02 copper LVS gate failed: {lvs}")
-    return True
+    return _relocation_record(routed_vias, _net_vias(path), pcb.board_origin)
 
 
 def finalize_routing(path: Path, schematic_path: Path | None = None) -> bool:
@@ -235,10 +290,14 @@ def finalize_routing(path: Path, schematic_path: Path | None = None) -> bool:
                 sidecar = path.with_suffix(suffix)
                 if sidecar.exists():
                     shutil.copy2(sidecar, candidate.with_suffix(suffix))
-            if not _finalize_candidate(candidate, schematic):
+            relocations = _finalize_candidate(candidate, schematic)
+            if relocations is False:
                 return False
             # The scratch directory is on the same filesystem; replacement is atomic.
             candidate.replace(path)
+            record = path.parent / "readiness" / "drill-relocations.json"
+            record.parent.mkdir(parents=True, exist_ok=True)
+            record.write_text(json.dumps(relocations, indent=2) + "\n")
             return True
     except Exception as exc:
         print(f"Board02 finalization failed; original PCB retained: {exc}", file=sys.stderr)

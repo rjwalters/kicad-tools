@@ -1581,6 +1581,43 @@ def _pad_edge_gap(
     return min(gaps) if gaps else None
 
 
+def _same_net_slit_ok(
+    x: float,
+    y: float,
+    radius: float,
+    pad_polygons: list[BaseGeometry],
+    band_mm: float,
+) -> bool:
+    """True iff a via annulus at ``(x, y)`` leaves no same-net slit (Issue #8979).
+
+    ``gap`` is the annulus-to-pad copper distance against the pad's true
+    outline (``validate.rules.clearance._pad_polygon``, the model
+    ``physical_copper_gap`` measures), negative when the annulus overlaps the
+    pad by ``-gap``.  Acceptable seats are ``gap >= band_mm`` (clear of the
+    band) or an overlap at least ``band_mm`` deep.
+
+    Deliberately stricter than the router's
+    :func:`~kicad_tools.router.via_clearance.same_net_pad_gap_acceptable`,
+    which accepts any ``gap <= 0`` measured to the pad's bounding box: on
+    board 02 that branch accepted a d0.6 via exactly tangent to an LED pad
+    (checker: 0.0082 mm slit) and one 0.034 mm into a roundrect's bbox corner
+    (checker: 0.0666 mm slit) -- a tangent annulus leaves facing wedges of
+    air beside the join, and a roundrect corner is not its bbox.  An overlap
+    shallower than the band is rejected conservatively (not every such seat
+    measures as a slit, but it sits within the band of a tangent one).  A via
+    whose centre is inside a pad is via-in-pad, another pass's concern, and
+    is accepted here.
+    """
+    center = Point(x, y)
+    for polygon in pad_polygons:
+        if polygon.contains(center):
+            continue
+        gap = polygon.distance(center) - radius
+        if -band_mm + 1e-6 < gap < band_mm - 1e-6:
+            return False
+    return True
+
+
 def _diff_pair_net_names(pcb: PCB) -> set[str]:
     """Names of nets that are one leg of a differential pair on this board.
 
@@ -1608,6 +1645,7 @@ def relocate_pad_edge_vias(
     *,
     nets: set[str] | None = None,
     min_hole_clearance_mm: float | None = None,
+    same_net_pad_gap_mm: float | None = None,
 ) -> RelocationResult:
     """Slide vias out of the mask-dam zone beside an SMD pad (Issue #7296).
 
@@ -1637,13 +1675,25 @@ def relocate_pad_edge_vias(
     USB2_D+ uncoupled length to 13.3 mm against a 12.7 mm limit.  The router
     keeps pair vias out of the zone (``min_via_pad_edge_gap``); re-route the
     pair rather than patch one leg.
+
+    ``same_net_pad_gap_mm`` (Issue #8979) additionally flags, and slides out,
+    a via whose annulus sits in the fab-view same-net pad slit band
+    ``(0, same_net_pad_gap_mm)`` beside one of its own net's SMD pads -- the
+    ``physical_copper_gap`` (same-net) finding ``kct check --mfr`` grades as
+    an error.  The gap is measured to the pad's true copper outline (the
+    checker's own pad model), see :func:`_same_net_slit_ok`.  Pass the
+    stackup's detection edge as resolved by
+    ``stitch_cmd._resolve_mfr_pad_gap_edge``; ``None`` or ``<= 0`` keeps the
+    guard off (the pre-#8979 behaviour, bit-for-bit).
     """
     from kicad_tools.core.project_clearance import ProjectClearanceError
+    from kicad_tools.validate.rules.clearance import _pad_polygon
     from kicad_tools.validate.rules.netclass_clearance_copper import netclass_pair_requirement
 
     result = RelocationResult()
     dam = float(getattr(design_rules, "min_solder_mask_dam_mm", 0.0) or 0.0)
-    if dam <= DRC_TOLERANCE:
+    band = float(same_net_pad_gap_mm or 0.0)
+    if dam <= DRC_TOLERANCE and band <= 0:
         return result
     setup = getattr(pcb, "setup", None)
     pad_to_mask = float(getattr(setup, "pad_to_mask_clearance", 0.0) or 0.0)
@@ -1671,18 +1721,39 @@ def relocate_pad_edge_vias(
         if not candidates:
             continue
         vx, vy = via.position
+        polygons = (
+            [poly for fp, pad, _bbox in candidates if (poly := _pad_polygon(pad, fp)) is not None]
+            if band > 0
+            else []
+        )
+
+        def in_slit_band(
+            x: float, y: float, _polys=polygons, _radius: float = float(via.size) / 2
+        ) -> bool:
+            return band > 0 and not _same_net_slit_ok(x, y, _radius, _polys, band)
+
         flagged = next(
             (
                 (fp, pad)
                 for fp, pad, bbox in candidates
                 if not via_inside_pad(via, bbox, pad, fp)
                 and (
-                    gap := drill_to_mask_aperture_gap(
-                        via, pad, fp, pad_to_mask_clearance=pad_to_mask
+                    (
+                        dam > DRC_TOLERANCE
+                        and (
+                            gap := drill_to_mask_aperture_gap(
+                                via, pad, fp, pad_to_mask_clearance=pad_to_mask
+                            )
+                        )
+                        is not None
+                        and gap < dam - DRC_TOLERANCE
+                    )
+                    or (
+                        band > 0
+                        and (poly := _pad_polygon(pad, fp)) is not None
+                        and not _same_net_slit_ok(vx, vy, float(via.size) / 2, [poly], band)
                     )
                 )
-                is not None
-                and gap < dam - DRC_TOLERANCE
             ),
             None,
         )
@@ -1759,9 +1830,13 @@ def relocate_pad_edge_vias(
             for step in steps:
                 # Whole micrometres: what KiCad's own serializer keeps.
                 nx, ny = round(vx + dx * step, 3), round(vy + dy * step, 3)
-                gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask)
-                if gap is None or gap < dam + 1e-6:
-                    # Still in the zone, or into a pad's copper: keep sliding.
+                if dam > DRC_TOLERANCE:
+                    gap = _pad_edge_gap(via, nx, ny, candidates, pad_to_mask)
+                    if gap is None or gap < dam + 1e-6:
+                        # Still in the zone, or into a pad's copper: keep sliding.
+                        continue
+                if in_slit_band(nx, ny):
+                    # Annulus still leaves a same-net slit (#8979): keep sliding.
                     continue
                 failure = _check_clearance(
                     pcb,

@@ -81,6 +81,13 @@ AUDITED_RAM_BYTES = 22
 #: (``LED_SMD:LED_0805_2012Metric``) until a4fa5481 (#5152) taught
 #: ``match_rotation_correction`` to also match the package name.
 ACCEPTED_CPL_CHANGES = {f"D{i}": ("0.0", "180.0") for i in range(1, 10)}
+#: Reviewed CPL placement moves: ref -> ((old X, old Y), (new X, new Y)).
+#: Issue #8979: R5 moved 1 mm left (hardware_design.py) so its RESET pad
+#: clears U1 pin 1's through-hole copper by the 2.0 mm ``tht_smd_spacing``
+#: floor (it was 1.872 mm).
+ACCEPTED_CPL_MOVES = {
+    "R5": (("140.5000mm", "-117.5000mm"), ("139.5000mm", "-117.5000mm")),
+}
 
 RENDERS = ("3d-back.png", "3d-front.png", "pcb-back.svg", "pcb-front.svg")
 #: Board-level sources archived in design-source.zip and hashed as inputs.
@@ -278,8 +285,13 @@ def _cpl_policy(old: bytes, new: bytes) -> None:
         ref = of[0]
         accepted = ACCEPTED_CPL_CHANGES.get(ref)
         rest_same = of[:5] == nf[:5] and of[6:] == nf[6:]
-        if not (accepted and rest_same and (of[5], nf[5]) == accepted):
-            raise RuntimeError(f"cpl_jlcpcb.csv changed for {ref}: {o!r} -> {n!r}; re-review")
+        if accepted and rest_same and (of[5], nf[5]) == accepted:
+            continue
+        move = ACCEPTED_CPL_MOVES.get(ref)
+        moved_only = of[:3] == nf[:3] and of[5:] == nf[5:]
+        if move and moved_only and ((of[3], of[4]), (nf[3], nf[4])) == move:
+            continue
+        raise RuntimeError(f"cpl_jlcpcb.csv changed for {ref}: {o!r} -> {n!r}; re-review")
 
 
 def _bom_policy(old: bytes, new: bytes) -> None:
