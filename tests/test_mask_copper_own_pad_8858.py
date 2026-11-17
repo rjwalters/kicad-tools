@@ -133,6 +133,18 @@ def test_perpendicular_entry_at_zero_expansion_is_within_own_pad_info():
     assert _severity(result) == "info"
     message = next(v.message for v in assessment_results(result).violations if OTHER in v.items)
     assert "within_own_pad" in message
+    # Issue #9269: the deciding beside-pad excess is printed, so a reader can
+    # see why a non-zero "beyond owner pad copper" is excused.
+    assert "beside owner excess" in message
+
+
+def test_message_omits_beside_owner_excess_when_not_evaluated():
+    """Issue #9269: no deciding value was measured, so none is printed."""
+    result, m = _only(_segment((0.5, 0.5), (2.0, 0.5), net="M"))
+    assert m.disposition == "violation"
+    assert m.beside_owner_excess_mm2 is None
+    message = next(v.message for v in assessment_results(result).violations if OTHER in v.items)
+    assert "beside owner excess" not in message
 
 
 def test_45_degree_entry_is_within_own_pad():

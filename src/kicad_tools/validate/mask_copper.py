@@ -889,6 +889,10 @@ def assessment_results(assessment: MaskCopperAssessment) -> DRCResults:
         parts.append(f"exposed area {measurement.exposed_area_mm2:.9g} mm²")
         if measurement.exposed_beyond_owner_mm2 is not None:
             parts.append(f"beyond owner pad copper {measurement.exposed_beyond_owner_mm2:.9g} mm²")
+        # Issue #9269: print the deciding beside-pad excess, so a reader can
+        # see why a non-zero "beyond owner pad copper" is excused.
+        if measurement.beside_owner_excess_mm2 is not None:
+            parts.append(f"beside owner excess {measurement.beside_owner_excess_mm2:.9g} mm²")
         parts.append(f"assessment measurement {index}")
         parts.append(f"opening {_opening_owner_label(measurement)}")
         copper_desc = measurement.conductor_kind or "unknown copper"
