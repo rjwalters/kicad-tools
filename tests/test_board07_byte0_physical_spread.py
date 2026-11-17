@@ -1,7 +1,7 @@
 """Board 07's SDRAM_BYTE0 must be matched on its real pad-to-pad paths (#9118).
 
-``validate.py`` sums every copper segment on a net, so a same-net loop the
-signal never travels counts as matched length.
+Before #9117, ``validate.py`` summed every copper segment on a net, so a
+same-net loop the signal never travelled counted as matched length.
 ``TraceLengthAnalyzer.measure_net_path`` (#9117) walks the shared
 copper-contact model instead and measures the shortest path through the
 copper.  On the post-#9102 copper DQ7 and LDQM carried such loops and the
