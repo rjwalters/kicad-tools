@@ -7,10 +7,11 @@ The selected native CLI and Python must both see the scratch paths unchanged.
 import hashlib
 import json
 import os
+import uuid
 from pathlib import Path
 
 import pytest
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString, Point, Polygon
 
 from kicad_tools.validate.mask_copper import (
     MaskCopperPolicy,
@@ -794,7 +795,8 @@ def test_native_worker_launches_under_explicit_command(monkeypatch, tmp_path):
         board, native_python_command=command, scratch_dir=tmp_path
     )
     assert seen["cmd"][:2] == command
-    assert result.provenance["native_python_command"] == command
+    # Executed argv is untouched; the recorded form is host-independent (#9055).
+    assert result.provenance["native_python_command"] == ["python3"]
 
 
 def test_native_worker_launches_in_pinned_container(monkeypatch, tmp_path):
@@ -826,8 +828,59 @@ def test_native_worker_launches_in_pinned_container(monkeypatch, tmp_path):
     stage = Path(cmd[-1]).parent
     assert f"{stage}:{stage}" in cmd
     assert f"KICAD_CONFIG_HOME={cfg}" in cmd
-    assert result.provenance["native_python_command"] == cmd[:-4]
+    # Executed argv keeps every mount; the recorded form drops them all and
+    # keeps only the pinned image and the entrypoint (#9055).
+    from kicad_tools.cli.kicad_toolchain import docker_image
+
+    assert result.provenance["native_python_command"] == [
+        "docker",
+        "run",
+        docker_image(),
+        "python3",
+    ]
     assert [Path(p).parent for p in cmd[-4:]] == [stage] * 4
+
+
+def test_recorded_provenance_is_stable_across_stage_dirs(monkeypatch, tmp_path):
+    """Two docker runs with different temp dirs record identical bytes (#9055).
+
+    Per-run stage mounts and config homes must not reach the recorded
+    provenance, so neither the provenance dict nor the ``export_profile_sha256``
+    binding hash (which folds it in) may vary between runs.
+    """
+    from kicad_tools.cli.kicad_toolchain import docker_image
+    from kicad_tools.validate.mask_copper import source_binding
+    from kicad_tools.validate.mask_copper_geometry import (
+        inspect_attributed_mask_geometry,
+    )
+
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: True)
+    monkeypatch.setattr(
+        "kicad_tools.validate.mask_copper_geometry.shutil.which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain._synced_model_dir", lambda: None)
+    provenance = []
+    bindings = []
+    for run in ("stage-one", "stage-two"):
+        scratch = tmp_path / run
+        scratch.mkdir()
+        cfg = scratch / "cfg"
+        cfg.mkdir()
+        monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.process_config_home", lambda: cfg)
+        board, _ = _fake_native_launch(monkeypatch, tmp_path / run)
+        _forbid_discovery(monkeypatch)
+        result = inspect_attributed_mask_geometry(board, scratch_dir=scratch)
+        assert result.provenance["native_python_command"] == [
+            "docker",
+            "run",
+            docker_image(),
+            "python3",
+        ]
+        provenance.append(result.provenance)
+        bindings.append(source_binding(result).export_profile_sha256)
+    assert provenance[0] == provenance[1]
+    assert bindings[0] == bindings[1]
 
 
 def test_native_worker_discovers_pcbnew_interpreter(monkeypatch, tmp_path):
@@ -848,7 +901,8 @@ def test_native_worker_discovers_pcbnew_interpreter(monkeypatch, tmp_path):
     result = inspect_attributed_mask_geometry(board, scratch_dir=tmp_path)
     assert seen["cmd"][0] == "/opt/kicad/bin/python3"
     assert probes == ["import pcbnew"]
-    assert result.provenance["native_python_command"] == ["/opt/kicad/bin/python3"]
+    # Recorded form keeps only the executable name (#9055); execution unchanged.
+    assert result.provenance["native_python_command"] == ["python3"]
 
 
 def test_unqualified_discovered_interpreter_still_fails_version_binding(monkeypatch, tmp_path):
@@ -932,3 +986,107 @@ def test_resolve_native_python_unavailable_reason_names_the_fix(monkeypatch, tmp
     assert "native_python_command" in reason
     assert "KCT_KICAD_DOCKER" in reason
     assert "Install KiCad" in reason
+
+
+# ---------------------------------------------------------------------------
+# A refilled pour pinch must repair, not drop the zone (Issue #9072)
+# ---------------------------------------------------------------------------
+
+#: Board 05's refilled GND pours hand the reader ring-self-intersecting fills:
+#: the outline walks a zero-width neck out and back over the same segment (the
+#: real F.Cu region traverses y=92.449496 from x=176.035 to x=177.35 twice,
+#: vertices 8469/8470 and 8541/8542), which shapely rejects as
+#: ``Ring Self-intersection`` even though the fill's area is unambiguous.
+#: This is the same topology scaled down: a lower slab and a finger joined
+#: through the doubled corridor, area 4 x 2 + 2 x 2 = 12.
+_POUR_PINCH = [
+    [0, 0],
+    [4, 0],
+    [4, 2],
+    [1, 2],
+    [3, 2],
+    [3, 4],
+    [1, 4],
+    [1, 2],
+    [0, 2],
+    [0, 0],
+]
+
+_ZONE_BODY = """(zone (net 0) (net_name "GND") (layer "F.Cu") (hatch edge .5)
+  (connect_pads (clearance .2)) (min_thickness .1) (filled_areas_thickness no) (fill yes)
+  (polygon (pts (xy 10 10) (xy 14 10) (xy 14 13) (xy 10 13)))
+  (filled_polygon (layer "F.Cu") (pts (xy 10 10) (xy 14 10) (xy 14 13) (xy 10 13))))"""
+
+
+def test_refilled_zone_fill_pinch_repairs_instead_of_dropping(monkeypatch, tmp_path):
+    """A pinched zone fill keeps its layer geometry and the assessment complete.
+
+    The extraction used to drop the whole layer for such a zone
+    (``invalid native object polygon``) and then flag the per-object/full-layer
+    mismatch, capping every board 05 finding at a provisional warning.
+    """
+    from shapely.validation import explain_validity
+
+    from kicad_tools.validate.gerber_geometry import repair_self_touching_polygon
+    from kicad_tools.validate.mask_copper_geometry import inspect_attributed_mask_geometry
+
+    pinched = Polygon(_POUR_PINCH)
+    assert not pinched.is_valid
+    assert "Ring Self-intersection" in explain_validity(pinched)
+    repaired = repair_self_touching_polygon(pinched)
+    assert repaired is not None and repaired.is_valid
+    assert repaired.area == pytest.approx(12.0)
+
+    zone_uuid = str(uuid.UUID(int=1))
+    board = _board(tmp_path / "board.kicad_pcb", _ZONE_BODY)
+    monkeypatch.setattr("kicad_tools.cli.kicad_toolchain.docker_fallback_enabled", lambda: False)
+    digest = "a" * 64
+
+    import subprocess
+
+    from kicad_tools.validate import mask_copper_geometry as mcg
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+
+    monkeypatch.setattr(
+        mcg,
+        "inspect_exported_mask_geometry",
+        lambda *a, **k: ExportedMaskGeometry(
+            source_sha256=digest,
+            project_sha256=None,
+            rules_sha256=None,
+            native_version=_QUALIFIED_VERSION,
+            export_identity={},
+        ),
+    )
+
+    def fake_run(cmd, **kw):
+        Path(cmd[-1]).write_text(
+            json.dumps(
+                {
+                    "schema": "kct.native-mask-objects.v1",
+                    "source_sha256": digest,
+                    "native_version": _QUALIFIED_VERSION,
+                    "errors": [],
+                    "max_error_mm": 0.0,
+                    "objects": {
+                        zone_uuid: {
+                            "kind": "ZONE",
+                            "net": "GND",
+                            "margin_mm": {},
+                            "layers": {"F.Cu": [{"shell": _POUR_PINCH, "holes": []}]},
+                        }
+                    },
+                }
+            )
+        )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(mcg.subprocess, "run", fake_run)
+    result = inspect_attributed_mask_geometry(
+        board, native_python_command=["/host/python3"], scratch_dir=tmp_path
+    )
+    assert not [e for e in result.errors if "invalid native object polygon" in e], result.errors
+    assert not [e for e in result.errors if "material mismatch" in e], result.errors
+    geometry = result.objects[zone_uuid]["layers_geometry"]["F.Cu"]
+    assert geometry.is_valid
+    assert geometry.area == pytest.approx(12.0)

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .gerber_geometry import repair_self_touching_polygon
 from .mask_export_geometry import MaskExportOptions, _inventory, inspect_exported_mask_geometry
 from .mask_geometry import _validate_structure
 
@@ -146,6 +147,22 @@ def _resolve_native_python_command(
         "pcbnew), set KCT_KICAD_DOCKER=1 to run the worker in the pinned "
         "kicad/kicad image (docker required), or set an explicit "
         "native_python_command in the kct.mask-copper-request.v1 request."
+    )
+
+
+def unqualified_native_version_reason(native_version: str) -> str:
+    """Refusal for a KiCad build outside ``QUALIFIED_NATIVE_VERSIONS``, with a way forward.
+
+    The refusal itself is unchanged -- an unqualified plot profile must keep
+    failing loudly -- but, like the no-interpreter reason (#8946), it names
+    what to do instead of only what went wrong (#9009).
+    """
+    return (
+        "Native object attribution requires a qualified KiCad plot profile "
+        f"({', '.join(QUALIFIED_NATIVE_VERSIONS)}); got "
+        f"{native_version or 'no version'}. Set KCT_KICAD_DOCKER=1 to run both "
+        "native passes in the pinned kicad/kicad image (docker required), or "
+        "install a qualified KiCad release."
     )
 
 
@@ -320,18 +337,19 @@ def inspect_attributed_mask_geometry(
             return result
         native_version = str(data.get("native_version", "")).split()
         if not native_version or native_version[0] not in QUALIFIED_NATIVE_VERSIONS:
-            result.errors.append(
-                "Native object attribution requires a qualified KiCad plot profile "
-                f"({', '.join(QUALIFIED_NATIVE_VERSIONS)}); got "
-                f"{data.get('native_version', '') or 'no version'}"
-            )
+            result.errors.append(unqualified_native_version_reason(data.get("native_version", "")))
             return result
         if str(data["native_version"]).split()[0] != exported.native_version.split()[0]:
             result.errors.append("Native object/export versions differ")
         result.errors.extend(data["errors"])
+        from kicad_tools.cli.kicad_toolchain import portable_native_command
+
+        # Recorded form is host-independent (#9055): the docker prefix keeps
+        # only the image and entrypoint, other commands only the basename.
+        # The executed argv (*command*) is untouched above.
         result.provenance = {
             "worker_sha256": _digest(worker_raw),
-            "native_python_command": command,
+            "native_python_command": portable_native_command(command),
             "native_version": data["native_version"],
             "objects_sha256": _digest(output.read_bytes()),
             "max_error_mm_per_construction": data["max_error_mm"],
@@ -345,7 +363,14 @@ def inspect_attributed_mask_geometry(
             geometries = {}
             for layer, regions in item["layers"].items():
                 polygons = [Polygon(region["shell"], region["holes"]) for region in regions]
-                if any(not p.is_valid for p in polygons):
+                # Zone fills come back from KiCad fractured: each hole is
+                # joined to the outline by a zero-width bridge, so the ring
+                # self-touches and shapely calls it invalid even though its
+                # area is unambiguous. Repair those exactly as the Gerber
+                # region reader does (area must survive), and still refuse
+                # anything the repair cannot account for (#9009).
+                polygons = [p if p.is_valid else repair_self_touching_polygon(p) for p in polygons]
+                if any(p is None for p in polygons):
                     result.errors.append(f"{identity}/{layer}: invalid native object polygon")
                     continue
                 geometries[layer] = unary_union(polygons)
@@ -367,12 +392,32 @@ def inspect_attributed_mask_geometry(
                 margin_source = "board:pad_to_mask_clearance=" + str(board_margin.get_value(0))
             else:
                 margin_source = "native-default (no explicit object/footprint/board margin)"
+            # Source identity for triage messages (issue #9038): the owning
+            # footprint's Reference and the pad number, so a finding can say
+            # `pad:R1/1` instead of an opaque UUID. Additive to the internal
+            # object dict; the report schema does not carry it.
+            pad_ref = None
+            if feature["kind"].startswith("pad:"):
+                number = feature["node"].get_string(0)
+                reference = None
+                if parent_node is not None:
+                    reference = next(
+                        (
+                            child.get_string(1)
+                            for child in parent_node.iter_children()
+                            if child.name == "property" and child.get_string(0) == "Reference"
+                        ),
+                        None,
+                    )
+                if reference and number:
+                    pad_ref = f"{reference}/{number}"
             result.objects[identity] = {
                 **{k: v for k, v in feature.items() if k != "node"},
                 "net": item["net"],
                 "layers_geometry": geometries,
                 "margin_mm": item["margin_mm"],
                 "margin_source": margin_source,
+                "pad_ref": pad_ref,
             }
         # Verify source and all sidecar bytes (including their absence) after
         # both native operations. The author files themselves were never passed.
@@ -443,7 +488,14 @@ def _read_worker_output(text, identities):
     if set(data["objects"]) - identities:
         raise ValueError("Unrequested native object identity")
     if missing:
-        data["errors"].extend("Missing native object: " + identity for identity in sorted(missing))
+        # The worker already names an identity it could not resolve uniquely;
+        # report each missing object once, not twice (#9009).
+        reported = {e for e in data["errors"] if e.endswith(": missing/ambiguous native object")}
+        data["errors"].extend(
+            "Missing native object: " + identity
+            for identity in sorted(missing)
+            if f"{identity}: missing/ambiguous native object" not in reported
+        )
     for identity, item in data["objects"].items():
         if not isinstance(item["net"], str) or not isinstance(item["kind"], str):
             raise ValueError("Invalid native object metadata")

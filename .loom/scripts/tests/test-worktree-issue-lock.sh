@@ -23,9 +23,8 @@
 #      refuses -- the #8553 incident this suite exists to pin.
 #
 # Needs a BUILT loom-daemon: the check is `loom-daemon worktree-lock
-# check-issue`, reached through worktree.sh's single delegating call (this
-# file is frozen by the file-size ratchet, so the decision logic lives in
-# Rust, not shell). Wired in the "Native Port Suites" CI job, which builds
+# check-issue`, reached through worktree.sh's single delegating call (the
+# decision logic lives in Rust, not shell). Wired in the "Native Port Suites" CI job, which builds
 # the binary, and FAILS rather than skips without one.
 #
 # Usage:

@@ -963,9 +963,11 @@ the plan/ordering/checklist; the per-phase shell is rendered in
    rendered from the SAME supervision block as the canonical unit
    (`systemd_supervision_block()`, #11058; see "Supervisor exit-code contract"
    below) so `restart --drain` (#4090) works on fleet
-   workers (#4640). `WorkingDirectory=` is pinned to a workspace clone as the
-   **#4292** token-pool-cwd workaround — the rendered unit carries a `#4292`
-   marker so it is removed when that lands.
+   workers (#4640). `WorkingDirectory=` is pinned to the first registered
+   workspace clone: the fleet unit sets no `LOOM_WORKSPACE`, so the daemon's
+   cwd seeds its primary workspace, and the pin keeps that a real repo root
+   rather than an incidental cwd (the same property the canonical unit
+   maintains — see "systemd note" below).
 9. **idle-shutdown** (optional, `--idle-shutdown-minutes N`) — a cron guard that
    powers the host off after N idle minutes. This is stage 2:
    `autonomous.idleExit` is stage 1. On daemon-managed hosts use a short guard
@@ -2426,7 +2428,7 @@ For each workspace the first rule that matches ends the attempt:
 | # | Check | State when it fails |
 |---|---|---|
 | 1 | the clone's `origin/HEAD` names the default branch (no remote is asked, `main` is never guessed) | `no-default-branch` |
-| 2 | HEAD is on it, not on another branch and not detached | `wrong-branch` |
+| 2 | HEAD is on it, not on another branch and not detached (a clean stranded one is first put back, see "A checkout stranded off the default branch" below) | `wrong-branch` |
 | 3 | no rebase, merge, cherry-pick, bisect or revert is in progress | `mid-operation` |
 | 4 | no main-health gate run is building in the checkout | `gate-in-flight` |
 | 4 | the daemon's self-update is not running in the checkout | `self-update-in-flight` |
@@ -2540,12 +2542,44 @@ blocker is Loom-owned:
   default branch when it is behind `origin/<default>`, has not moved for 6
   hours (`LOOM_CHECKOUT_DETACHED_AFTER_MINUTES`, from the newest line of the
   HEAD reflog) and every commit on it is Loom-owned. One at origin's tip is
-  left alone: it already serves current files (2am's `provision.sh` keeps
-  geode-fem detached at its newest green commit this way). The branch tip gets
-  its `-branch` rescue ref, then `checkout -B <default> --track
-  origin/<default>`. A pinned checkout that must stay detached while behind
-  (geode-fem while main is red) opts out with `git config --local
-  loom.checkoutFf.detached keep`.
+  not handled by this repair (see the next section for the stranded rule that
+  does put it back). The branch tip gets its `-branch` rescue ref, then
+  `checkout -B <default> --track origin/<default>`. A pass only ever visits
+  the registered workspaces (plus the daemon's own checkout), so a tool clone
+  kept outside them is never visited at all and needs no opt-out: that is how
+  2am holds its pinned geode-fem clone, under `~/.local/share/loom-worker/`
+  since 2am#5228. A checkout that must stay detached *inside* a workspace opts
+  out with `git config --local loom.checkoutFf.detached keep`.
+- **A checkout stranded off the default branch (#13588).** A HEAD on another
+  branch, or detached, whose tree is clean (no tracked change, no operation,
+  no `index.lock`, no live `git`) and that has not moved for 6 hours is put
+  back on the default branch (`checkout`, with a `refs/loom/rescue/<ts>` ref at
+  the old HEAD, kind `rehomed`); the ordinary rules then fast-forward it. It
+  qualifies only when every commit on HEAD is on `origin/<default>`, or HEAD
+  is the head of a pull request the forge reports as merged. The lookup is
+  `gh api repos/{owner}/{repo}/commits/<sha>/pulls`; no network, an open
+  breaker or any failure means "not merged" and the hold stays (fail closed).
+  It is the **last** question the rule asks (#13835), after the clean-tree,
+  `detached=keep`, six-hour and live-`git` checks, so a checkout any of those
+  refuses costs no forge read at all; only one they all pass pays for it.
+  **A squash- or rebase-merged PR's head qualifies too**, measured 2026-11-13
+  against the production query on three squash-merged rjwalters/loom PRs
+  (#9216 head `3e0393d7`, #9240 head `5f35ef2e`, #9212 head `07af0cb5`, none
+  of them an ancestor of `origin/main`):
+  `gh api repos/rjwalters/loom/commits/<sha>/pulls --jq 'any(.[]; .merged_at != null and .head.sha == "<sha>")'`
+  answered `true` for each. So the endpoint does list a merged PR for a head
+  commit that is not on the default branch, and a checkout left on a squashed
+  branch is put back rather than held.
+  An existing rescue ref already at that HEAD is reused instead of a new one
+  being made (#13835), so a `checkout` that fails the same way pass after pass
+  (the default branch checked out in another worktree, an untracked file in the
+  way) leaves one ref behind rather than one per pass.
+  `loom.checkoutFf.detached=keep` still pins a detached HEAD. The same
+  `fleet.autoApply`, host-hold and gate-in-flight rules as every write apply.
+  A stranded checkout that is not repaired stays `wrong-branch`, and is said
+  again as a `still-held` transition (log line plus an event on the checkout
+  topic) every hour (`LOOM_CHECKOUT_REREPORT_AFTER_MINUTES`) so it can be
+  counted, instead of once.
 - **Repair, in order.** `refs/loom/rescue/<UTC ts>` at HEAD (and `<ts>-branch`
   at the branch tip when an operation moved HEAD); the lock; `stash push` of
   the dirty paths as `loom-rescue-<ts>` (not during an operation, whose abort
@@ -2564,7 +2598,8 @@ blocker is Loom-owned:
   restart asks once more.
 - **Telemetry.** Each step is an event on `fleet_sync.checkout` with kind
   `rescue-ref`, `lock-removed`, `stash`, `abort`, `reattached`, `repaired`,
-  `repair-failed`, `rescue-pruned` or `escalated`, and a log line naming the repo path. Carrying
+  `rehomed`, `still-held`, `repair-failed`, `rescue-pruned` or `escalated`, and
+  a log line naming the repo path. Carrying
   these to SigNoz is #11386.
 
 ## Fleet model A/B — `sweep-experiment plan` (#8055 phase 1)

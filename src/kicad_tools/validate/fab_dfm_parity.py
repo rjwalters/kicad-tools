@@ -23,13 +23,17 @@ Rules for editing the table:
   pad fab bands (issue #8938) divides across the ``trace_spacing`` /
   ``pad_spacing`` rows; the bare id still matches the bandless emit sites
   (the legacy opt-in pass, zone-fill ``info`` findings), which stay on
-  ``pad_spacing``.  ``kct_rules`` is coverage *provenance*
+  ``pad_spacing``.  A ``#corner_class`` qualifier works the same way
+  (``sharp_trace_corner#bend``, issue #9037).  ``kct_rules`` is coverage *provenance*
   at mixed granularity (mostly category ids) and is deliberately NOT the
   attribution key.  Ids deliberately unattributed: ``*_incomplete`` run-state
   infos, ``clearance_net0_bridge`` and the zone-clearance ids (the fab does
-  not judge zone-fill clearance), and the kct-only silk advisories
+  not judge zone-fill clearance), the kct-only silk advisories
   (``silk_over_mask_opening``, ``silk_edge_clearance``, ``silk_overlap``,
-  ``silk_ref_obscured``, ``silkscreen_text_height``).
+  ``silk_ref_obscured``, ``silkscreen_text_height``), and the
+  ``sharp_trace_corner#junction`` population (issue #9037: 3-or-more-segment
+  vertices are kct-only over-reporting under the #8848 operator ruling --
+  the fab flagged none of them).
   ``count_rule_ids`` adds no parity *claim*; re-keying an existing row's
   attribution (as #8972 did) does bump :data:`TABLE_VERSION`, which moves
   the stanza header's version with it.
@@ -65,7 +69,17 @@ Status = Literal["covered", "partial", "not_covered"]
 #: 7: #8972 -- trace-band vs pad-band ``physical_copper_gap`` findings are
 #:    attributed to their own rows (``trace_spacing`` / ``pad_spacing``) via
 #:    the ``rule_id#fab_band`` qualified key; the rule id itself is unchanged.
-TABLE_VERSION = 7
+#: 8: #9034 -- pad_spacing note records the issue-reported kct:fab ratio as
+#:    reported-not-reproduced and the measured per-pair counting
+#:    granularity; no threshold, severity or attribution change.
+#: 9: #8840 -- ``sharp_trace_corner`` and ``missing_plated_through_hole``
+#:    rows flip from ``not_covered`` now that both rules ship.
+#: 10: #9037 -- the ``sharp_trace_corner`` row attributes only the
+#:    two-segment bend population (``sharp_trace_corner#bend``) to JLCDFM's
+#:    category; the junction findings are kct-only and stay deliberately
+#:    unattributed, separable via ``DRCViolation.corner_class``.  No status
+#:    or severity change.
+TABLE_VERSION = 10
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -157,7 +171,14 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
         "edge is an ERROR -- the fab cannot see nets and flags it regardless "
         "(the 4-layer 1 oz board's 6 danger are same-net via/track at "
         "0.065-0.099 mm from a pad edge); the finding is labelled `same_net` "
-        "so the class can be waived deliberately. Zone-fill (pour) gaps are "
+        "so the class can be waived deliberately. Reported, not reproduced "
+        "(#9034): on one further 4-layer board (not committed) kct reported "
+        "19 errors against the fab's 6 danger + 1 warning; the surplus cause "
+        "is unmeasured, but kct emits at most one finding per copper-source "
+        "pair per layer (closest measurement wins -- measured on the #9034 "
+        "fixture), so it cannot come from per-edge inflation within a pair. "
+        "No fab-sourced edge justifies a threshold change, so the stricter "
+        "same-net error stays (#8938). Zone-fill (pour) gaps are "
         "kct's own advisory only and report at info, not tiered: JLCDFM does "
         "not judge pour clearance -- 1,516 pour-to-pad gaps at 0.10-0.13 mm "
         "went unflagged on the #8938 board -- so kct's warning count for this "
@@ -263,19 +284,36 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
     ),
     ParityRow(
         "sharp_trace_corner",
-        (),
-        "not_covered",
+        ("sharp_trace_corner",),
+        "covered",
         False,
-        (),
-        "no rule; `sharp_trace_corner` is in flight on #8840. Observed 3 warnings.",
+        # Only the two-segment open-air bend is the fab-equivalent subset
+        # (issue #9037); the junction population (``#junction``) is kct-only
+        # over-reporting, reported by operator ruling on PR #8848 and left
+        # deliberately unattributed so the tallies cannot read as fab-aligned.
+        ("sharp_trace_corner#bend",),
+        "`sharp_trace_corner` (#8840) reports all 3 observed vertices (pinned in its "
+        "tests). Only its two-segment open-air bend population maps to JLCDFM's "
+        "category (``#bend``): the fab flagged 3 of the 8 bends on that board, and "
+        "no criterion separates the other 5 (leg length and width do not), so they "
+        "are recorded as unexplained, not covered (#9037). The rule's junction "
+        "findings (3+ segments at the vertex) are kct-only over-reporting -- 39 on "
+        "that board, 0 flagged -- carried as warnings under the #8848 operator "
+        "ruling, separable since #9037 via ``corner_class='junction'`` and not "
+        "attributed here. A vertex inside same-net pad copper is not reported "
+        "since #8848 (the board's 5 in-pad findings should be gone; pinned by "
+        "tests, not re-measured on the board).",
     ),
     ParityRow(
         "missing_plated_through_hole",
-        (),
-        "not_covered",
+        ("missing_plated_hole",),
+        "partial",
         False,
-        (),
-        "no rule; `missing_plated_hole` is in flight on #8840. Observed 2 warnings.",
+        ("missing_plated_hole",),
+        "`missing_plated_hole` (#8840) flags same-net top/bottom SMD pads whose "
+        "centres coincide (0.05 mm) with no same-net plated hole inside both; "
+        "overlapping pads with offset centres are not checked. The observed 2 "
+        "warnings were not re-measured.",
     ),
     ParityRow(
         "silkscreen_line_width",
@@ -337,6 +375,12 @@ class ParityReport:
 
     manufacturer: str
     rows: tuple[ParityRow, ...]
+    #: Issue #9062: TABLE-ONLY -- the JLCDFM parity categories that are
+    #: danger-capable and ``not_covered`` by this static table, whatever
+    #: happened on any given run.  It never reflects run-time state; the
+    #: categories whose check did not complete *this* run are serialized as
+    #: ``meta_checks.incomplete_categories`` in the ``kct check`` JSON
+    #: report.
     incomplete_categories: tuple[str, ...]
     #: Per-category kct-vs-fab counts; ``None`` unless a recorded result was
     #: supplied (issue #8940).
@@ -422,11 +466,18 @@ def attribution_key(v: DRCViolation) -> str:
     ``rule_id#fab_band`` for a fab-band-graded finding (issue #8972:
     ``physical_copper_gap`` is one rule id spanning the trace and pad fab
     bands of issue #8938, and the band it was graded against is carried on
-    :attr:`DRCViolation.fab_band`), the bare ``rule_id`` otherwise.  The
-    qualifier is attribution-only -- the rule id, and so
-    ``DRCViolation.key`` / every ``.kct_waivers.json`` entry, is unchanged.
+    :attr:`DRCViolation.fab_band`), ``rule_id#corner_class`` for a classified
+    ``sharp_trace_corner`` finding (issue #9037: the bend population maps to
+    JLCDFM's category, the junction population is kct-only), the bare
+    ``rule_id`` otherwise.  The qualifier is attribution-only -- the rule
+    id, and so ``DRCViolation.key`` / every ``.kct_waivers.json`` entry, is
+    unchanged.
     """
-    return f"{v.rule_id}#{v.fab_band}" if v.fab_band else v.rule_id
+    if v.fab_band:
+        return f"{v.rule_id}#{v.fab_band}"
+    if v.corner_class:
+        return f"{v.rule_id}#{v.corner_class}"
+    return v.rule_id
 
 
 def evaluate_parity(

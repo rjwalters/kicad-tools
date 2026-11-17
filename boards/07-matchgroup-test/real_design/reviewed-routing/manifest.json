@@ -3,11 +3,11 @@
   "method": "Reviewed physical routing with independently regenerated logical circuit and fresh validation on every build. Not a promise of fresh autorouter equivalence.",
   "authored_source_sha256": {
     "net_class_map.json": "585f0a4f1611d7582fdbe257465fde740d31ad7badec1dd6982bcca9cb4b3c28",
-    "sdram_demo.kicad_pcb": "180a55b19e5c7117fc97e9599debb81d119e61fa14d3f7513928f4657f1577f5",
+    "sdram_demo.kicad_pcb": "51663e0156b541c9602bef2bf55266bbfde02545fb5264a2909fdd4cf4b7163a",
     "sdram_demo.kicad_pro": "f6ee5e69e9cd153a3ca4b57f8fa9005f8c755774db97a6c5a6ad0c6378b79198"
   },
   "sha256": {
-    "sdram_demo.kicad_pcb": "4d2378a2ba7714c3c6d9f3b4be7852423cf2e2a1b4b6f82996c1c45e30e31879"
+    "sdram_demo.kicad_pcb": "cb1a2322eba616ebee1c1f66231cf05f898c7213d5e380deb19060bbdd900011"
   },
   "parts": 43,
   "bound_pads": 216,

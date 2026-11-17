@@ -18,8 +18,8 @@
 # each of those, and proves the refused start leaves the persisted flags the
 # watchdog replays as they were.
 #
-# WHY A SEPARATE SUITE: test-loom-daemon-start.sh is over the file-size
-# ratchet's 1000-line threshold and frozen (.loom/docs/file-size-policy.md).
+# WHY A SEPARATE SUITE: kept apart from test-loom-daemon-start.sh, whose
+# subject is the plain start path.
 # Needs a BUILT loom-daemon, so it is wired in ci.yml's "Native Port Suites
 # (daemon lifecycle, watchdog)" job. Hermetic: no network, no forge, no real
 # supervisor (every real start is --no-launchd --no-systemd).

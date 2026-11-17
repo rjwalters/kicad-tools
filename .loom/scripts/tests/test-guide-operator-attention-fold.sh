@@ -65,6 +65,7 @@ WORK_PLAN_MD="$REPO_ROOT/WORK_PLAN.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
+# Local assert_eq kept: takes (actual, expected, msg); shared assert_eq is (expected, actual, msg).
 assert_eq() {
     local actual="$1" expected="$2" msg="$3"
     if [[ "$actual" == "$expected" ]]; then pass "$msg"; else fail "$msg (got '$actual', expected '$expected')"; fi

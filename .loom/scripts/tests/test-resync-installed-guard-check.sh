@@ -2,8 +2,7 @@
 # test-resync-installed-guard-check.sh - guard-hook install check wiring in
 # resync-installed.sh (#7761)
 #
-# Split out of test-resync-installed.sh (which is frozen by the file-size
-# ratchet, .loom/docs/file-size-policy.md) rather than grown in place -- see
+# Split out of test-resync-installed.sh rather than grown in place -- see
 # that file's own header for the full fixture-based test catalog this one
 # does not duplicate.
 #

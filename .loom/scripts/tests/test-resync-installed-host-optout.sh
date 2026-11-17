@@ -2,8 +2,7 @@
 # test-resync-installed-host-optout.sh - the `loom-daemon host check` guard in
 # resync-installed.sh (#10179)
 #
-# Split out of test-resync-installed.sh (frozen by the file-size ratchet,
-# .loom/docs/file-size-policy.md) rather than grown in place.
+# Split out of test-resync-installed.sh rather than grown in place.
 #
 # resync-installed.sh asks the PATH `loom-daemon` whether this host opted out
 # (`loom-daemon host disable`). It must refuse ONLY on the affirmative disabled

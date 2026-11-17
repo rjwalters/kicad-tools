@@ -173,31 +173,9 @@ assert_lacks() {
 
 # Pin a literal snippet as present verbatim in a doc file — catches drift
 # between this test's mirrored control flow and the shipped markdown.
-assert_doc_contains() {
-    local file="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" "$file"; then
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    else
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg (missing literal in $file: $needle)"
-    fi
-}
 
 # Pin a literal snippet's ABSENCE — catches a regression back to the
 # short-circuiting bail-out.
-assert_doc_lacks() {
-    local file="$1" needle="$2" msg="$3"
-    TESTS_RUN=$((TESTS_RUN + 1))
-    if grep -qF -- "$needle" "$file"; then
-        TESTS_FAILED=$((TESTS_FAILED + 1))
-        echo -e "  ${RED}FAIL${NC}: $msg (found short-circuiting literal in $file: $needle)"
-    else
-        TESTS_PASSED=$((TESTS_PASSED + 1))
-        echo -e "  ${GREEN}PASS${NC}: $msg"
-    fi
-}
 
 # =====================================================================
 # PR state fixture — a tiny stand-in for the forge state a Champion tick

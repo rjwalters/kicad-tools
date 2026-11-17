@@ -3,8 +3,7 @@
 # staging worktree: which HEAD it is based on (#9550) and what its printed
 # staging recipe is allowed to `git add` (#9141)
 #
-# Split out of test-resync-installed.sh (frozen by the file-size ratchet,
-# .loom/docs/file-size-policy.md) rather than grown in place.
+# Split out of test-resync-installed.sh rather than grown in place.
 #
 #   (1) #9550 -- --output creates a DETACHED staging worktree, and it was
 #       always created at the PRIMARY checkout's HEAD. The documented use case

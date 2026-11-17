@@ -512,6 +512,10 @@ def _try_move(
                 or not pads_ok(key, new)
                 or not committed.seg_clear(a, b, nl, routes[key].net, half, own_clr[key])
                 or not boundary.segment_clear(a, b, half)
+                # Issue #9018: the repair moves copper it measured only
+                # against the FOREIGN pad it is clearing; refuse a move that
+                # would park the segment in its OWN net's slit band instead.
+                or not pf._own_net_pad_band_ok(a, b, nl, routes[key].net, half)
                 or (
                     keepouts is not None
                     and keepouts.segment_blocked(a, b, nl, routes[key].net, half)

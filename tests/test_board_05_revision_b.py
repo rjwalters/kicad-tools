@@ -102,3 +102,32 @@ def test_unrouted_board_carries_silk_dfm_corrections(hardware):
                     stroke = line.find("stroke")
                     if stroke is not None:
                         assert stroke.find("width").get_float(0) >= 0.15
+
+
+def test_routed_board_reports_zero_silk_hole_overlaps(tmp_path, hardware):
+    """Reviewed copper's vias must not cross any silkscreen ink (issue #9071).
+
+    The 13 findings on the strict gate were fixed at the source: reference
+    fields moved via ``REFERENCE_OFFSETS`` and crossing ``fp_line`` strokes
+    dropped/trimmed via ``SILK_STROKE_EDITS``, both applied in
+    ``build_pcb()`` so every rebuild path ships clean.  Replays the real
+    routing (the vias live in ``routing.json``, not ``hardware.py``) and
+    re-runs the checker's rule on the routed copper.
+    """
+    from kicad_tools.manufacturers import DesignRules
+    from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
+
+    routing = load("routing")
+    path = tmp_path / "board.kicad_pcb"
+    hardware.build_pcb().save(path)
+    routing.apply_routing(path)
+    pcb = PCB.load(path)
+    rules = DesignRules(
+        min_trace_width_mm=0.15,
+        min_clearance_mm=0.15,
+        min_via_drill_mm=0.3,
+        min_via_diameter_mm=0.6,
+        min_annular_ring_mm=0.3,
+    )
+    results = check_silk_hole_overlap(pcb, rules)
+    assert not results.violations, [v.message for v in results.violations]

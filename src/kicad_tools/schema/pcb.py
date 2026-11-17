@@ -4387,6 +4387,27 @@ class PCB:
                 return net
         return None
 
+    def _resolve_copper_net_ref(self, net: str | int, api: str) -> tuple[int, str]:
+        """Resolve the ``net`` argument of a copper-adding API (issue #9078).
+
+        A string is a net NAME (created via :meth:`add_net` when new); an
+        int is a net NUMBER, resolved through the board's net table.  Before
+        this split, an int reached ``add_net`` verbatim and minted a phantom
+        net NAMED after the number -- board-04's staircase-collapse copper
+        landed on ``(net 13 5)`` and shorted against the real net 5
+        ("OSC_OUT") copper the pads and vias still carried -- so an unknown
+        number now fails loudly instead of creating a net.
+
+        Returns ``(net_number, net_name)``.
+        """
+        if isinstance(net, int):
+            resolved = self.get_net(net)
+            if resolved is None:
+                raise ValueError(f"{api}: no net number {net} on this board")
+            return resolved.number, resolved.name
+        resolved = self.add_net(net)
+        return resolved.number, net
+
     @property
     def footprints(self) -> FootprintList:
         """All footprints.
@@ -6964,7 +6985,7 @@ class PCB:
         end: tuple[float, float] | tuple[str, str],
         width: float = 0.25,
         layer: str = "F.Cu",
-        net: str | None = None,
+        net: str | int | None = None,
         waypoints: list[tuple[float, float]] | None = None,
         dedupe: bool = True,
     ) -> list[Segment]:
@@ -6979,7 +7000,9 @@ class PCB:
             end: End position as (x, y) tuple or pad reference as (reference, pad_number)
             width: Trace width in mm (default 0.25)
             layer: Copper layer name (default "F.Cu")
-            net: Net name for the trace. Auto-detected from pads if not specified.
+            net: Net name for the trace, or a net NUMBER (int, issue #9078)
+                resolved through the board's net table.  Auto-detected from
+                pads if not specified.
             waypoints: Optional list of (x, y) intermediate points
             dedupe: When True (default, issue #4175), skip appending any
                 segment whose (net, layer, unordered endpoints, width) key
@@ -7036,11 +7059,16 @@ class PCB:
         else:
             end_pos = (float(end[0]), float(end[1]))
 
-        # Get net number
-        net_number = 0
-        if net:
-            net_obj = self.add_net(net)
-            net_number = net_obj.number
+        # Get net number.  A str is a net name; an int is a net NUMBER
+        # resolved through the net table (issue #9078) -- an int must never
+        # reach ``add_net``, which would mint a phantom net named after the
+        # number and land the new copper on a different net than its pads.
+        # Falsy refs (``None``, ``""``, ``0``) keep the historical no-net
+        # meaning.
+        if not net:
+            net_number, net_name = 0, ""
+        else:
+            net_number, net_name = self._resolve_copper_net_ref(net, "add_trace")
 
         # Build list of points: start -> waypoints -> end
         points = [start_pos]
@@ -7070,10 +7098,10 @@ class PCB:
                 width=width,
                 layer=layer,
                 net_number=net_number,
-                net_name=net or "",
+                net_name=net_name,
                 # Issue #4416: match the board's net-reference dialect so
                 # copper added to a name-based board stays name-based on save.
-                net_name_only=self._net_name_only_dialect and bool(net),
+                net_name_only=self._net_name_only_dialect and bool(net_name),
                 uuid=self.mint_uuid(
                     "segment", net_number, layer, *points[i], *points[i + 1], width
                 ),
@@ -7095,7 +7123,7 @@ class PCB:
         size: float = 0.6,
         drill: float = 0.3,
         layers: tuple[str, str] = ("F.Cu", "B.Cu"),
-        net: str | None = None,
+        net: str | int | None = None,
         dedupe: bool = True,
         via_type: str | None = None,
         tenting: tuple[str, str] | None = None,
@@ -7120,7 +7148,8 @@ class PCB:
             size: Via pad size in mm (default 0.6)
             drill: Via drill diameter in mm (default 0.3)
             layers: Tuple of layer names to connect (default ("F.Cu", "B.Cu"))
-            net: Net name for the via (optional)
+            net: Net name for the via, or a net NUMBER (int, issue #9078)
+                resolved through the board's net table (optional)
             dedupe: When True (default, issue #4175), skip appending a via
                 whose (net, rounded position, unordered layers) key already
                 exists on the board.
@@ -7153,10 +7182,14 @@ class PCB:
             warn_derived_via_type(logger, "add_via", layers, x, y, resolved_type)
         layers = cast("tuple[str, str]", resolved_layers)
 
-        net_number = 0
-        if net:
-            net_obj = self.add_net(net)
-            net_number = net_obj.number
+        # Net reference: str name or int NUMBER through the net table
+        # (issue #9078 -- mirrors ``add_trace``; an int must never mint a
+        # phantom net named after the number).  Falsy refs keep the
+        # historical no-net meaning.
+        if not net:
+            net_number, net_name = 0, ""
+        else:
+            net_number, net_name = self._resolve_copper_net_ref(net, "add_via")
 
         if dedupe:
             via_keys = self._ensure_via_keys()
@@ -7172,10 +7205,10 @@ class PCB:
             drill=drill,
             layers=list(layers),
             net_number=net_number,
-            net_name=net or "",
+            net_name=net_name,
             via_type=resolved_type,
             # Issue #4416: match the board's net-reference dialect (see add_trace).
-            net_name_only=self._net_name_only_dialect and bool(net),
+            net_name_only=self._net_name_only_dialect and bool(net_name),
             uuid=self.mint_uuid("via", net_number, x, y, size, drill, *layers),
         )
         if tenting is not None:

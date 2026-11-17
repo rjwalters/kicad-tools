@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # test-spawn-codex-session-exec.sh — the session-exec invocation's shape
-# (issue #8518), split out of test-spawn-codex.sh (over the file-size ratchet
-# threshold; new assertions go in a sibling, per file-size-policy.md).
+# (issue #8518), split out of test-spawn-codex.sh.
 #
 # What #8518 fixed: `docker exec` inherits neither the caller's cwd nor its
 # environment, so the released invocation started Codex in the image's WORKDIR

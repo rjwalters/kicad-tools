@@ -39,15 +39,14 @@ CHAMPION_MD="$PROMPT_DIR/champion-pr-merge.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/assert.sh"
 
-assert_eq() {
-    if [[ "$1" == "$2" ]]; then pass "$3"; else fail "$3 (expected '$1', got '$2')"; fi
-}
+# Local assert_contains kept: uses grep -qF matching; shared helper uses a bash substring match.
 assert_contains() {
     if grep -qF -- "$2" <<<"$1"; then pass "$3"; else fail "$3 (missing '$2' in: $1)"; fi
 }
 assert_lacks() {
     if grep -qF -- "$2" <<<"$1"; then fail "$3 (unexpected '$2' in: $1)"; else pass "$3"; fi
 }
+# Local assert_doc_contains kept: fixed $DOC/$CHAMPION_MD target, so (needle, msg) not (file, needle, msg).
 assert_doc_contains() {
     if grep -qF -- "$1" "$CHAMPION_MD"; then pass "$2"; else fail "$2 (missing literal: $1)"; fi
 }

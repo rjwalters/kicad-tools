@@ -201,9 +201,38 @@ def _arc(start, end, center, clockwise, tolerance):
     )
 
 
+def repair_self_touching_polygon(polygon):
+    """Repair a self-touching but area-unambiguous polygon, or return ``None``.
+
+    A self-touching contour is normal fill output (a pour pinching off at a
+    point, or a fractured fill whose holes are joined to the outline by
+    zero-width bridges) and carries unambiguous area: keep the polygonal parts
+    of the repair and require the shoelace area to survive it. An ambiguous
+    interior (e.g. a self-intersecting bow tie) changes the area and is
+    rejected (``None``). ``make_valid`` can also yield lower-dimensional parts
+    at the pinch, so filtering only a Polygon/MultiPolygon top-level result is
+    not enough. Shared by the Gerber region reader and the native per-object
+    reader (#9009) so both accept exactly the same repairs.
+    """
+    from shapely import make_valid  # type: ignore[import-untyped]
+    from shapely.ops import unary_union  # type: ignore[import-untyped]
+
+    repaired = make_valid(polygon)
+    parts = [
+        part
+        for part in getattr(repaired, "geoms", [repaired])
+        if part.geom_type in {"Polygon", "MultiPolygon"}
+    ]
+    if not parts:
+        return None
+    repaired = unary_union(parts)
+    if abs(repaired.area - polygon.area) > REGION_REPAIR_AREA_TOLERANCE * max(polygon.area, 1.0):
+        return None
+    return repaired
+
+
 def parse_gerber_geometry(data: str) -> GerberGeometry:
     """Read native Gerber with the KiCad %AMRoundRect macro subset; reject the rest."""
-    from shapely import make_valid  # type: ignore[import-untyped]
     from shapely.affinity import rotate, scale, translate  # type: ignore[import-untyped]
     from shapely.geometry import (  # type: ignore[import-untyped]
         GeometryCollection,
@@ -212,7 +241,7 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
         Polygon,
         box,
     )
-    from shapely.ops import unary_union  # type: ignore[import-untyped]
+    from shapely.ops import unary_union
 
     from .mask_geometry import _buffer
 
@@ -405,26 +434,8 @@ def parse_gerber_geometry(data: str) -> GerberGeometry:
                     raise GerberGeometryError("Open or degenerate region")
                 polygon = Polygon(points)
                 if not polygon.is_valid:
-                    # A self-touching contour is normal fill output (a pour
-                    # pinching off at a point) and carries unambiguous area:
-                    # keep the polygonal parts of the repair and require the
-                    # shoelace area to survive it. An ambiguous interior
-                    # (e.g. a self-intersecting bow tie) changes the area and
-                    # is still rejected. make_valid can also yield
-                    # lower-dimensional parts at the pinch, so filtering only
-                    # a Polygon/MultiPolygon top-level result is not enough.
-                    repaired = make_valid(polygon)
-                    parts = [
-                        part
-                        for part in getattr(repaired, "geoms", [repaired])
-                        if part.geom_type in {"Polygon", "MultiPolygon"}
-                    ]
-                    if not parts:
-                        raise GerberGeometryError("Invalid region contour")
-                    repaired = unary_union(parts)
-                    if abs(repaired.area - polygon.area) > REGION_REPAIR_AREA_TOLERANCE * max(
-                        polygon.area, 1.0
-                    ):
+                    repaired = repair_self_touching_polygon(polygon)
+                    if repaired is None:
                         raise GerberGeometryError("Invalid region contour")
                     polygon = repaired
                 shape = shape.symmetric_difference(polygon)

@@ -97,6 +97,7 @@ assert_not_symlink() {
     fi
 }
 
+# Local assert_grep kept: whole-line fixed-string (-xF) match; shared assert_grep is -E (#13258).
 assert_grep() {
     local pattern="$1" file="$2" msg="$3"
     if [[ -f "$file" ]] && grep -qxF "$pattern" "$file"; then

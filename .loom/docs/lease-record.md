@@ -36,6 +36,7 @@ documented here.
 - [Publish-side yield-exclusion (Loom #7639; kicad-tools #5331)](#publish-side-yield-exclusion-loom-7639-kicad-tools-5331)
 - [Reclaim instrumentation: absent vs. stale (#6320)](#reclaim-instrumentation-absent-vs-stale-6320)
 - [PR-phase leases (#9401)](#pr-phase-leases-9401)
+- [Dead-record pruning keeps comment volume bounded (#13245)](#dead-record-pruning-keeps-comment-volume-bounded-13245)
 <!-- toc:end -->
 
 ## What a lease record is

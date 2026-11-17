@@ -12,6 +12,12 @@ Finally, :meth:`SilkscreenRepairer.repair_pad_clearance` clips footprint
 ``fp_line`` silk strokes back from same-side pad apertures, using the same
 geometry as the ``silk_pad_clearance`` check so the fix and the check agree.
 
+:meth:`SilkscreenRepairer.repair_hole_clearance` clips footprint silk
+``fp_line`` / ``fp_poly`` / ``fp_rect`` graphics off drilled holes (vias of any
+tenting, PTH and NPTH), using the ``silk_hole_overlap`` check's own hole set
+and threshold (Issue #9054).  It is an explicit post-routing recipe step: the
+router never calls it, so routing never changes footprint silk (#5744).
+
 This operates on the raw SExp tree (not the read-only schema dataclasses) so
 that modifications can be written back to disk, following the same pattern as
 ``repair_clearance.py`` and ``fix_vias_cmd.py``.
@@ -131,6 +137,54 @@ class PadClearanceRepairResult:
     def total_fixed(self) -> int:
         return len(self.fixes)
 
+
+@dataclass
+class HoleClearanceFix:
+    """Record of one footprint silk graphic clipped (or removed) off a drill."""
+
+    footprint_ref: str
+    element_type: str  # "fp_line" | "fp_poly" | "fp_rect"
+    layer: str
+    action: str  # "trimmed" or "removed"
+    holes: list[str] = field(default_factory=list)  # drill labels it crossed
+    #: Printed ink area (mm^2) before and after the clip, from the same
+    #: geometry ``silk_hole_overlap`` measures -- how much silk was removed.
+    old_area: float = 0.0
+    new_area: float = 0.0
+    pieces: int = 0  # graphics left in the file in its place
+
+
+@dataclass
+class HoleClearanceRepairResult:
+    """Aggregate result of a silk-to-drill clip pass (Issue #9054)."""
+
+    min_clearance_mm: float = 0.0
+    fixes: list[HoleClearanceFix] = field(default_factory=list)
+    skipped: list[PadClearanceSkip] = field(default_factory=list)
+    #: ``silk_hole_overlap`` findings on *graphics* still present after the
+    #: pass, re-measured with the real rule (empty on a dry run).
+    residual: list[str] = field(default_factory=list)
+    #: ``silk_hole_overlap`` findings on *text* -- never clipped; move the
+    #: text with ``kct place-silk-refs`` instead.
+    text_residual: list[str] = field(default_factory=list)
+    #: Refs the ``pin1_marker`` check accepted before the clip and rejects
+    #: after (empty on a dry run): the clip removed the last ink it
+    #: recognised.  A warning, not an error -- a fab cannot print ink over a
+    #: hole -- but the marker is gone and must be re-added by hand.
+    marker_lost: list[str] = field(default_factory=list)
+
+    @property
+    def total_fixed(self) -> int:
+        return len(self.fixes)
+
+
+# Polygon remnants smaller than this (mm^2) are dropped: with the outline
+# stroke they print as a dot, not a shape.
+_MIN_POLY_AREA_MM2 = 1e-3
+
+# Deterministic UUIDs for graphics the hole clip has to split, so the same
+# input always yields byte-identical output (uuid4 would not).
+_HOLE_CLIP_NAMESPACE = _uuid.UUID("9054c1ea-0000-4000-8000-000000009054")
 
 # Extra margin (mm) added to the keep-out so clipped endpoints land strictly
 # on the clear side of the check's tolerance despite polygonal buffers.
@@ -402,6 +456,330 @@ class SilkscreenRepairer:
                 self._rewrite_line(fp_node, node, [[inverse(c) for c in g.coords] for g in parts])
         return result
 
+    def repair_hole_clearance(
+        self,
+        min_clearance_mm: float | None = None,
+        dry_run: bool = False,
+    ) -> HoleClearanceRepairResult:
+        """Clip footprint silk graphics off drilled holes (Issue #9054).
+
+        The holes are :func:`~kicad_tools.validate.rules.silkscreen.iter_drill_holes`
+        -- every via drill whatever its tenting, fill or capping, plus PTH
+        and NPTH pad holes -- and the default clearance is
+        :data:`~kicad_tools.silkscreen._silk_defaults.SILK_HOLE_CLEARANCE_MM`,
+        the very set and threshold ``silk_hole_overlap`` uses, so a clipped
+        board passes that check.  Each hole clips only the silk side(s) it
+        actually pierces: a blind/micro via reaches one outer side, a
+        buried via neither (Issue #9076).
+
+        Only the silk that has to go is removed: each graphic's printed ink
+        must stay ``min_clearance_mm`` (plus a 1 um safety margin) from the
+        drill, so
+
+        * an ``fp_line`` keeps the part(s) of its centreline outside the
+          drill buffered by ``min_clearance_mm + width / 2`` (a line crossed
+          in the middle becomes two lines; remnants shorter than the stroke
+          width are dropped);
+        * a filled ``fp_poly`` / ``fp_rect`` becomes the polygon minus that
+          buffered drill, written as ``fp_poly`` (several when the cut splits
+          it; a drill wholly inside the shape is cut out through a
+          zero-width keyhole bridge, since ``fp_poly`` has no holes);
+        * an unfilled ``fp_poly`` / ``fp_rect`` outline is no longer closed
+          once cut, so its surviving runs are written as ``fp_line`` graphics.
+
+        Graphics that do not reach a hole are left byte-identical.  Arcs and
+        circles are not clipped and are reported in ``result.skipped``.  Text
+        is never touched: text over a hole lands in
+        ``result.text_residual`` for ``kct place-silk-refs``.  Pin-1 markers
+        are clipped like any other silk -- a fab cannot print ink over a
+        hole -- and a footprint whose marker the clip erased outright is
+        reported in ``result.marker_lost``; re-add that marker by hand,
+        clear of the hole.
+
+        This is an explicit recipe step, run after routing so it sees the
+        routed vias.  The router never calls it (#5744).
+
+        Args:
+            min_clearance_mm: Required silk-to-hole clearance in mm; defaults
+                to ``SILK_HOLE_CLEARANCE_MM``.
+            dry_run: If ``True``, collect fixes but do not mutate the tree.
+        """
+        from kicad_tools._shapely import require_shapely
+
+        require_shapely("silk hole clearance repair")
+        from shapely.geometry import LineString, Polygon
+        from shapely.ops import linemerge, unary_union
+        from shapely.strtree import STRtree
+
+        from kicad_tools.schema.pcb import Footprint, FootprintGraphic, Via
+        from kicad_tools.silkscreen._silk_defaults import SILK_HOLE_CLEARANCE_MM
+        from kicad_tools.validate.rules.silkscreen import (
+            _fp_transform,
+            _silk_side,
+            _stroke_geometry,
+            iter_drill_holes,
+            silk_hits_hole,
+        )
+
+        clearance = SILK_HOLE_CLEARANCE_MM if min_clearance_mm is None else min_clearance_mm
+        if not math.isfinite(clearance) or clearance < 0:
+            raise ValueError("min_clearance_mm must be finite and nonnegative")
+        result = HoleClearanceRepairResult(min_clearance_mm=clearance)
+
+        # Everything in the file's own frame: footprints and vias parsed
+        # straight from the tree (no board-origin shift), as the pad clip does.
+        footprints = [(node, Footprint.from_sexp(node)) for node in _find_all_footprints(self.doc)]
+        vias = [Via.from_sexp(node) for node in self.doc.find_all("via")]
+        holes = list(iter_drill_holes(vias, [fp for _n, fp in footprints]))
+        # Before any node is edited: refs the pin-1 rule still recognises a
+        # marker for, so only the clip's own losses get reported (a dry run
+        # edits nothing and never needs the before-state).
+        markers_before: set[str] = set()
+        if not dry_run and holes:
+            markers_before = self._pin1_marker_refs()
+        if holes:
+            tree = STRtree([g for g, _label, _sides in holes])
+
+            for fp_node, fp in footprints:
+                fp_ref = self._footprint_reference(fp_node)
+                fwd = _fp_transform(fp)
+                theta = math.radians(fp.rotation)
+                cos_t, sin_t = math.cos(theta), math.sin(theta)
+
+                def inverse(pt, fp=fp, cos_t=cos_t, sin_t=sin_t):
+                    dx, dy = pt[0] - fp.position[0], pt[1] - fp.position[1]
+                    return (dx * cos_t - dy * sin_t, dx * sin_t + dy * cos_t)
+
+                for node in [
+                    n
+                    for n in fp_node.children
+                    if not n.is_atom and n.name in _FP_GRAPHIC_KINDS and self._is_silkscreen(n)
+                ]:
+                    kind = _FP_GRAPHIC_KINDS[str(node.name)]
+                    graphic = FootprintGraphic.from_sexp(node, kind)
+                    silk_side = _silk_side(graphic.layer)
+                    if silk_side is None:
+                        continue
+                    ink = _stroke_geometry(graphic, fwd)
+                    if ink is None or ink.is_empty:
+                        continue
+                    query = ink.buffer(clearance) if clearance > 0 else ink
+                    hit = [
+                        holes[int(i)]
+                        for i in tree.query(query)
+                        if silk_side in holes[int(i)][2]
+                        and silk_hits_hole(ink, holes[int(i)][0], clearance)
+                    ]
+                    if not hit:
+                        continue
+                    labels = sorted(label for _g, label, _sides in hit)
+                    if kind not in ("line", "poly", "rect"):
+                        result.skipped.append(
+                            PadClearanceSkip(
+                                footprint_ref=fp_ref,
+                                element_type=str(node.name),
+                                layer=graphic.layer,
+                                reason=f"fp_{kind} is not clipped (over {', '.join(labels)})",
+                            )
+                        )
+                        continue
+
+                    width = max(graphic.stroke_width, 0.0)
+                    keepout = unary_union([g for g, _label, _sides in hit]).buffer(
+                        clearance + width / 2.0 + _CLIP_EPSILON_MM, quad_segs=16
+                    )
+                    if kind == "line":
+                        outline = [fwd(graphic.start), fwd(graphic.end)]
+                        filled = False
+                    elif kind == "rect":
+                        (sx, sy), (ex, ey) = graphic.start, graphic.end
+                        outline = [fwd(p) for p in ((sx, sy), (ex, sy), (ex, ey), (sx, ey))]
+                        filled = graphic.is_filled
+                    else:
+                        outline = [fwd(p) for p in graphic.points]
+                        filled = graphic.is_filled
+
+                    new_lines: list[list[tuple[float, float]]] = []
+                    new_polys: list[list[tuple[float, float]]] = []
+                    if filled:
+                        shape = Polygon(outline)
+                        if not shape.is_valid:
+                            shape = shape.buffer(0)
+                        kept = shape.difference(keepout)
+                        rings = [
+                            _keyhole_ring(part)
+                            for part in getattr(kept, "geoms", [kept])
+                            if part.geom_type == "Polygon" and part.area >= _MIN_POLY_AREA_MM2
+                        ]
+                        if any(r is None for r in rings):
+                            result.skipped.append(
+                                PadClearanceSkip(
+                                    footprint_ref=fp_ref,
+                                    element_type=str(node.name),
+                                    layer=graphic.layer,
+                                    reason="clipped shape has a hole no bridge can reach",
+                                )
+                            )
+                            continue
+                        new_polys = [r for r in rings if r is not None]
+                    else:
+                        closed = kind != "line"
+                        path = LineString(outline + [outline[0]] if closed else outline)
+                        kept = path.difference(keepout)
+                        if closed and kept.geom_type == "MultiLineString":
+                            kept = linemerge(kept)
+                        for part in getattr(kept, "geoms", [kept]):
+                            if part.geom_type != "LineString" or part.is_empty:
+                                continue
+                            if part.length < max(width, 1e-6):
+                                continue
+                            new_lines.append(list(part.coords))
+
+                    new_ink = unary_union(
+                        [LineString(c).buffer(width / 2.0) for c in new_lines]
+                        + [Polygon(c).buffer(0).buffer(width / 2.0) for c in new_polys]
+                    )
+                    pieces = (
+                        sum(len(c) - 1 for c in new_lines) if kind != "line" else len(new_lines)
+                    ) + len(new_polys)
+                    result.fixes.append(
+                        HoleClearanceFix(
+                            footprint_ref=fp_ref,
+                            element_type=str(node.name),
+                            layer=graphic.layer,
+                            action="trimmed" if pieces else "removed",
+                            holes=labels,
+                            old_area=float(ink.area),
+                            new_area=float(new_ink.area) if not new_ink.is_empty else 0.0,
+                            pieces=pieces,
+                        )
+                    )
+                    if dry_run:
+                        continue
+                    replacements = self._hole_clip_nodes(
+                        node,
+                        fp_ref,
+                        kind,
+                        [[inverse(p) for p in c] for c in new_lines],
+                        [[inverse(p) for p in c] for c in new_polys],
+                    )
+                    index = fp_node.children.index(node)
+                    fp_node.children[index : index + 1] = replacements
+
+        if not dry_run:
+            self._measure_hole_residual(result)
+            if holes:
+                result.marker_lost = sorted(self._pin1_marker_refs() - markers_before)
+        return result
+
+    def _pin1_marker_refs(self) -> set[str]:
+        """Refs the ``pin1_marker`` rule flags on the current tree."""
+        from kicad_tools.manufacturers.base import DesignRules
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp.parser import parse_string, serialize_sexp
+        from kicad_tools.validate.rules.pin1_marker import Pin1MarkerRule
+
+        rules = DesignRules(
+            min_trace_width_mm=0.0,
+            min_clearance_mm=0.0,
+            min_via_drill_mm=0.0,
+            min_via_diameter_mm=0.0,
+            min_annular_ring_mm=0.0,
+        )
+        pcb = PCB(parse_string(serialize_sexp(self.doc)))
+        return {
+            violation.items[0]
+            for violation in Pin1MarkerRule().check(pcb, rules).violations
+            if violation.rule_id.startswith("pin1_marker") and violation.items
+        }
+
+    def _measure_hole_residual(self, result: HoleClearanceRepairResult) -> None:
+        """Re-measure ``silk_hole_overlap`` with the real rule on the edited tree."""
+        import re
+
+        from kicad_tools.manufacturers.base import DesignRules
+        from kicad_tools.schema.pcb import PCB
+        from kicad_tools.sexp.parser import parse_string, serialize_sexp
+        from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
+
+        rules = DesignRules(
+            min_trace_width_mm=0.0,
+            min_clearance_mm=0.0,
+            min_via_drill_mm=0.0,
+            min_via_diameter_mm=0.0,
+            min_annular_ring_mm=0.0,
+        )
+        pcb = PCB(parse_string(serialize_sexp(self.doc)))
+        graphic = re.compile(r"(\((fp|gr)_[a-z]+\)$)|(^gr_(line|rect|circle|arc|poly|curve)$)")
+        for violation in check_silk_hole_overlap(pcb, rules).violations:
+            text = " / ".join(violation.items)
+            if graphic.search(violation.items[0]):
+                result.residual.append(text)
+            else:
+                result.text_residual.append(text)
+
+    @staticmethod
+    def _hole_clip_nodes(
+        node: SExp,
+        fp_ref: str,
+        kind: str,
+        lines: list[list[tuple[float, float]]],
+        polys: list[list[tuple[float, float]]],
+    ) -> list[SExp]:
+        """Build the graphics that replace ``node`` (footprint-local coords).
+
+        A clipped ``fp_line`` keeps its own node (and UUID) for its first
+        piece; everything else is new, with a UUID derived from the source
+        UUID and the piece geometry so the output is reproducible.
+        """
+        from kicad_tools.sexp.parser import parse_string, serialize_sexp
+
+        source_uuid = ""
+        if (uid := node.find("uuid")) is not None:
+            source_uuid = str(uid.get_first_atom() or "")
+        layer = str(node.find("layer").get_first_atom())  # type: ignore[union-attr]
+        stroke = node.find("stroke")
+        stroke_text = (
+            serialize_sexp(stroke) if stroke is not None else "(stroke (width 0) (type solid))"
+        )
+
+        def fmt(value: float) -> str:
+            return f"{round(value, 6):g}" if abs(value) >= 1e-6 else "0"
+
+        def new_uuid(tag: str, coords: list[tuple[float, float]]) -> str:
+            key = f"{fp_ref}:{source_uuid}:{tag}:{[(fmt(x), fmt(y)) for x, y in coords]}"
+            return str(_uuid.uuid5(_HOLE_CLIP_NAMESPACE, key))
+
+        out: list[SExp] = []
+        for index, coords in enumerate(lines):
+            segments = list(zip(coords, coords[1:], strict=False))
+            for seg_index, (start, end) in enumerate(segments):
+                if kind == "line" and index == 0 and seg_index == 0:
+                    clone = node
+                    for tag, (x, y) in (("start", start), ("end", end)):
+                        child = clone.find(tag)
+                        assert child is not None
+                        child.set_atom(0, round(x, 6))
+                        child.set_atom(1, round(y, 6))
+                    out.append(clone)
+                    continue
+                out.append(
+                    parse_string(
+                        f"(fp_line (start {fmt(start[0])} {fmt(start[1])}) "
+                        f"(end {fmt(end[0])} {fmt(end[1])}) {stroke_text} "
+                        f'(layer "{layer}") (uuid "{new_uuid("line", [start, end])}"))'
+                    )
+                )
+        for coords in polys:
+            xys = " ".join(f"(xy {fmt(x)} {fmt(y)})" for x, y in coords)
+            out.append(
+                parse_string(
+                    f"(fp_poly (pts {xys}) {stroke_text} (fill yes) "
+                    f'(layer "{layer}") (uuid "{new_uuid("poly", coords)}"))'
+                )
+            )
+        return out
+
     @staticmethod
     def _rewrite_line(parent: SExp, node: SExp, pieces: list[list[tuple[float, float]]]) -> None:
         """Replace ``node`` in ``parent`` by one fp_line per piece (none = delete)."""
@@ -652,3 +1030,37 @@ class SilkscreenRepairer:
                 thickness_node = font.find("thickness")
                 assert thickness_node is not None
                 thickness_node.set_atom(0, new_thickness)
+
+
+def _keyhole_ring(polygon) -> list[tuple[float, float]] | None:
+    """One vertex ring for *polygon*, bridging any interior holes.
+
+    ``fp_poly`` stores a single outline, so a polygon with an interior ring
+    (a drill cut out of the middle of a filled shape) is written the way
+    KiCad's own fractured polygons are: the exterior walks to the nearest
+    hole vertex along a zero-width bridge, round the hole, and back.  The
+    bridge is chosen between the closest vertex pair whose segment stays
+    inside the shape.  Returns ``None`` if no such bridge exists.
+    """
+    from shapely.geometry import LineString, Polygon
+    from shapely.geometry.polygon import orient  # type: ignore[import-untyped]
+
+    polygon = orient(polygon, 1.0)  # exterior CCW, interiors CW
+    ring = list(polygon.exterior.coords)[:-1]
+    if not polygon.interiors:
+        return ring
+    inside = polygon.buffer(1e-7)
+    for interior in polygon.interiors:
+        hole = list(interior.coords)[:-1]
+        pairs = sorted(
+            ((math.dist(a, b), i, j) for i, a in enumerate(ring) for j, b in enumerate(hole)),
+        )
+        for _d, i, j in pairs:
+            if inside.contains(LineString([ring[i], hole[j]])):
+                ring = ring[: i + 1] + hole[j:] + hole[: j + 1] + ring[i:]
+                break
+        else:
+            return None
+    if Polygon(ring).buffer(0).symmetric_difference(polygon).area > 1e-6:
+        return None
+    return ring

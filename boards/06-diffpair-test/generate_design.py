@@ -1071,6 +1071,36 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             return False
         return copper_gap(kshape, entry[8]) < required - CLEARANCE_EPSILON_MM
 
+    # Issue #9007: the #8975 same-net fab-view slit band, one definition for
+    # every via seat this pass grades -- the repair ladder's ``_via_ok`` and
+    # the grid escape's through vias alike.  The annulus diameter is an
+    # explicit argument because the two populations differ (0.45 mm repair
+    # vias vs the ``EscapeRules`` diameter at the escape, 0.5 mm here):
+    # sharing the checks while hardcoding one via's geometry is exactly the
+    # drift that let the escape ship the pad band alone (#9007).
+    def _same_net_band_ok(net: str, vx: float, vy: float, diameter: float) -> bool:
+        """Same-net fab-view slit band for an annulus of ``diameter`` (#8975, #9007)."""
+        vgeom = Point(vx, vy).buffer(diameter / 2)
+        for seg_i in seg_tree.candidates(vgeom.bounds, MAX_CLEAR):
+            geom, snet, _lay = seg_index[seg_i]
+            # The annulus exists on every layer, so any-layer same-net
+            # copper counts; overlap is one copper union.  ``+ 1.5e-3``
+            # covers both sides' 3-decimal write rounding so a seat
+            # accepted here cannot land a hair under the edge on disk.
+            if snet == net and 1e-6 < vgeom.distance(geom) < SAME_NET_TRACE_GAP_MM + 1.5e-3:
+                return False
+        for pt, vnet, radius, _drill in via_index:
+            if (
+                vnet == net
+                and 1e-6 < vgeom.distance(pt.buffer(radius)) < SAME_NET_TRACE_GAP_MM + 1.5e-3
+            ):
+                return False
+        # The pad population's edge (#8957); no-op when the profile ships
+        # no ``pad_spacing`` entry (edge 0).
+        return same_net_pad_gap_acceptable(
+            vx, vy, diameter, smd_bboxes_by_net.get(net), SAME_NET_PAD_GAP_MM
+        )
+
     def _via_ok(net: str, vx: float, vy: float) -> bool:
         if not (min_x <= vx <= max_x and min_y <= vy <= max_y):
             return False
@@ -1097,13 +1127,6 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
             geom, snet, _lay = seg_index[seg_i]
             if snet != net and vgeom.distance(geom) < _pair_clear(net, snet):
                 return False
-            # Issue #8975: same-net slit band (the annulus exists on every
-            # layer, so any-layer same-net copper counts), graded on the
-            # trace population's edge; overlap is one copper union.
-            # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding so a
-            # seat accepted here cannot land a hair under the edge on disk.
-            if snet == net and 1e-6 < vgeom.distance(geom) < SAME_NET_TRACE_GAP_MM + 1.5e-3:
-                return False
         for pt, vnet, radius, drill in via_index:
             # Issue #3855: drill hole-to-hole vs existing repair vias
             # using actual drill sizes, edge-to-edge against the 0.5 mm floor.
@@ -1111,27 +1134,11 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                 return False
             if vnet != net and vgeom.distance(pt.buffer(radius)) < _pair_clear(net, vnet):
                 return False
-            # Issue #8975: same-net annulus-to-annulus slit band.
-            if (
-                vnet == net
-                and 1e-6 < vgeom.distance(pt.buffer(radius)) < SAME_NET_TRACE_GAP_MM + 1.5e-3
-            ):
-                return False
-        # Issue #8975: fab-view slit band vs same-net SMD pads.  A via seated
-        # a hair outside its own pad leaves two wedge-shaped notches of air
-        # beside the connecting stub, which the fab-view
-        # ``physical_copper_gap`` grading reports as errors regardless of
-        # nets (#8938).  Reject the (0, edge) band; touching/overlapping
-        # would be one copper union and at/beyond the edge is not a finding,
-        # but the annulus-level via-in-pad ban above already rejects every
-        # overlapping seat at this site, so in practice the ladder walks
-        # outward to the first rung at/beyond the fab error edge.  No-op
-        # when the resolved edge is 0 (fab ships no pad_spacing table).
-        if not same_net_pad_gap_acceptable(
-            vx, vy, 2 * VIA_R, smd_bboxes_by_net.get(net), SAME_NET_PAD_GAP_MM
-        ):
-            return False
-        return True
+        # Issue #8975 / #9007: all three same-net fab-view slit-band
+        # families (segment, annulus, SMD pad) live in the shared
+        # diameter-parameterised helper above, graded on the repair via's
+        # own 0.45 mm annulus.
+        return _same_net_band_ok(net, vx, vy, 2 * VIA_R)
 
     def _path_ok(
         net: str,
@@ -1632,16 +1639,15 @@ def _repair_pour_connectivity(pcb_path: Path, net_names: list[str]) -> tuple[int
                         [own[i] for i in primary],
                         (min_x, min_y, max_x, max_y),
                         escape_rules,
-                        # Issue #8975: the escape's own seat validation knows
-                        # foreign-net copper but not same-net fab-view
-                        # grading -- reject through-via nodes whose annulus
-                        # gap to a same-net SMD pad falls in the slit band,
-                        # same contract ``_via_ok`` enforces for the other
-                        # sub-stages.
-                        via_ok=lambda p, _net=net, _dia=escape_rules.diameter: (
-                            same_net_pad_gap_acceptable(
-                                p[0], p[1], _dia, smd_bboxes_by_net.get(_net), SAME_NET_PAD_GAP_MM
-                            )
+                        # Issue #8975 / #9007: the escape's own seat
+                        # validation knows foreign-net copper but not
+                        # same-net fab-view grading -- reject through-via
+                        # nodes in the same-net slit band, the same three
+                        # families (segment, annulus, SMD pad) and contract
+                        # ``_via_ok`` enforces for the other sub-stages,
+                        # graded on the escape via's own diameter.
+                        via_ok=lambda p, _net=net, _dia=escape_rules.diameter: _same_net_band_ok(
+                            _net, p[0], p[1], _dia
                         ),
                     )
                     if escape is None:
@@ -1903,6 +1909,57 @@ def _relocate_pad_edge_vias(pcb_path: Path) -> int:
     return len(result.moved)
 
 
+def _same_net_band_edges() -> tuple[float, float]:
+    """``(pad_edge_mm, trace_edge_mm)`` of the fab-view same-net slit band.
+
+    Resolved from the jlcpcb ``4layer_1oz`` profile entry, exactly as
+    ``_repair_pour_connectivity`` does (#8975): never literals.  A missing
+    entry yields ``(0.0, 0.0)``, which disables the band rather than guessing.
+    """
+    from kicad_tools.manufacturers import get_profile
+    from kicad_tools.validate.rules.physical_gap import fab_gap_policy_from_entry
+
+    entry = get_profile("jlcpcb").get_dfm_entry(4, 1.0, 0.5)
+    policy = fab_gap_policy_from_entry(entry) if entry else None
+    if policy is None:
+        return 0.0, 0.0
+    return policy.pad.error_edge_mm, policy.trace.error_edge_mm
+
+
+def _same_net_band_seat_ok(
+    x: float,
+    y: float,
+    diameter: float,
+    same_net_copper: list,
+    same_net_pad_bboxes: list[tuple[float, float, float, float]],
+    pad_edge_mm: float,
+    trace_edge_mm: float,
+) -> bool:
+    """True iff a via annulus at ``(x, y)`` opens no same-net fab-view slit.
+
+    Issue #9114 (the #8938/#8957/#8975 family).  The annulus exists on every
+    layer, so same-net copper on any layer counts.  Overlap/touch is one
+    copper union (no slit); only the open band ``(0, edge)`` is rejected.
+    ``same_net_copper`` holds shapely geometries (segment outlines and via
+    circles) of the via's own net; the via being moved must be excluded by
+    the caller.  Pads grade on the pad population's edge, everything else
+    on the trace population's.  An edge of ``0`` disables that test.
+    """
+    from shapely.geometry import Point
+
+    from kicad_tools.router.via_clearance import same_net_pad_gap_acceptable
+
+    if not same_net_pad_gap_acceptable(x, y, diameter, same_net_pad_bboxes, pad_edge_mm):
+        return False
+    if trace_edge_mm <= 0:
+        return True
+    annulus = Point(x, y).buffer(diameter / 2)
+    # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding (as #8975).
+    return not any(
+        1e-6 < annulus.distance(geom) < trace_edge_mm + 1.5e-3 for geom in same_net_copper
+    )
+
+
 def _legalize_signal_vias(pcb_path: Path) -> int:
     """Repair same-net ``via_in_pad`` + sub-floor drill-pair residuals.
 
@@ -2042,6 +2099,35 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             if path.distance(Point(v["x"], v["y"]).buffer(v["drill"] / 2)) < HOLE_CLEAR:
                 return False
         return True
+
+    band_pad_edge, band_trace_edge = _same_net_band_edges()
+
+    def _band_ok(net, vx, vy, diameter, skip_uuid):
+        """Same-net fab-view slit band at a relocation seat (#9114).
+
+        Reads the current round's ``segs``/``vias``/``pads`` at call time
+        (all rebound every round).  The relocating via itself is excluded;
+        its replacement connectors touch the new annulus, so they are a
+        union, not a slit.
+        """
+        copper = [
+            LineString([(s["x1"], s["y1"]), (s["x2"], s["y2"])]).buffer(s["w"] / 2)
+            for s in segs
+            if s["net"] == net
+        ]
+        copper += [
+            Point(o["x"], o["y"]).buffer(o["size"] / 2)
+            for o in vias
+            if o["net"] == net and o["uuid"] != skip_uuid
+        ]
+        bboxes = [
+            _pad_box(p).bounds
+            for p in pads
+            if p["net"] == net and not p["is_th"] and p["drill"] <= 0
+        ]
+        return _same_net_band_seat_ok(
+            vx, vy, diameter, copper, bboxes, band_pad_edge, band_trace_edge
+        )
 
     def _is_45(dx: float, dy: float) -> bool:
         return abs(dx) < EPS or abs(dy) < EPS or abs(abs(dx) - abs(dy)) < EPS
@@ -2374,6 +2460,8 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                         net, nx, ny, radius, v["drill"], vias, skip_uuids={v["uuid"]}
                     ):
                         continue
+                    if not _band_ok(net, nx, ny, v["size"], v["uuid"]):
+                        continue
                     connectors = {
                         lay: _connector_legs(net, [(v["x"], v["y"]), (nx, ny)], lay, 0.15)
                         for lay in conn_layers
@@ -2478,6 +2566,13 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     [(box(*bounds), {"In1.Cu"}, "relocation")],
                     bounds,
                     rules,
+                    # Issue #9114: the escape's seat validation knows foreign
+                    # copper but not same-net fab-view grading; its BFS lands
+                    # on the first node past the own pad's blocker (~0.005 mm
+                    # annulus gap, inside the (0, edge) slit band).
+                    via_ok=lambda p, _net=net, _dia=rules.diameter, _uuid=v["uuid"]: _band_ok(
+                        _net, p[0], p[1], _dia, _uuid
+                    ),
                 )
                 if escape is not None:
                     connectors = {
@@ -3336,7 +3431,19 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         DETERMINISTIC_BUDGET_MAX_SEARCH_ITERATIONS,
         DETERMINISTIC_BUDGET_PER_NET_ITERATIONS,
     )
+
+    # Issue #8994: resolve the same-net pad slit-band edge for this board's
+    # stackup (jlcpcb 4-layer 1oz -> 0.15 mm) and thread it onto the rules.
+    # The recipe builds ``DesignRules`` in-process and never runs
+    # ``kct route``, so ``route_cmd``'s resolution point (#8974) never fires
+    # here -- without this the field stays ``None`` and the C++ pathfinder's
+    # band guard (the drain for this board's via-banded population) is OFF.
+    # Resolved from the profile table via the stitcher's helper, never a
+    # literal, matching ``route_cmd``'s own resolution idiom.
+    from kicad_tools.cli.stitch_cmd import _resolve_mfr_pad_gap_edge
     from kicad_tools.router import DesignRules, DifferentialPairConfig, load_pcb_for_routing
+
+    _same_net_pad_gap_edge_mm = _resolve_mfr_pad_gap_edge("jlcpcb", 4, 1.0)
     from kicad_tools.router.optimizer import (
         GridCollisionChecker,
         OptimizationConfig,
@@ -3391,6 +3498,10 @@ def route_pcb(input_path: Path, output_path: Path) -> bool:
         # Issue #7908: hard-block the inner layers for the classes that
         # declare ``avoid_layers`` (MIPI_CLK).
         strict_layers=True,
+        # Issue #8994: the same-net pad slit-band detection edge for the
+        # jlcpcb 4-layer 1oz stackup, so the C++ pathfinder's via seats stay
+        # out of the band ``kct check`` grades (``physical_copper_gap``).
+        same_net_pad_gap_band_edge_mm=_same_net_pad_gap_edge_mm,
     )
 
     # Power and ground nets are handled via copper pours on the inner planes

@@ -1098,8 +1098,8 @@ OUT="$(cd "$REPO" && bash "$SCRIPT" 2>&1)"
 # resync_paths list ("would be: git add <paths>") so this test can keep
 # verifying suggest_commit_if_resync_only_dirt()'s CLASSIFICATION logic
 # (retired-vs-shipped, #7336) independently of how the commit is landed. The
-# precondition below asserts both halves (this file is frozen by the
-# file-size ratchet, #7711, so the #6646 check shares the existing assertion).
+# precondition below asserts both halves (the #6646 check shares the existing
+# assertion, #7711).
 commit_line="$(grep -m1 'would be: git add ' <<<"$OUT")"
 if [[ -n "$commit_line" ]] && grep -q './.loom/scripts/land-resync-commit\.sh' <<<"$OUT"; then
     pass "(#7336/#6646) fixture precondition: the dirty-tree commit hint fired and recommends land-resync-commit.sh"
@@ -2894,8 +2894,7 @@ else
 fi
 
 # The guard-hook install check's wiring (#7761) is covered by the sibling
-# test-resync-installed-guard-check.sh, split out to respect this file's
-# file-size ratchet (.loom/docs/file-size-policy.md).
+# test-resync-installed-guard-check.sh.
 
 # --- summary -----------------------------------------------------------------
 echo ""

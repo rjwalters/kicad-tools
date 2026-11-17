@@ -1289,9 +1289,7 @@ Out-of-band rolling is also where this already belongs: the daemon's own
 auto-update loop and `loom-daemon-watchdog.sh` converge the host from *outside*
 any merge. A version-floor refusal is a **symptom** of that loop being behind
 (on 2026-09-18 it was deferring behind the build-stampede guard, #8252) — fix
-it there, not by restarting the daemon from inside its own child. The secondary
-argument, that `merge-pr.sh` is frozen at its file-size-ratchet ceiling, only
-reinforces a conclusion the process model already forces.
+it there, not by restarting the daemon from inside its own child.
 
 ### `rm` of the installed `loom-daemon` binary is denied in an agent session (#5675)
 

@@ -74,7 +74,7 @@ def test_actual_cli_missing_policy_never_prints_or_serializes_pass(tmp_path, cap
     )
 
 
-def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False):
+def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False, conductor_kind="segment"):
     from shapely.geometry import box
 
     from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
@@ -97,7 +97,7 @@ def toy_geometry(conductor_x=1.2, *, overlap_owner=False, merged=False):
                 "margin_mm": {"F.Mask": 0.1},
             },
             other: {
-                "kind": "segment",
+                "kind": conductor_kind,
                 "net": "N",
                 "layers_geometry": {"F.Cu": trace},
                 "margin_mm": {},
@@ -156,12 +156,20 @@ def test_same_net_conductor_inside_the_opening_is_flagged_without_overlapping(
     assert measurement.disposition == "violation"
     assert measurement.exposed_area_mm2 == pytest.approx(exposed_area_mm2, abs=0.000002)
     assert [(v.rule_id, v.severity) for v in assessment_results(result).violations] == [
-        ("mask_to_copper", "error")
+        ("mask_to_copper", "error"),
+        ("mask_to_copper_openings", "info"),
     ]
 
 
-@pytest.mark.parametrize("mode", ["valid", "stale", "wrong_uuid", "wrong_layer", "disconnected"])
-def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode):
+@pytest.mark.parametrize(
+    "conductor_kind,mode",
+    [
+        (kind, mode)
+        for kind in ("segment", "zone")
+        for mode in ("valid", "stale", "wrong_uuid", "wrong_layer", "disconnected")
+    ],
+)
+def test_intent_requires_exact_binding_identity_layer_and_direct_connection(conductor_kind, mode):
     from dataclasses import replace
 
     from kicad_tools.validate.mask_copper import (
@@ -170,7 +178,9 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode
         source_binding,
     )
 
-    geometry, owner, other = toy_geometry(overlap_owner=mode != "disconnected", conductor_x=1.05)
+    geometry, owner, other = toy_geometry(
+        overlap_owner=mode != "disconnected", conductor_x=1.05, conductor_kind=conductor_kind
+    )
     binding = source_binding(geometry)
     if mode == "stale":
         binding = replace(binding, source_sha256="b" * 64)
@@ -186,7 +196,13 @@ def test_intent_requires_exact_binding_identity_layer_and_direct_connection(mode
     )
     assert result.passed is (mode == "valid")
     assert result.intent_audit[0]["accepted"] is (mode == "valid")
-    assert result.measurements
+    conductor_measurements = [m for m in result.measurements if m.conductor_uuid == other]
+    assert conductor_measurements
+    if mode == "valid":
+        assert conductor_measurements[0].disposition == "intentional"
+    else:
+        # A rejected declaration never suppresses the measurement it names.
+        assert conductor_measurements[0].disposition == "violation"
 
 
 @pytest.mark.parametrize(
@@ -542,7 +558,7 @@ def test_warning_tier_does_not_fail_verdict(gap, expected, passed):
     assert result.passed is passed
     severities = {v.severity for v in assessment_results(result).violations}
     assert severities <= (
-        {"warning"} if expected == "warning" else {"error"} if expected else set()
+        {"warning", "info"} if expected == "warning" else {"error", "info"} if expected else set()
     )
 
 
@@ -1004,3 +1020,294 @@ def test_stdout_single_and_empty_reason_lists_stay_clean(tmp_path, capsys, monke
     stanza = _mask_stdout_stanza(_run_mask_stdout(tmp_path, capsys, monkeypatch, []))
     assert "no reason reported" in stanza
     assert "Remediation:" in stanza
+
+
+# ---------------------------------------------------------------------------
+# Issue #9038: findings must be triageable (owner, copper kind, net relation)
+# and must not read as board defects while the assessment is incomplete.
+# ---------------------------------------------------------------------------
+
+
+_POLICY = MaskCopperPolicy(0.09, "order", "process", "rev")
+
+
+def _violation(**extra):
+    from kicad_tools.validate.mask_copper import MaskCopperMeasurement
+
+    fields = {
+        "opening_uuids": ("00000000-0000-0000-0000-000000000001",),
+        "conductor_uuid": "00000000-0000-0000-0000-000000000002",
+        "mask_side": "F.Mask",
+        "copper_layer": "F.Cu",
+        "location_mm": (1.0, 2.0),
+        "clearance_mm": 0.01,
+        "exposed_area_mm2": 0.5,
+        "relation": "overlap",
+        "disposition": "violation",
+        "uncertainty_mm": 0.0,
+        "opening_kind": "pad:rect",
+        "mask_defined": False,
+        "margin_provenance": "native",
+    }
+    fields.update(extra)
+    return MaskCopperMeasurement(**fields)
+
+
+def _opening_geometry(pad, trace, *, pad_net="N", trace_net="N", trace_kind="segment"):
+    """A pad with a mask opening and one conductor, both shapes given directly."""
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    from kicad_tools.validate.mask_copper_geometry import AttributedMaskGeometry
+    from kicad_tools.validate.mask_export_geometry import ExportedMaskGeometry
+
+    owner, other = "00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"
+    opening = box(-0.1, -0.1, 1.1, 1.1)
+    exported = ExportedMaskGeometry(
+        "a" * 64,
+        None,
+        None,
+        "10.0.5",
+        {},
+        layers={"F.Mask": opening, "F.Cu": unary_union([pad, trace])},
+    )
+    geometry = AttributedMaskGeometry(
+        exported,
+        {
+            owner: {
+                "kind": "pad:rect",
+                "net": pad_net,
+                "pad_ref": "R1/1",
+                "layers_geometry": {"F.Mask": opening, "F.Cu": pad},
+                "margin_mm": {"F.Mask": 0.1},
+            },
+            other: {
+                "kind": trace_kind,
+                "net": trace_net,
+                "layers_geometry": {"F.Cu": trace},
+                "margin_mm": {},
+            },
+        },
+    )
+    return geometry, owner, other
+
+
+def _mask_findings(results):
+    return [v for v in results.violations if v.rule_id == "mask_to_copper"]
+
+
+@pytest.mark.parametrize("coverage", ["incomplete", "not_run"])
+def test_incomplete_coverage_never_emits_error_severity_findings(coverage):
+    """Issue #9038 AC: until coverage is complete, findings stay warnings."""
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    assessment = MaskCopperAssessment(
+        coverage=coverage,
+        reasons=["native unavailable"],
+        policy=_POLICY,
+        measurements=[_violation()],
+    )
+    found = _mask_findings(assessment_results(assessment))
+    assert [(v.rule_id, v.severity) for v in found] == [("mask_to_copper", "warning")]
+    assert all("provisional: coverage incomplete" in v.message for v in found)
+
+
+def test_complete_coverage_keeps_error_severity_without_provisional_mark():
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    assessment = MaskCopperAssessment(
+        coverage="complete",
+        policy=_POLICY,
+        measurements=[_violation()],
+    )
+    found = _mask_findings(assessment_results(assessment))
+    assert [(v.rule_id, v.severity) for v in found] == [("mask_to_copper", "error")]
+    assert all("provisional" not in v.message for v in found)
+
+
+def test_incomplete_run_downgrades_geometry_measurements_to_provisional_warnings():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(overlap_owner=True)
+    geometry.errors.append("F.Mask: unattributed native mask region")
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    assert assessment.coverage == "incomplete"
+    found = _mask_findings(assessment_results(assessment))
+    assert found
+    assert all(v.severity == "warning" for v in found)
+    assert all("provisional: coverage incomplete" in v.message for v in found)
+
+
+def test_finding_message_names_owner_conductor_net_and_relation():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, owner, _ = toy_geometry(overlap_owner=True)
+    geometry.objects[owner]["pad_ref"] = "R1/1"
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    found = _mask_findings(assessment_results(assessment))
+    assert len(found) == 1
+    message = found[0].message
+    assert "opening pad:R1/1" in message
+    assert "exposed copper segment" in message
+    assert "net N" in message
+    assert "same-net own-pad entry" in message
+
+
+def test_finding_without_pad_ref_names_the_opening_kind_and_uuid():
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = toy_geometry(overlap_owner=True)
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    found = _mask_findings(assessment_results(assessment))
+    assert len(found) == 1
+    assert "opening pad:rect[00000000]" in found[0].message
+
+
+def test_own_pad_entry_and_pass_through_are_distinguished():
+    """The curator's rule: endpoint within the opening = own-pad entry."""
+    from shapely.geometry import box
+
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    # Trace terminates inside the opening (endpoint cap at x=0.5).
+    geometry, _, _ = _opening_geometry(box(0, 0, 1, 1), box(0.5, 0.4, 2.0, 0.6))
+    own = assess_attributed_geometry(geometry, _POLICY).measurements[0]
+    assert own.same_net is True and own.own_pad_entry is True
+
+    # Trace crosses the whole opening; both endpoints lie outside it.
+    geometry, _, _ = _opening_geometry(box(0, 0, 1, 1), box(-0.2, 0.4, 1.3, 0.6))
+    through = assess_attributed_geometry(geometry, _POLICY).measurements[0]
+    assert through.same_net is True and through.own_pad_entry is False
+
+    own_labels = [
+        v.message
+        for v in assessment_results(
+            assess_attributed_geometry(
+                _opening_geometry(box(0, 0, 1, 1), box(0.5, 0.4, 2.0, 0.6))[0], _POLICY
+            )
+        ).violations
+        if v.rule_id == "mask_to_copper"
+    ]
+    through_labels = [
+        v.message
+        for v in assessment_results(
+            assess_attributed_geometry(
+                _opening_geometry(box(0, 0, 1, 1), box(-0.2, 0.4, 1.3, 0.6))[0], _POLICY
+            )
+        ).violations
+        if v.rule_id == "mask_to_copper"
+    ]
+    assert "same-net own-pad entry" in own_labels[0]
+    assert "same-net pass-through" in through_labels[0]
+
+
+def test_via_inside_its_own_pad_opening_is_own_pad_entry():
+    """A via has no trace endpoint; its center stands in for one (documented)."""
+    from shapely.geometry import Point
+
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = _opening_geometry(
+        Point(0.5, 0.5).buffer(1.0), Point(0.5, 0.5).buffer(0.15), trace_kind="via"
+    )
+    assessment = assess_attributed_geometry(geometry, _POLICY)
+    assert assessment.measurements[0].conductor_kind == "via"
+    assert assessment.measurements[0].own_pad_entry is True
+    found = _mask_findings(assessment_results(assessment))
+    assert "same-net own-pad entry" in found[0].message
+
+
+def test_different_net_conductor_is_labelled_and_never_own_pad():
+    from shapely.geometry import box
+
+    from kicad_tools.validate.mask_copper import assess_attributed_geometry, assessment_results
+
+    geometry, _, _ = _opening_geometry(box(0, 0, 1, 1), box(0.5, 0.4, 2.0, 0.6), trace_net="M")
+    measurement = assess_attributed_geometry(geometry, _POLICY).measurements[0]
+    assert measurement.same_net is False and measurement.own_pad_entry is None
+    found = _mask_findings(assessment_results(assess_attributed_geometry(geometry, _POLICY)))
+    assert "different-net" in found[0].message
+    assert "same-net" not in found[0].message
+
+
+def test_summary_reports_per_opening_counts():
+    """One pad with many findings reads as one opening (issue #9038 AC)."""
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    assessment = MaskCopperAssessment(
+        coverage="complete",
+        policy=_POLICY,
+        measurements=[
+            _violation(opening_uuids=("u1",), owner_ref="R1/1"),
+            _violation(
+                opening_uuids=("u1",),
+                conductor_uuid="00000000-0000-0000-0000-000000000003",
+                owner_ref="R1/1",
+            ),
+            _violation(
+                opening_uuids=("u2",),
+                conductor_uuid="00000000-0000-0000-0000-000000000004",
+                owner_ref="R2/1",
+                opening_kind="pad:circle",
+            ),
+        ],
+    )
+    summaries = [
+        v
+        for v in assessment_results(assessment).violations
+        if v.rule_id == "mask_to_copper_openings"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0].severity == "info"
+    assert "3 findings across 2 mask openings" in summaries[0].message
+    assert "pad:R1/1 x2" in summaries[0].message
+    assert "pad:R2/1 x1" in summaries[0].message
+
+
+def test_no_measurements_means_no_summary_finding():
+    from kicad_tools.validate.mask_copper import assessment_results
+
+    assessment = MaskCopperAssessment(coverage="complete", policy=_POLICY)
+    assert not list(assessment_results(assessment).violations)
+
+
+def test_v1_payload_without_new_fields_loads_and_round_trips():
+    from kicad_tools.validate.mask_copper import MaskCopperAssessment
+
+    payload = {
+        "schema": "kct.mask-copper-assessment.v1",
+        "coverage": "complete",
+        "reasons": [],
+        "policy": None,
+        "binding": None,
+        "measurements": [
+            {
+                "opening_uuids": ["00000000-0000-0000-0000-000000000001"],
+                "conductor_uuid": "00000000-0000-0000-0000-000000000002",
+                "mask_side": "F.Mask",
+                "copper_layer": "F.Cu",
+                "location_mm": [1.0, 2.0],
+                "clearance_mm": 0.01,
+                "exposed_area_mm2": 0.5,
+                "relation": "overlap",
+                "disposition": "violation",
+                "uncertainty_mm": 0.0,
+                "opening_kind": "pad:rect",
+                "mask_defined": False,
+                "margin_provenance": "native",
+            }
+        ],
+        "intent_audit": [],
+        "geometry_provenance": {},
+        "evaluated_pairs": 0,
+    }
+    assessment = MaskCopperAssessment.from_dict(payload)
+    measurement = assessment.measurements[0]
+    assert measurement.owner_net is None
+    assert measurement.conductor_net is None
+    assert measurement.conductor_kind is None
+    assert measurement.same_net is None
+    assert measurement.own_pad_entry is None
+    assert measurement.owner_ref is None
+    reloaded = MaskCopperAssessment.from_dict(assessment.to_dict())
+    assert reloaded.measurements[0].to_dict() == measurement.to_dict()

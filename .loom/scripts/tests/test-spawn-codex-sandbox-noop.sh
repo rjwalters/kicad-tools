@@ -14,7 +14,7 @@
 #     and an exit-0 with empty stdout all leave `SUCCESS`;
 #   - a non-zero codex exit never asks the daemon at all.
 #
-# Split out of test-spawn-codex.sh, which the file-size ratchet freezes.
+# Split out of test-spawn-codex.sh.
 #
 # Usage:
 #   ./.loom/scripts/tests/test-spawn-codex-sandbox-noop.sh

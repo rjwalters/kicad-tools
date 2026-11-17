@@ -4,8 +4,7 @@
 # (a .loom/resync-ignore pin, a symlinked destination) suppress the PREVIEW too
 # (#8675).
 #
-# Split out of test-resync-installed.sh (2835 lines, frozen by the file-size
-# ratchet — .loom/docs/file-size-policy.md) rather than grown in place. That
+# Split out of test-resync-installed.sh rather than grown in place. That
 # file's group 22 already covers the apply path and the happy-path dry-run
 # preview; this file is the dry-run-specific half its group 22 does not have:
 # the pin and symlink guards are asserted there only on the APPLY path, so a

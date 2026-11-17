@@ -9,10 +9,11 @@ annulus vs its own pad, a stub bridging the middle), which the fab-view
 a fab sees copper, not nets.
 
 The stitcher now rejects candidate seats whose annulus-to-same-net-SMD-pad
-gap falls in the forbidden band (``0 < gap <`` the stackup's pad error edge,
-``GapBand.error_edge_mm`` of the ``pad_spacing`` dfm entry) and lets the
-placement ladder keep walking: annulus overlapping the pad is a copper union
-(no slit), and a gap at or beyond the edge is not a fab finding.
+gap falls in the forbidden band (``0 < gap <`` the stackup's pad *detection*
+edge, ``GapBand.detection_edge_mm`` of the ``pad_spacing`` dfm entry -- never
+``error_edge_mm``; #9016) and lets the placement ladder keep walking: annulus
+overlapping the pad is a copper union (no slit), and a gap at or beyond the
+edge is not a fab finding.
 """
 
 from __future__ import annotations

@@ -195,6 +195,7 @@ else
     cat > "$STUB_DAEMON" <<STUB
 #!/usr/bin/env bash
 if [[ "\$1" == "status" && "\$2" == "--json" ]]; then
+    printf '%s\n' "\$*" > "$WORKDIR/status.args"
     cat "$WORKDIR/status.json"
     exit 0
 fi
@@ -297,6 +298,22 @@ JSON
 JSON
     assert_eq "$(LOOM_SWEEP_INFLIGHT_SWEEPS=2 probe)" "2" \
         "LOOM_SWEEP_INFLIGHT_SWEEPS overrides an answering daemon"
+
+    # #13809: the probe asks only for the sections it reads, and its hang
+    # guard default sits above the CLI's own 45s root-scaled budget cap.
+    probe >/dev/null
+    if grep -q -- '--section in_flight,unregistered_locked' "$WORKDIR/status.args"; then
+        pass "the probe requests only --section in_flight,unregistered_locked"
+    else
+        fail "the probe requests only --section in_flight,unregistered_locked (got: $(cat "$WORKDIR/status.args"))"
+    fi
+    default_bound="$(grep -oE 'LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS:-[0-9]+' \
+        "$(dirname "${BASH_SOURCE[0]}")/../lib/cpu-budget.sh" | head -1 | grep -oE '[0-9]+$')"
+    if [[ -n "$default_bound" ]] && ((default_bound > 45)); then
+        pass "default probe bound (${default_bound}s) exceeds the CLI's 45s budget cap"
+    else
+        fail "default probe bound (${default_bound:-unset}s) must exceed the CLI's 45s budget cap"
+    fi
 
     # A wedged daemon must cost the probe budget, not the sweep. The probe is
     # bounded by LOOM_SWEEP_INFLIGHT_PROBE_TIMEOUT_SECS and then fails safe.

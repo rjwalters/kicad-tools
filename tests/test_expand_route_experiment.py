@@ -163,7 +163,11 @@ def test_zone_outline_scales_and_stale_fill_is_dropped():
         (float(xy.get_value(0)), float(xy.get_value(1)))
         for xy in zone_node.find_child("polygon").find_child("pts").find_children("xy")
     ]
-    assert pts == pytest.approx([(-10, -5), (50, -5), (50, 25), (-10, 25)])
+    # pytest >= 9.2 rejects nested structures in approx(); compare per point.
+    expected = [(-10, -5), (50, -5), (50, 25), (-10, 25)]
+    assert len(pts) == len(expected)
+    for got, want in zip(pts, expected, strict=True):
+        assert got == pytest.approx(want)
     assert zone_node.find_child("filled_polygon") is None
     assert (report.zones_scaled, report.fills_dropped) == (1, 1)
 
