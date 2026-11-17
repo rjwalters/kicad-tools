@@ -27,10 +27,13 @@ so the repaired arrangement is strictly shorter.  Vias are priced out
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from kicad_tools.acceleration import to_numpy
 from kicad_tools.analysis.detour_ratio import (
     DETOUR_RATIO_THRESHOLD,
     DetourConnectionRecord,
@@ -40,6 +43,7 @@ from kicad_tools.router import detour_repair
 from kicad_tools.router.algorithms.negotiated import NegotiatedRouter
 from kicad_tools.router.detour_repair import (
     _board_route_score,
+    _discard_partial,
     _find_offenders,
     run_detour_repair_pass,
     run_detour_repair_pass_from_autorouter,
@@ -269,6 +273,7 @@ class TestRollback:
         signature = _route_signature(router)
         routes_before = list(router.routes)
         failures_before = len(router.routing_failures)
+        usage_before = to_numpy(router.grid._usage_count).copy()
         lifted = _net_id(router, "/V")
 
         from kicad_tools.router.core import Autorouter
@@ -293,6 +298,35 @@ class TestRollback:
         assert _route_signature(router) == signature
         assert len(router.routes) == len(routes_before)
         assert len(router.routing_failures) == failures_before
+        # #3501 discipline: the usage ledger must be restored per cell
+        # too.  A rolled-back attempt's partial copper never incremented
+        # it, so any drift here means counts were stolen from committed
+        # nets sharing those cells (the pre-fix _discard_partial did
+        # exactly that).
+        assert np.array_equal(to_numpy(router.grid._usage_count), usage_before)
+
+    def test_discard_partial_never_touches_the_usage_ledger(
+        self, offender_pcb: Path
+    ) -> None:
+        """#3501: a partial search result is blocked-grid-marked ONLY
+        (the search's commit closure never writes usage), so discarding
+        it must leave the usage ledger untouched -- per-cell counts on
+        shared cells belong to committed nets and are stolen, not
+        underflowed, by a stray ``unmark_route_usage``."""
+        router = _load(offender_pcb)
+        _settle_with_probe(router)
+        # A committed route carries real usage on its cells ...
+        committed = router.routes[0]
+        router.grid.mark_route_usage(committed)
+        usage_before = to_numpy(router.grid._usage_count).copy()
+
+        # ... and a partial the search produced over the same cells is
+        # grid-marked (never usage-marked) before its transaction dies.
+        partial = copy.deepcopy(committed)
+        router._mark_route(partial)
+        _discard_partial(router, [partial])
+
+        assert np.array_equal(to_numpy(router.grid._usage_count), usage_before)
 
     def test_score_not_strictly_better_rolls_back_equal_outcome(
         self, offender_pcb: Path, monkeypatch

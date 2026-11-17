@@ -224,9 +224,14 @@ def _board_route_score(
     comparator uses: grid overflow, the three live clearance scans
     (seg-via #3002, via-seg #3020, seg-seg #3433), pad-to-pad
     connectivity (#3117) discounted by demotion-doomed overlaps
-    (#3588).  The whole-board score subsumes an involved-nets-only
-    copper comparison: nets-complete dominates wirelength in the sort
-    key, so a rearrangement that strands any net can never win.
+    (#3588).  Nets-complete dominates wirelength in the sort key, so
+    a rearrangement that strands any net can never win -- but the
+    score does NOT subsume an involved-nets-only copper comparison:
+    it can accept on a higher-priority term (e.g. less overflow)
+    while the rearrangement still adds copper, which is why
+    ``_repair_net`` guards the keep decision with an explicit
+    involved-copper-shrinks conjunct (board 05 CPL; see the module
+    docstring).
     """
     from .core import IterationMetrics
 
@@ -269,12 +274,15 @@ def _discard_partial(ar: Any, routes: list[Route]) -> None:
     """Unmark copper a search produced but the transaction never committed.
 
     ``_route_net_negotiated`` marks every Route it returns (incl. partial
-    results) on the grid through its commit closure; the caller's commit
-    (usage ledger + ``routes`` list) is separate.  A rolled-back partial
-    must leave neither ledger touched by copper that was never committed.
+    results) on the grid through its commit closure -- ``_mark_route``
+    ONLY, never the usage ledger (``_commit`` writes usage separately).
+    Issue #3501, same shape as ``_unwind_correction_pass_net``: calling
+    ``unmark_route_usage`` on copper that never incremented it decrements
+    the per-cell ``usage_count`` contributed by OTHER nets sharing those
+    cells (clamped at 0 per cell, so counts are stolen rather than
+    underflowed), so only the blocked-grid mark is unwound here.
     """
     for route in routes or []:
-        ar.grid.unmark_route_usage(route)
         ar.grid.unmark_route(route)
 
 
