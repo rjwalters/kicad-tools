@@ -1961,13 +1961,19 @@ def _same_net_leg_band_ok(
     """
     from shapely.geometry import LineString, Point, box
 
+    from kicad_tools.router.via_clearance import (
+        SAME_NET_BAND_UNION_EPS_MM,
+        SAME_NET_BAND_WRITE_SLACK_MM,
+    )
+
     if pad_edge_mm <= 0 and trace_edge_mm <= 0:
         return True
-    touch = 1e-6
+    touch = SAME_NET_BAND_UNION_EPS_MM
     leg = LineString([p0, p1]).buffer(width / 2)
-    # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding (as #8975).
-    pad_limit = pad_edge_mm + 1.5e-3
-    trace_limit = trace_edge_mm + 1.5e-3
+    # ``+ SAME_NET_BAND_WRITE_SLACK_MM`` covers both sides' 3-decimal write
+    # rounding (as #8975).
+    pad_limit = pad_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
+    trace_limit = trace_edge_mm + SAME_NET_BAND_WRITE_SLACK_MM
     # Issue #9186: the connector's own sibling legs are chain candidates on
     # exactly the terms of existing segments -- touching ones chain (the
     # finished connector is one copper union at its bends), detached ones
