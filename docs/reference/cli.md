@@ -42,8 +42,8 @@ kct [--help] [--version] [--verbose] [-q] [--units {mm,mils}] <command> [options
 | **Repair** | `fix-drc` | Automated DRC violation repair (clearance + drill) |
 | | `fix-erc` | Automated ERC violation repair (PWR_FLAG + no-connect) |
 | | `fix-vias` | Fix vias to meet manufacturer specifications |
-| | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads |
-| | `place-silk-refs` | Move readable reference designators to clear silk/pad/edge collisions |
+| | `fix-silkscreen` | Fix silkscreen line widths to meet manufacturer specs; `--clip-to-pads` also trims silk lines too close to pads; `--clip-to-holes` clips footprint silk lines/polygons off every drilled hole (run after routing) |
+| | `place-silk-refs` | Move readable reference designators to clear silk/pad/drill/edge collisions; `--over-holes` moves only those over a drilled hole |
 | | `fix-footprints` | Fix footprint pad spacing issues |
 | | `repair-clearance` | Repair clearance violations by nudging traces |
 | | `pipeline` | End-to-end repair pipeline for existing PCBs |

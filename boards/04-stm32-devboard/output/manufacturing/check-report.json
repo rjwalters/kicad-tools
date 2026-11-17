@@ -1,14 +1,14 @@
 {
   "file": "output/stm32_devboard_routed.kicad_pcb",
   "manufacturer": "jlcpcb-tier1",
-  "pcb_sha256": "becc9beedab11143858730d1313392c4022a926eb1b1155b1c82e236ed7cfe56",
+  "pcb_sha256": "41672304c53da1c8c9ca2760a26a89555ae26b0d6e178f5aa8248d60cb069e40",
   "layers": 0,
   "summary": {
     "errors": 0,
-    "warnings": 5,
+    "warnings": 4,
     "infos": 0,
     "waived": 0,
-    "rules_checked": 75,
+    "rules_checked": 77,
     "rules_checked_by_rule": {
       "connectivity": 1,
       "copper_sliver": 1,
@@ -66,6 +66,8 @@
         "USER_LED",
         "NRST"
       ],
+      "same_net": null,
+      "fab_band": null,
       "status": "warning",
       "waived": false,
       "key": "pour_slot||NRST,USER_LED|F.Cu",
@@ -88,6 +90,8 @@
         "GND",
         "SWDIO"
       ],
+      "same_net": null,
+      "fab_band": null,
       "status": "warning",
       "waived": false,
       "key": "pour_slot||GND,SWDIO|F.Cu",
@@ -110,6 +114,8 @@
         "OSC_OUT",
         "NRST"
       ],
+      "same_net": null,
+      "fab_band": null,
       "status": "warning",
       "waived": false,
       "key": "pour_slot||NRST,OSC_OUT|F.Cu",
@@ -132,30 +138,11 @@
         "OSC_OUT",
         "NRST"
       ],
+      "same_net": null,
+      "fab_band": null,
       "status": "warning",
       "waived": false,
       "key": "pour_slot||NRST,OSC_OUT|F.Cu",
-      "evidence_hash": null
-    },
-    {
-      "rule_id": "redundant_copper_detour",
-      "type": "unknown",
-      "severity": "warning",
-      "message": "Track detour: [SWCLK] on F.Cu routes 2.11 mm between points 0.76 mm apart (ratio 2.8)",
-      "location": [
-        152.25,
-        85.338
-      ],
-      "layer": "F.Cu",
-      "actual_value": 2.787715921290706,
-      "required_value": 2.0,
-      "items": [],
-      "nets": [
-        "SWCLK"
-      ],
-      "status": "warning",
-      "waived": false,
-      "key": "redundant_copper_detour||SWCLK|F.Cu",
       "evidence_hash": null
     }
   ],
@@ -237,30 +224,12 @@
       "bbox": null,
       "layer": "F.Cu",
       "waived": false
-    },
-    {
-      "schema_version": 1,
-      "rule_id": "redundant_copper_detour",
-      "severity": "warning",
-      "message": "Track detour: [SWCLK] on F.Cu routes 2.11 mm between points 0.76 mm apart (ratio 2.8)",
-      "refs": [],
-      "pads": [],
-      "nets": [
-        "SWCLK"
-      ],
-      "point": [
-        152.25,
-        85.338
-      ],
-      "bbox": null,
-      "layer": "F.Cu",
-      "waived": false
     }
   ],
   "meta_checks": {
     "drc": {
       "status": "PASSED",
-      "detail": "0 errors, 5 warnings"
+      "detail": "0 errors, 4 warnings"
     },
     "erc": {
       "status": "PASSED",

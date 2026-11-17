@@ -20,27 +20,50 @@ BOARDS_DIR = Path(__file__).resolve().parent.parent / "boards"
 # directory name.  Each entry cites the issue that owns the refresh; remove the
 # entry when that lands (strict xfail turns an unexpected pass into a failure).
 EXPECTED_STALE: dict[str, str] = {
+    # Issue #9058: PR #8848 kept its regenerated board 01 copper (VOUT
+    # sharp_trace_corner wedge removed) over main's, so the evidence main
+    # re-pinned for #8937's ``.kicad_dru`` no longer applies.  Stale input:
+    # the routed ``.kicad_dru`` only; the refill under it agrees with the
+    # saved copper.  Since #9064 (closing #9009) ``mask_to_copper`` runs to
+    # completion under ``KCT_KICAD_DOCKER=1``, so the host is no longer the
+    # obstacle: the producer's ``kct check`` gate refuses on 12 completed,
+    # all same-net ``mask_to_copper`` errors (10 own-pad entry / same-net zone
+    # exposures that main's own board 01 also has, plus 2 same-net VOUT via
+    # pass-throughs at R1.2/R2.1).  Native DRC (saved and refilled), LVS,
+    # zone_fill, artifacts and bom pass.  The re-pin waits on mask_to_copper
+    # qualifying same-net exposures; #9058 owns it.
+    "01-voltage-divider": (
+        "Issue #9058: board 01 copper from PR #8848 cannot be re-pinned under "
+        "#8937's .kicad_dru while kct check refuses on 12 same-net mask_to_copper "
+        "errors (check completes since #9064/#9009); waits on same-net "
+        "mask_to_copper qualification."
+    ),
     # Issue #8937 (PR #8955) re-emitted the routed ``.kicad_dru`` of the
     # boards whose recipes byte-reproduce it (01/05/06; the recipe-replay
     # tests pin the committed sidecar to the current emitter, so reverting
     # the DRU is not an option).  Board 06's evidence was re-pinned on the
-    # pinned toolchain; board 01 followed at the review-fix stage: its saved
-    # copper was re-filled under the corrected block (native refill,
-    # divergent none), the copper Gerbers re-plotted, the bundle re-built
-    # and ``readiness.json`` re-pinned via ``refresh_readiness.py`` -- its
-    # two pre-existing same-net VOUT stitch-via slit findings are waived
-    # evidence-bound in ``voltage_divider_routed.kct-waivers.json`` (the
-    # #8938 mechanism; rerouting the pair as #8848 does retires the
-    # waiver).  Board 05 could not be re-pinned: its ``kct check`` refuses
+    # pinned toolchain; board 01's is covered by its #9058 entry above.
+    # Board 05 could not be re-pinned: its ``kct check`` refuses
     # on the unaccepted physical_copper_gap/redundant-copper/silk warning
     # flood board 07's entry cites (the #8399/#8938-era stalemate,
     # reproduced with main's code on pristine main boards).  That work owns
     # the re-pin; remove the entry when it lands.
+    #
+    # Since #9057 the recipe itself is also ahead of the committed copper:
+    # the three sharp_trace_corner wedges (RESET, HALL_B, HALL_C) are fixed
+    # in ``redesign/routing.json`` and ``redesign/build.py`` now adds the
+    # #8532 fiducials + board-ID silk, but the committed routed PCB and
+    # ``readiness.json`` predate both (the strict gate still refuses on the
+    # physical_copper_gap/silk_hole_overlap/mask_to_copper flood, so
+    # ``build.py`` cannot publish).  Issue #9068 (the gate-pass split of
+    # #9057) owns the rebuild + re-pin; remove the entry when it lands.
     "05-bldc-motor-controller": (
         "Issue #8937/#8399: PR #8955 re-emitted the routed .kicad_dru "
         "(zone-clearance rules); `refresh_readiness.py` refuses to re-pin while "
         "physical_copper_gap/redundant-copper/silk warnings remain unaccepted. "
-        "The #8399 warning-flood work owns the re-pin."
+        "The #8399 warning-flood work owns the re-pin. Since #9057 the recipe "
+        "(wedge fix + #8532 fiducials/board-ID) is ahead of the committed "
+        "copper too; the gate-pass rebuild owns the re-pin."
     ),
     "07-matchgroup-test": (
         "Issue #8399: the #8602 copper prune changed board 07's authored/reviewed "

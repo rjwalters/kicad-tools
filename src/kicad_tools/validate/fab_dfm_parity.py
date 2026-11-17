@@ -68,7 +68,9 @@ Status = Literal["covered", "partial", "not_covered"]
 #: 8: #9034 -- pad_spacing note records the issue-reported kct:fab ratio as
 #:    reported-not-reproduced and the measured per-pair counting
 #:    granularity; no threshold, severity or attribution change.
-TABLE_VERSION = 8
+#: 9: #8840 -- ``sharp_trace_corner`` and ``missing_plated_through_hole``
+#:    rows flip from ``not_covered`` now that both rules ship.
+TABLE_VERSION = 9
 
 #: Where the observed categories/thresholds came from (counts are hand-recorded).
 SOURCE = "https://github.com/rjwalters/kicad-tools/issues/8838"
@@ -273,19 +275,25 @@ PARITY_TABLE: tuple[ParityRow, ...] = (
     ),
     ParityRow(
         "sharp_trace_corner",
-        (),
-        "not_covered",
+        ("sharp_trace_corner",),
+        "covered",
         False,
-        (),
-        "no rule; `sharp_trace_corner` is in flight on #8840. Observed 3 warnings.",
+        ("sharp_trace_corner",),
+        "`sharp_trace_corner` (#8840) reports all 3 observed vertices (pinned in its "
+        "tests). It is stricter than JLCDFM was observed to be: it also reports "
+        "branch junctions with an open wedge, which JLCDFM did not flag on that board "
+        "(over-reporting tracked in #9037).",
     ),
     ParityRow(
         "missing_plated_through_hole",
-        (),
-        "not_covered",
+        ("missing_plated_hole",),
+        "partial",
         False,
-        (),
-        "no rule; `missing_plated_hole` is in flight on #8840. Observed 2 warnings.",
+        ("missing_plated_hole",),
+        "`missing_plated_hole` (#8840) flags same-net top/bottom SMD pads whose "
+        "centres coincide (0.05 mm) with no same-net plated hole inside both; "
+        "overlapping pads with offset centres are not checked. The observed 2 "
+        "warnings were not re-measured.",
     ),
     ParityRow(
         "silkscreen_line_width",

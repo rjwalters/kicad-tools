@@ -69,6 +69,7 @@ from kicad_tools.validate.rules.silkscreen import (
     _silk_side,
     _stroke_geometry,
     _text_bbox_geometry,
+    iter_drill_holes,
 )
 
 if TYPE_CHECKING:
@@ -116,6 +117,47 @@ def _iter_npth_apertures(pcb: PCB, mask_clearance_mm: float):
             label = f"{footprint.reference} NPTH {pad.number}"
             for side in ("F", "B"):
                 yield side, geom, label
+
+
+def _iter_drill_obstacles(pcb: PCB):
+    """Yield ``(side, geom, label)`` for every drilled hole, on both sides.
+
+    Issue #9054: :func:`_iter_via_apertures` only sees *untented* vias, so a
+    reference over a filled/capped via drill was left in place while
+    ``silk_hole_overlap`` flagged it.  The holes come from the checker's own
+    :func:`iter_drill_holes`, so the placer and the check share one
+    definition; holes pierce the board, so both silk sides get them.
+    """
+    for geom, label in iter_drill_holes(pcb.vias, pcb.footprints):
+        label = f"drill {label}"
+        yield "F", geom, label
+        yield "B", geom, label
+
+
+def references_over_holes(pcb: PCB) -> set[str]:
+    """Footprint references whose reference text ``silk_hole_overlap`` flags.
+
+    Feeds ``plan(only=...)`` / ``kct place-silk-refs --over-holes`` (Issue
+    #9054) so a recipe can move exactly the references sitting on a drill,
+    leaving every reviewed position that is already clear where it is.  Read
+    from the rule's own findings, so it can never name a different set.
+    """
+    from kicad_tools.manufacturers.base import DesignRules
+    from kicad_tools.validate.rules.silkscreen import check_silk_hole_overlap
+
+    rules = DesignRules(
+        min_trace_width_mm=0.0,
+        min_clearance_mm=0.0,
+        min_via_drill_mm=0.0,
+        min_via_diameter_mm=0.0,
+        min_annular_ring_mm=0.0,
+    )
+    suffix = " (reference)"
+    return {
+        violation.items[0][: -len(suffix)]
+        for violation in check_silk_hole_overlap(pcb, rules).violations
+        if violation.items and violation.items[0].endswith(suffix)
+    }
 
 
 def _find_all_footprints(doc: SExp) -> list[SExp]:
@@ -961,6 +1003,10 @@ class SilkRefPlacer:
         for aperture_side, geom, label in _iter_via_apertures(pcb, mask_clearance_mm):
             apertures[aperture_side].append((geom, label))
         for aperture_side, geom, label in _iter_npth_apertures(pcb, mask_clearance_mm):
+            apertures[aperture_side].append((geom, label))
+        # Every via/PTH/NPTH drill, tented or not -- the set
+        # ``silk_hole_overlap`` measures against (Issue #9054).
+        for aperture_side, geom, label in _iter_drill_obstacles(pcb):
             apertures[aperture_side].append((geom, label))
         # gr_*/fp_* shapes on F.Mask/B.Mask open the mask just like pads do
         # (Issue #8862); same iterator the silk-over-mask validator uses.

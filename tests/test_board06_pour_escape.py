@@ -388,7 +388,14 @@ def pour_recipe(monkeypatch):
     return sys.modules["generate_design"]
 
 
-def _write_isolated_via_board(path):
+#: Issue #9007: a floating same-net B.Cu decoy segment whose copper stops
+#: 0.03 mm short of the annulus of the seat the unguarded escape commits
+#: ((119.8, 71.1), diameter 0.5) -- inside the (0, 0.1016) mm trace band,
+#: clear of both fill islands so it changes no connectivity.
+BAND_DECOY = ((119.7, 71.48), (119.9, 71.48), 0.2)
+
+
+def _write_isolated_via_board(path, same_net_decoy=False):
     """Two power islands separated by a foreign trace on every copper layer."""
     lines = [
         '(kicad_pcb (version 20240108) (generator "test")',
@@ -413,6 +420,12 @@ def _write_isolated_via_board(path):
         "  (via (at 110.7 70) (size 0.5) (drill 0.3) "
         '(layers "F.Cu" "B.Cu") (net 1) (uuid "existing-via"))',
     ]
+    if same_net_decoy:
+        (x1, y1), (x2, y2), w = BAND_DECOY
+        lines.append(
+            f"  (segment (start {x1} {y1}) (end {x2} {y2}) (width {w}) "
+            '(layer "B.Cu") (net 1) (uuid "band-decoy"))'
+        )
     for layer in ("F.Cu", "In1.Cu", "In2.Cu", "B.Cu"):
         lines.append(
             f"  (segment (start 115 67) (end 115 73) (width 0.4) "
@@ -505,6 +518,47 @@ def test_repair_escapes_pad_with_existing_via_on_isolated_fill(tmp_path, pour_re
             block in after_text for block in pour_recipe._find_sexp_blocks(before_text, f"({kind}")
         )
     assert project.read_bytes() == before_rules
+
+
+def test_repair_escape_rejects_seat_in_the_same_net_segment_band(tmp_path, pour_recipe, capsys):
+    """Issue #9007: the escape's ``via_ok`` grades the same-net TRACE band.
+
+    The decoy floats 0.38 mm above the primary fill on B.Cu, so it changes
+    no connectivity (the pre-repair audit still sees two stranded pad
+    groups), but its copper sits 0.03 mm from the annulus of the seat the
+    unguarded search commits -- (119.8, 71.1) at diameter 0.5.  That seat
+    is inside the (0, 0.1016) mm fab-view slit band ``_via_ok`` enforces
+    for the other sub-stages (#8975) and must be rejected here too; the
+    committed seat must come back band-legal (overlap or >= the edge).
+    The escape via is a through via, so any-layer same-net copper counts.
+    """
+    (x1, y1), (x2, y2), w = BAND_DECOY
+    decoy = LineString([(x1, y1), (x2, y2)]).buffer(w / 2)
+    unguarded_seat = Point(119.8, 71.1).buffer(0.25)
+    # Fixture self-checks: the decoy really is in the band of the unguarded
+    # seat and touches neither fill island (connectivity must not change).
+    assert 0 < decoy.distance(unguarded_seat) < 0.1016
+    assert decoy.distance(box(120, 69, 122, 71)) > 0
+    assert decoy.distance(box(109.8, 69.6, 111.1, 70.4)) > 0
+
+    board = tmp_path / "band.kicad_pcb"
+    _write_isolated_via_board(board, same_net_decoy=True)
+    before = pour_recipe._audit_pour_nets(board, ["+3V3"])["+3V3"]
+    assert not before["connected"] and len(before["pad_groups"]) == 2
+
+    placed_vias, bridges = pour_recipe._repair_pour_connectivity(board, ["+3V3"])
+
+    assert placed_vias == 1 and bridges == 1
+    assert "Grid escape: +3V3 U1.1" in capsys.readouterr().out
+    assert pour_recipe._audit_pour_nets(board, ["+3V3"])["+3V3"]["connected"]
+    _, _, vias = pour_recipe._parse_copper(board.read_text())
+    via = vias[-1]
+    annulus = Point(via["x"], via["y"]).buffer(via["size"] / 2)
+    assert annulus.intersects(box(120, 69, 122, 71))
+    gap = decoy.distance(annulus)
+    assert gap <= 1e-6 or gap >= 0.1016 + 1.5e-3, (
+        f"escape via seated {gap:.4f} mm from same-net segment copper, inside the slit band"
+    )
 
 
 def _dam_case(rules):

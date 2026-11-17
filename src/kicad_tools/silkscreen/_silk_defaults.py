@@ -53,3 +53,12 @@ DEFAULT_STEP_MM = 0.25
 # ``check_silk_edge_clearance`` DRC rule in
 # ``kicad_tools.validate.rules.silkscreen``.
 SILK_EDGE_CLEARANCE_MM = 0.2
+
+# Required silk-to-drilled-hole clearance (mm) of the ``silk_hole_overlap``
+# DRC rule in ``kicad_tools.validate.rules.silkscreen`` (Issue #8844), and the
+# default of every tool that clears silk off a hole (Issue #9054:
+# ``kct place-silk-refs`` and ``kct fix-silkscreen --clip-to-holes``).  0.0
+# means "silk may not overlap the drill" -- the rule's threshold since #8844.
+# The fab-parity work in #9033 may raise it; the rule and both tools read it
+# from here, so raising it moves all three together.
+SILK_HOLE_CLEARANCE_MM = 0.0

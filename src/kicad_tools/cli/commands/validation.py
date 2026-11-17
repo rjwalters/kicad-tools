@@ -121,6 +121,10 @@ def run_fix_silkscreen_command(args) -> int:
         sub_argv.extend(["--min-width", str(args.min_width)])
     if getattr(args, "clip_to_pads", False):
         sub_argv.append("--clip-to-pads")
+    if getattr(args, "clip_to_holes", False):
+        sub_argv.append("--clip-to-holes")
+    if getattr(args, "hole_clearance", None) is not None:
+        sub_argv.extend(["--hole-clearance", str(args.hole_clearance)])
     if args.output:
         sub_argv.extend(["-o", args.output])
     if args.dry_run:
@@ -156,6 +160,8 @@ def run_place_silk_refs_command(args) -> int:
         sub_argv.append("--allow-rotate")
     if getattr(args, "refs", None) is not None:
         sub_argv.extend(["--refs", args.refs])
+    if getattr(args, "over_holes", False):
+        sub_argv.append("--over-holes")
     if args.output:
         sub_argv.extend(["-o", args.output])
     if args.dry_run:

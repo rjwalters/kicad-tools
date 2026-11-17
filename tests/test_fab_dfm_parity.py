@@ -228,12 +228,14 @@ def test_partial_does_not_trigger_incomplete():
 #: The pre-#8940 stanza shape, captured from ``origin/main`` @ 993d2d2ab
 #: before any edit to ``format_parity_stanza`` (the issue's Test Plan requires
 #: the baseline be captured first; AC 2 makes it the byte-identity contract).
-#: #8972 bumped the table version 6 -> 7 and #9034 7 -> 8 (note-only row
-#: change), so only the header's ``table v8`` digit moved -- rows, order and
-#: wording are unchanged.
+#: #8972 bumped the table version 6 -> 7 (row attribution change) and #9034
+#: 7 -> 8 (note-only row change), so only the header's digit moved -- rows,
+#: order and wording are unchanged. #8840 bumps it 8 -> 9 and flips the
+#: ``sharp_trace_corner`` / ``missing_plated_through_hole`` rows now that
+#: both rules ship.
 EXPECTED_DEFAULT_STANZA = (
     "\n"
-    "Fab DFM parity (JLCDFM, table v8, 2026-11-12): 0 danger-capable categories not covered\n"
+    "Fab DFM parity (JLCDFM, table v9, 2026-11-12): 0 danger-capable categories not covered\n"
     "  partial     trace_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     pad_spacing [danger-capable]: clearance, physical_copper_gap\n"
     "  partial     solder_mask_opening_exposing_trace [danger-capable]: mask_to_copper\n"
@@ -244,8 +246,8 @@ EXPECTED_DEFAULT_STANZA = (
     "  covered     negative_soldermask_expansion: mask_negative_expansion\n"
     "  covered     soldermask_opening_multiple_segments: mask_multi_segment\n"
     "  covered     unconnected_trace_end: dangling_copper\n"
-    "  not covered sharp_trace_corner: -\n"
-    "  not covered missing_plated_through_hole: -\n"
+    "  covered     sharp_trace_corner: sharp_trace_corner\n"
+    "  partial     missing_plated_through_hole: missing_plated_hole\n"
     "  partial     silkscreen_line_width: silkscreen\n"
     "  covered     fiducial: fiducials"
 )
