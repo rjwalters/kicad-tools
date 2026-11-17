@@ -471,7 +471,7 @@ def test_escalation_paths_reject_the_evaluation_route_methods(method, dispatch_f
     assert f"--order-method {method} is not supported" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("method", [None, "crossing"])
+@pytest.mark.parametrize("method", [None, "crossing", "regret"])
 def test_escalation_paths_accept_absent_and_crossing(method):
     from kicad_tools.cli import route_cmd
 
