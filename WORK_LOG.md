@@ -16,6 +16,8 @@ Chronological record of merged PRs and closed issues. Maintained by the Guide tr
 
 ### 2026-11-16
 
+- **PR #9044**: fix: triageable mask_to_copper findings; incomplete runs cap severity at warning
+- **Issue #9038** (closed): mask_to_copper reports about 200 times JLCDFM's count on a consumer board, with messages that cannot be triaged
 - **PR #9046**: docs: correct board 07 finding count in 8974 changelog fragment to merged-tree delta
 - **Issue #9041** (closed): changelog.d/8974.fixed.md quotes the pre-merge 28 finding count; merged-tree delta is 23 to 0
 - **Issue #9017** (closed): Router: resolve pad_spacing detection edge and plumb it into kct route (#9011 plumbing)
