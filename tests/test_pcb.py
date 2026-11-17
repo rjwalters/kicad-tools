@@ -2085,6 +2085,54 @@ class TestTraceRoutingAPI:
         assert seg.width == pytest.approx(0.25)
         assert seg.layer == "F.Cu"
 
+    def test_add_trace_net_number_resolves_real_net(self):
+        """An int ``net`` is a net NUMBER reference, not a name (issue #9078).
+
+        board-04's ``compress_staircases`` passed ``Segment.net_number``
+        here; the old name-only handling fed the int to ``add_net``, which
+        minted a phantom net named after the number (``(net 13 5)``) and put
+        the replacement copper on it -- shorting it against the real net 5
+        copper the pads and vias still carried.
+        """
+        pcb = PCB.create(width=100, height=100)
+        osc = pcb.add_net("OSC_OUT")
+        nets_before = len(pcb.nets)
+
+        segments = pcb.add_trace((10.0, 10.0), (20.0, 10.0), width=0.2, net=osc.number)
+
+        assert len(pcb.nets) == nets_before, "int net reference minted a phantom net"
+        assert segments[0].net_number == osc.number
+        assert segments[0].net_name == "OSC_OUT"
+
+    def test_add_trace_unknown_net_number_fails_loudly(self):
+        """An int that names no net must fail, not mint a phantom (issue #9078)."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_net("GND")
+
+        with pytest.raises(ValueError, match="net number 99"):
+            pcb.add_trace((10.0, 10.0), (20.0, 10.0), width=0.2, net=99)
+
+    def test_add_via_net_number_resolves_real_net(self):
+        """``add_via`` shares ``add_trace``'s int-net contract (issue #9078)."""
+        pcb = PCB.create(width=100, height=100)
+        swdio = pcb.add_net("SWDIO")
+        nets_before = len(pcb.nets)
+
+        via = pcb.add_via(x=30.0, y=30.0, size=0.6, drill=0.3, net=swdio.number)
+
+        assert len(pcb.nets) == nets_before, "int net reference minted a phantom net"
+        assert via is not None
+        assert via.net_number == swdio.number
+        assert via.net_name == "SWDIO"
+
+    def test_add_via_unknown_net_number_fails_loudly(self):
+        """An unknown int net must fail, not mint a phantom (issue #9078)."""
+        pcb = PCB.create(width=100, height=100)
+        pcb.add_net("GND")
+
+        with pytest.raises(ValueError, match="net number 99"):
+            pcb.add_via(x=30.0, y=30.0, size=0.6, drill=0.3, net=99)
+
     def test_add_via_basic(self, tmp_path):
         """Test adding a via at a position."""
         pcb = PCB.create(width=100, height=100)
