@@ -591,18 +591,20 @@ def test_match_lengths_measure_path_not_summed_copper():
 
     The DQ7/LDQM dead-end loops the issue evidence named were repaired
     on main (#9118, PR #9139) after this measurement landed, so on the
-    committed copper their off-path residual sits inside the 2 mm
-    tolerance like every other loop-free net (every loop-free net on
-    this board is under 1.6 mm) and both byte groups' physical spreads
-    stay inside the 5 mm budget.  The regression the loops anchored --
-    summed copper counting a loop the signal never travels as matched
-    length -- is covered where a board repair cannot remove it: on
-    reconstructed pre-repair copper in test_board07_byte0_physical_spread
-    and on the synthetic loop/duplicate/stub fixtures in
-    test_trace_length.py.  What this test pins on the live artifact is
-    that the path measurement tracks the board as committed and that
-    SDCKE1, the one net still carrying more than a loop-free residual
-    (2.08 mm), is exactly the off-path error the validator raises.
+    committed copper their off-path residual sits inside the tolerance
+    like every other defect-free net (they measure up to 2.08 mm, #9175)
+    and both byte groups' physical spreads stay inside the 5 mm budget.
+    The regression the loops anchored -- summed copper counting a loop
+    the signal never travels as matched length -- is covered where a
+    board repair cannot remove it: on reconstructed pre-repair copper in
+    test_board07_byte0_physical_spread and on the synthetic
+    loop/duplicate/stub fixtures in test_trace_length.py.  What this test
+    pins on the live artifact is that the path measurement tracks the
+    board as committed and that SDCKE1, the net with the largest
+    residual (2.08 mm, measured defect-free in #9175 -- one simple
+    pad-to-pad chain, the residual distributed over staircase
+    micro-steps), sits inside the tolerance with the other defect-free
+    nets.
     """
     from kicad_tools.analysis.trace_length import TraceLengthAnalyzer
     from kicad_tools.schema.pcb import PCB
@@ -646,21 +648,24 @@ def test_match_lengths_measure_path_not_summed_copper():
             assert board.vias[index].net_number == net.number, (name, index)
 
     # Nets whose copper the issue evidence calls loop-free stay clean;
-    # the measured residual is barrel-overlap copper under pads/vias and
-    # in-pad joints (every loop-free net on this board is under 1.6 mm).
+    # the measured residual is barrel-overlap copper under pads/vias,
+    # in-pad joints and staircase micro-steps (defect-free nets on
+    # this board measure up to 2.08 mm, Issue #9175).
     for name in ("DQ0", "DQ1", "DQ11"):
         assert off_paths[name] < 1.0, (name, off_paths[name])
 
     # The DQ7/LDQM loops the evidence named were repaired in #9118
     # (PR #9139): their off-path residual now sits inside the tolerance
-    # with the other loop-free nets, so they raise no off-path error.
+    # with the other defect-free nets, so they raise no off-path error.
     assert off_paths["DQ7"] < tolerance, ("DQ7", off_paths["DQ7"])
     assert off_paths["LDQM"] < tolerance, ("LDQM", off_paths["LDQM"])
 
-    # SDCKE1 is the one net on the committed copper still carrying more
-    # than a loop-free residual (2.08 mm) -- the surviving off-path error
-    # the validator raises on this board.
-    assert off_paths["SDCKE1"] > tolerance, ("SDCKE1", off_paths["SDCKE1"])
+    # SDCKE1 carries the largest defect-free residual (2.08 mm): its 360
+    # segments form one simple pad-to-pad chain with no dead end and no
+    # branch, and the residual distributes over 322 staircase micro-steps
+    # of <= 0.13 mm (Issue #9175), so it sits inside the tolerance like
+    # every other defect-free net instead of raising the off-path error.
+    assert off_paths["SDCKE1"] < tolerance, ("SDCKE1", off_paths["SDCKE1"])
 
     # Both byte groups' physical spreads stay inside the 5 mm budget on
     # the repaired copper (byte 0: 1.18 mm, byte 1: 3.28 mm), matching

@@ -67,16 +67,21 @@ def via_travel_mm(via, segments, elevations: dict[str, float]) -> float:
     return max(depths) - min(depths)
 
 
-# Off-path copper above this does not count toward matched length and is an
-# error (Issue #9117).  Source of the margin: with contact links charged
-# the distance they span (the #9117 review's weighting fix), loop-free
-# nets on this board measure under 1.6 mm of residual copper --
-# barrel-overlap under pads/vias and in-pad joints.  Beyond that is
-# copper the signal never travels on the path: a dead-end loop, an
-# overlapping duplicate or a stub.  The DQ7/LDQM same-net loops the
-# issue evidence named were repaired in #9118 (PR #9139); on the
-# committed copper this flags SDCKE1 (2.08 mm).
-OFF_PATH_TOLERANCE_MM = 2.0
+# Off-path copper above this does not count toward matched length and is
+# an error (Issue #9117).  Source of the margin: with contact links charged
+# the distance they span (the #9117 review's weighting fix), defect-free
+# nets on the committed copper measure 0.13-2.08 mm of residual copper,
+# scaling with each net's length-matching staircase (SDNRAS 1.57 mm on
+# 206 micro-steps; SDCKE1, the highest, 2.08 mm on 322).  SDCKE1's 360
+# segments form one simple pad-to-pad chain with no dead end and no
+# branch, so its residual is not a defect: it is barrel-overlap and the
+# staircase steps the pad-to-pad path shortcuts diagonally (Issue #9175).
+# Beyond this limit is copper the signal never travels on the path: a
+# dead-end loop, an overlapping duplicate or a stub.  The DQ7/LDQM
+# same-net loops of #9117 measured ~6.3 and ~7.2 mm before the #9118
+# repair (PR #9139), so 2.5 mm keeps ~20% headroom over the worst
+# defect-free net while sitting over 2.5x below the smallest real defect.
+OFF_PATH_TOLERANCE_MM = 2.5
 
 
 def off_path_error(net_name: str, off_path_mm: float) -> str:

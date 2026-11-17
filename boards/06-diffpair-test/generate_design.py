@@ -1904,6 +1904,92 @@ def _relocate_pad_edge_vias(pcb_path: Path) -> int:
     return len(result.moved)
 
 
+def _same_net_leg_band_ok(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    width: float,
+    segments: list,
+    vias: list,
+    pad_bboxes: list[tuple[float, float, float, float]],
+    pad_edge_mm: float,
+    trace_edge_mm: float,
+) -> bool:
+    """True iff a connector leg ``p0 -> p1`` opens no same-net fab-view slit.
+
+    Issue #9167 (the #9114 family): ``same_net_band_seat_ok`` grades the via
+    annulus at a repair seat but never the connector legs written to reach
+    it.  ``_leg_ok`` only judges foreign nets, so a leg could run 0.05 mm
+    beside same-net copper -- a ``(0, edge)`` slit the fab view flags.
+
+    ``segments`` / ``vias`` are ``(geometry, half_width)`` / ``geometry``
+    entries of the leg's own net on the leg's layer (vias on every layer);
+    ``pad_bboxes`` the same net's SMD pads on that layer.  The old via must
+    already be excluded by the caller and the new annulus is not present yet.
+
+    Exclusions, designed for leg geometry:
+
+    * anything the leg *touches* is one copper union, not a slit;
+    * the segment chain the leg grows out of (segments joined to a touching
+      segment, end to end) is excluded within the reach where its notch with
+      the leg can still be narrower than the band -- ``(edge + half widths)
+      / sin(45 deg)``, since compass legs and chains differ by >= 45 deg.
+      This keeps ordinary bends out of the band, as the fab-view scan does;
+    * pads and vias touching the leg or an excluded chain member.
+
+    Copper reachable only *through a pad* (a sibling escape stub from the
+    same pad the leg leaves) is **not** excluded: that parallel pair is a
+    real slit.  An edge of ``0`` disables that population's test.
+    """
+    from shapely.geometry import LineString, Point, box
+
+    if pad_edge_mm <= 0 and trace_edge_mm <= 0:
+        return True
+    touch = 1e-6
+    leg = LineString([p0, p1]).buffer(width / 2)
+    # ``+ 1.5e-3`` covers both sides' 3-decimal write rounding (as #8975).
+    pad_limit = pad_edge_mm + 1.5e-3
+    trace_limit = trace_edge_mm + 1.5e-3
+
+    # Chain of segments grown from those the leg touches.
+    sin45 = 0.7071
+    chain: list[int] = [i for i, (g, _hw) in enumerate(segments) if leg.distance(g) <= touch]
+    joins = [
+        pt for pt in (p0, p1) if any(segments[i][0].distance(Point(pt)) <= touch for i in chain)
+    ]
+    joins = joins or [p0, p1]
+    excluded = set(chain)
+    frontier = list(chain)
+    while frontier:
+        cur = segments[frontier.pop()][0]
+        for i, (g, hw) in enumerate(segments):
+            if i in excluded or cur.distance(g) > touch:
+                continue
+            reach = (trace_edge_mm + width / 2 + hw) / sin45
+            if min(g.distance(Point(j)) for j in joins) > reach:
+                continue
+            excluded.add(i)
+            frontier.append(i)
+
+    members = [segments[i][0] for i in excluded]
+
+    def joined(geom) -> bool:
+        return leg.distance(geom) <= touch or any(m.distance(geom) <= touch for m in members)
+
+    if trace_edge_mm > 0:
+        for i, (g, _hw) in enumerate(segments):
+            if i not in excluded and touch < leg.distance(g) < trace_limit:
+                return False
+        for g in vias:
+            if not joined(g) and touch < leg.distance(g) < trace_limit:
+                return False
+    if pad_edge_mm > 0:
+        for bounds in pad_bboxes:
+            pad = box(*bounds)
+            if not joined(pad) and touch < leg.distance(pad) < pad_limit:
+                return False
+    return True
+
+
 def _legalize_signal_vias(pcb_path: Path) -> int:
     """Repair same-net ``via_in_pad`` + sub-floor drill-pair residuals.
 
@@ -2019,6 +2105,8 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
                     return False
         return True
 
+    band_pad_edge, band_trace_edge = same_net_band_edges()
+
     def _leg_ok(net, p0, p1, layer, width, vias, skip_uuids=frozenset(), clearance=CLEAR):
         if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < EPS:
             return True
@@ -2044,9 +2132,35 @@ def _legalize_signal_vias(pcb_path: Path) -> int:
             # Track vs foreign via hole (KiCad ``hole_clearance``).
             if path.distance(Point(v["x"], v["y"]).buffer(v["drill"] / 2)) < HOLE_CLEAR:
                 return False
-        return True
-
-    band_pad_edge, band_trace_edge = same_net_band_edges()
+        # Issue #9167: foreign nets are graded above; the same net's fab-view
+        # slit band is graded here, for every site that writes a leg.
+        if band_pad_edge <= 0 and band_trace_edge <= 0:
+            return True
+        return _same_net_leg_band_ok(
+            p0,
+            p1,
+            width,
+            [
+                (
+                    LineString([(s["x1"], s["y1"]), (s["x2"], s["y2"])]).buffer(s["w"] / 2),
+                    s["w"] / 2,
+                )
+                for s in segs
+                if s["net"] == net and s["layer"] == layer
+            ],
+            [
+                Point(v["x"], v["y"]).buffer(v["size"] / 2)
+                for v in vias
+                if v["net"] == net and v["uuid"] not in skip_uuids
+            ],
+            [
+                _pad_box(p).bounds
+                for p in pads
+                if p["net"] == net and not p["is_th"] and p["drill"] <= 0 and layer in p["layers"]
+            ],
+            band_pad_edge,
+            band_trace_edge,
+        )
 
     def _band_ok(net, vx, vy, diameter, skip_uuid):
         """Same-net fab-view slit band at a relocation seat (#9114).
